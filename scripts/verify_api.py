@@ -56,11 +56,22 @@ BASE = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
 MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
 TIMEOUT = int(os.environ.get("VERIFY_TIMEOUT", "900"))
 
-# 僅用於啟發式提示的簡化字集合。刻意排除「后、里、台、面、只、干、云、准」
-# 等同時也是合法繁體的字，避免誤判。這只是輔助線索，最終仍以肉眼判讀為準。
+# 僅用於啟發式提示的簡化字集合。這只是輔助線索，最終仍以肉眼判讀為準。
+#
+# 2026-09-18 擴充：原本漏收「气、摄」等常用字，導致 1.7b 的輸出
+# 「台北目前的天气是多云，气温28摄氏度。」完全沒被偵測到。新增的字都
+# 經過確認 —— 它們在繁體中文裡不會單獨出現（繁體作「氣」「攝」「電」…）。
 SIMPLIFIED_HINTS = set(
     "说这个认确请时间现对开关们会发语词试结论过还种样让从没见觉问题简单杂运执选择输读写学长门车书买验测证"
+    "气电摄东乐爱头医与为义风飞马鸟鱼点无专业师报场银铁图团园农华"
 )
+
+# 這些字在繁體中也合法，但在簡體中可能是「另一個字」的簡化：
+#   ㆍ云 → 雲（多云 vs 多雲）   ㆍ后 → 後   ㆍ里 → 裡   ㆍ只 → 隻
+#   ㆍ干 → 乾/幹   ㆍ准 → 準   ㆍ面 → 麵   ㆍ台 → 臺（但「台灣」為通行寫法）
+# 因此不可逕判為簡體（會大量誤判），也不該完全忽略（會漏判，如「多云」）。
+# 出現時只提出警告，交由人工複核，不影響通過與否。
+AMBIGUOUS_HINTS = set("后里台面只干云准")
 
 TOOLS = [
     {
@@ -444,6 +455,7 @@ def test_traditional_chinese():
         return None
 
     hits = sorted(set(answer) & SIMPLIFIED_HINTS)
+    ambiguous = sorted(set(answer) & AMBIGUOUS_HINTS)
     # 把題目或系統提示複述出來，代表模型在「處理這個問題」而不是「回答它」，
     # 也就是思考內容外流到 response。這種輸出即使沒有簡化字也不算通過。
     leaked = prompt in answer or system in answer
@@ -453,6 +465,10 @@ def test_traditional_chinese():
         print(f"  ✗ 偵測到簡化字：{''.join(hits)}（啟發式，請複核）")
     else:
         print("  ✓ 未偵測到常見簡化字")
+    if ambiguous:
+        print(f"  ! 另有繁體亦合法的字：{''.join(ambiguous)}")
+        print("    這些字在簡體中可能是別的字的簡化（云→雲、后→後…），")
+        print("    清單無法判定，請人工複核整句。")
     if leaked:
         print("  ✗ 複述了題目或系統提示 —— 這是外流的思考內容，不是答案")
     if truncated:

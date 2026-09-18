@@ -89,6 +89,25 @@ for ch in "后里台面只干云准":
 for ch in "说这个请时间对开关们会":
     assert ch in v.SIMPLIFIED_HINTS, f"漏收簡化字：{ch}"
 
+# 2026-09-18 擴充：原本漏收這些字，導致 1.7b 的實際輸出
+# 「台北目前的天气是多云，气温28摄氏度。」完全沒被偵測到。
+for ch in "气电摄东乐爱头医与为义风飞马鸟鱼点无专业师报场银铁图团园农华":
+    assert ch in v.SIMPLIFIED_HINTS, f"漏收簡化字：{ch}"
+# 這句是真實的漏判案例，必須被擋下來
+_l1 = "台北目前的天气是多云，气温28摄氏度。"
+assert set(_l1) & v.SIMPLIFIED_HINTS, "1.7b 的簡體輸出必須被偵測到"
+# 對照：4b 的繁體輸出必須乾淨
+_l4 = "台北現在天氣多雲，溫度28度。"
+assert not (set(_l4) & v.SIMPLIFIED_HINTS), "4b 的繁體輸出不可誤判"
+
+# ── AMBIGUOUS_HINTS：這幾個字只能警告，不能逕判 ──────────
+for ch in "后里台面只干云准":
+    assert ch in v.AMBIGUOUS_HINTS, f"漏收易混淆字：{ch}"
+assert not (v.AMBIGUOUS_HINTS & v.SIMPLIFIED_HINTS), "兩個集合不可重疊"
+# 「多云」的云只能警告；「天气」的气則可逕判 —— 兩者必須分開
+assert "云" not in v.SIMPLIFIED_HINTS and "云" in v.AMBIGUOUS_HINTS
+assert "气" in v.SIMPLIFIED_HINTS
+
 # ── _answer_compliant：答案本身也要檢查，不能只看 thinking 欄位 ──
 # 這是 2026-09-18 第二次實跑後補的迴歸測試。當時 think=false 清空了
 # thinking 欄位，看似成功，實際上思考內容被搬進 response、長達 252 字
