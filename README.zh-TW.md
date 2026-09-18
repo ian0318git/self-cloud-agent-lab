@@ -324,4 +324,30 @@ Qwen2.5 **確實有** 3B 與 7B —— 若原本指的是這個，`qwen2.5:3b`�
 
 ## 授權
 
-個人 POC 專案。
+本專案自身的程式碼 —— compose 檔、腳本、文件 —— 採 **[MIT 授權](LICENSE)**。
+
+**這不涵蓋它所拉取的容器映像檔。** 各相依元件有其各自的授權：
+
+| 元件 | 授權 | 備註 |
+|---|---|---|
+| [Ollama](https://github.com/ollama/ollama) | MIT | |
+| [Open WebUI](https://github.com/open-webui/open-webui) | [Open WebUI License](https://github.com/open-webui/open-webui/blob/main/LICENSE) | ⚠️ **不是 MIT。** BSD-3 風格**外加品牌條款** —— 見下方說明 |
+| [mcpo](https://github.com/open-webui/mcpo) | MIT | 第二階段 |
+| [LangGraph](https://github.com/langchain-ai/langgraph) 函式庫 | MIT | `langgraph-server` **容器**為 Elastic License 2.0 —— 見 [D-007](DECISIONS.md) |
+| Qwen3 模型 | Apache-2.0 | Qwen2.5 的 3B 與 72B 改用 Qwen 授權 |
+
+### Open WebUI 的品牌條款
+
+Open WebUI 授權的第 4 條禁止變更、移除、遮蔽或替換任何「Open WebUI」品牌識別
+—— 包括名稱、標誌與視覺標識 —— **除非**符合以下情形：
+
+1. 該部署在任何滾動的 30 天期間內，**終端使用者不超過 50 人**，或
+2. 已取得著作權人的事前書面許可，或
+3. （授權中載明的其他條件）
+
+**這對個人 POC 完全不構成影響** —— 只有一個使用者，且本專案根本沒有修改介面。
+只有在日後想以 Open WebUI 為基礎打造服務超過 50 人的產品時才會相關。
+在你對「重新品牌化」這件事產生期待之前，值得先知道。
+
+另需說明：在 compose 檔中單純引用一個映像檔，並不會讓該映像檔的授權
+延伸到本 repo —— 上方的 MIT 授權涵蓋的是**本 repo 內**的程式碼。

@@ -334,4 +334,36 @@ Qwen license).
 
 ## License
 
-Personal POC project.
+This project's own code — the compose file, scripts, and documentation — is
+**[MIT licensed](LICENSE)**.
+
+**This does not cover the container images it pulls.** Each dependency carries
+its own license:
+
+| Component | License | Note |
+|---|---|---|
+| [Ollama](https://github.com/ollama/ollama) | MIT | |
+| [Open WebUI](https://github.com/open-webui/open-webui) | [Open WebUI License](https://github.com/open-webui/open-webui/blob/main/LICENSE) | ⚠️ **Not MIT.** BSD-3-style **plus a branding clause** — see below. |
+| [mcpo](https://github.com/open-webui/mcpo) | MIT | Phase 2 |
+| [LangGraph](https://github.com/langchain-ai/langgraph) library | MIT | The `langgraph-server` *container* is Elastic License 2.0 — see [D-007](DECISIONS.md) |
+| Qwen3 models | Apache-2.0 | Qwen2.5's 3B and 72B use the Qwen license instead |
+
+### The Open WebUI branding clause
+
+Condition 4 of the Open WebUI License prohibits altering, removing, obscuring,
+or replacing any "Open WebUI" branding — name, logo, or visual identifiers —
+**except** where:
+
+1. the deployment has **no more than 50 end users** in any rolling 30-day
+   period, or
+2. prior written permission has been obtained, or
+3. (further conditions stated in the license)
+
+**This is irrelevant to a personal POC** — one user, and this project does not
+modify the interface at all. It becomes relevant only if you later build a
+product on top of Open WebUI serving more than 50 people. Worth knowing before
+you get attached to the idea of rebranding it.
+
+Note that merely referencing an image in a compose file does not make the
+image's license apply to this repository — the MIT license above covers the
+code in *this* repo.
