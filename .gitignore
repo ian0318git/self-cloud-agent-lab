@@ -11,6 +11,10 @@ logs/
 tmp/
 .cache/
 
+# Python
+__pycache__/
+*.pyc
+
 # 編輯器 / 系統
 .vscode/
 .idea/
