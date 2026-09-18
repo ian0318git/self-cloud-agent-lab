@@ -82,6 +82,36 @@ for ch in "后里台面只干云准":
 for ch in "说这个请时间对开关们会":
     assert ch in v.SIMPLIFIED_HINTS, f"漏收簡化字：{ch}"
 
+# ── _suppress_chat / _suppress_generate：沿用機制 ────────
+# 這兩個函式決定「測試 2 找到的關閉方式，如何套用到後續測試」。
+# 錯在這裡不會有例外，只會安靜地讓後續測試失去效力，因此值得鎖住。
+_CHAT_CASES = {"think_false": True, "raw": False, "no_think": False, None: False}
+for state, should_set in _CHAT_CASES.items():
+    v.SUPPRESSION = state
+    payload = v._suppress_chat({})
+    assert ("think" in payload) is should_set, f"chat 沿用錯誤：{state}"
+    # chat API 不吃 raw 或 /no_think，不可污染 messages 之外的其他欄位
+    assert set(payload) <= {"think"}
+
+v.SUPPRESSION = "think_false"
+assert v._suppress_generate({}, "問題")["think"] is False
+
+v.SUPPRESSION = "no_think"
+assert v._suppress_generate({}, "問題")["prompt"] == "問題 /no_think"
+
+v.SUPPRESSION = "raw"
+out = v._suppress_generate({"prompt": "問題", "system": "系統"}, "問題", system="系統")
+assert out["raw"] is True
+# raw 模式必須移除 system，否則 Ollama 會忽略 raw 提示詞
+assert "system" not in out
+assert "系統" in out["prompt"] and "問題" in out["prompt"]
+
+v.SUPPRESSION = None
+assert v._suppress_generate({}, "問題") == {}
+
+# 復原模組狀態，避免影響後續斷言
+v.SUPPRESSION = None
+
 # ── TOOLS：結構必須符合 Ollama 的 tools 格式 ─────────────
 tool = v.TOOLS[0]
 assert tool["type"] == "function"

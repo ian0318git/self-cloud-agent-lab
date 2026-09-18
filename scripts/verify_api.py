@@ -20,6 +20,18 @@ v2 修正（源自 2026-09-18 首次實跑的三個發現）：
   • 空輸出必須明講「（空）」。v1 讓繁體中文檢測在空字串上誤判為通過 ——
     這是典型的靜默失敗。
   • num_predict 上限過小，模型還在思考就被截斷，多輪測試因此假性失敗。
+
+v3 修正（源自同一次實跑，但屬於判準本身的缺陷）：
+  • 測試 2 原本以「token 數是否提早收斂」判斷 thinking 是否被關閉，這是錯的
+    判準 —— 模型即使不思考，也可能對模糊的提示詞長篇回覆。實測資料反而顯示
+    think=false 與 raw 兩種方式的 thinking 欄位都是空的（相對於基準組的 610
+    字），也就是「有效」卻被判成無效。現改以 thinking 欄位本身為判準，並加
+    入基準對照組同時列出。
+  • 測試 2 找到可用的關閉方式後，測試 3/4/5 會沿用（SUPPRESSION），讓整輪
+    更接近實際使用情境，也讓測試 5 能在額度內產出可判讀的答案。
+
+用法：
+  VERIFY_ONLY=2 python3 verify_api.py      只跑測試 2（見 scripts/verify.sh）
 """
 
 import json
@@ -127,6 +139,9 @@ THINK_OPEN = "<" + "think" + ">"
 THINK_CLOSE = "</" + "think" + ">"
 THINK_BLOCK_CLOSED = THINK_OPEN + "\n\n" + THINK_CLOSE + "\n\n"
 
+# 由測試 2 決定；值為 None / "no_think" / "think_false" / "raw"
+SUPPRESSION = None
+
 
 def _chatml(prompt, system=None):
     """手工組出 Qwen3 的 ChatML，並預填一個「已關閉的思考區塊」。
@@ -188,88 +203,102 @@ def test_baseline():
 def test_suppression():
     """比較三種關閉 thinking 的方式，看哪一種真的有效。
 
-    判準是「是否提早收斂」：答案只有兩個字，若 thinking 關閉，模型會遠在
-    上限之前就停下；若仍開啟，會一路撞上 num_predict 上限。
+    判準以 thinking 欄位本身為準，不是「token 數是否提早收斂」。
+    首版用 token 數當判準，結果把有效的關閉方式誤判為無效 —— 因為模型
+    即使不思考，也可能對模糊的提示詞長篇回覆。這裡改用有明確短答案的
+    提示詞，並把基準組一起列出來對照。
     """
+    global SUPPRESSION
+
     print("\n【2/5】關閉 thinking 的三種方式（效率關鍵）", flush=True)
-    probe = "說：正常"
-    cap = 128
-    working = []
+    probe = "1+1 等於多少？只回答數字。"
+    cap = 256
 
-    def method_prompt():
-        return _post(
-            "/api/generate",
-            {
-                "model": MODEL,
-                "prompt": probe + " /no_think",
-                "stream": False,
-                "options": {"num_predict": cap},
-            },
-        )
-
-    def method_think_param():
-        return _post(
-            "/api/generate",
-            {
-                "model": MODEL,
-                "prompt": probe,
-                "stream": False,
-                "think": False,
-                "options": {"num_predict": cap},
-            },
-        )
-
-    def method_raw():
-        return _post(
-            "/api/generate",
-            {
-                "model": MODEL,
-                "prompt": _chatml(probe),
-                "raw": True,
-                "stream": False,
-                "options": {"num_predict": cap},
-            },
-        )
-
-    methods = (
-        ("提示詞加 /no_think", method_prompt),
-        ("API think=false", method_think_param),
-        ("raw 預填空思考區塊", method_raw),
+    variants = (
+        ("baseline", "基準（不套用任何方式）", {"prompt": probe}),
+        ("no_think", "提示詞加 /no_think", {"prompt": probe + " /no_think"}),
+        ("think_false", "API think=false", {"prompt": probe, "think": False}),
+        ("raw", "raw 預填已關閉的思考區塊", {"prompt": _chatml(probe), "raw": True}),
     )
 
-    for name, fn in methods:
+    working = []
+    baseline_think = None
+
+    for key, name, extra in variants:
+        payload = {
+            "model": MODEL,
+            "stream": False,
+            "options": {"num_predict": cap},
+        }
+        payload.update(extra)
         try:
-            resp = fn()
+            t0 = time.time()
+            resp = _post("/api/generate", payload)
+            wall = time.time() - t0
         except urllib.error.HTTPError as exc:
             print(f"  ✗ {name}：API 拒絕（HTTP {exc.code}）")
             continue
+
+        think = _thinking_text(resp)
         count = resp.get("eval_count") or 0
-        if count < cap and not _thinking_text(resp).strip():
-            print(f"  ✓ {name}：有效（{count} tokens 即收斂，無思考內容）")
-            working.append(name)
+        is_baseline = key == "baseline"
+        think_off = not think.strip()
+
+        if is_baseline:
+            baseline_think = len(think)
+            note = "（對照組）"
+        elif think_off:
+            working.append(key)
+            note = "  ← thinking 已關閉"
         else:
-            print(f"  ✗ {name}：{_thinking_state(resp)}｜{count} tokens")
+            note = ""
+
+        print(f"  • {name}{note}")
+        print(f"      思考欄位：{len(think)} 字")
+        print(f"      最終答案：{_show(resp.get('response'), 80)}")
+        print(f"      生成    ：{count} tokens / {wall:.0f}s")
 
     if working:
-        print(f"  可用的關閉方式：{'、'.join(working)}")
+        SUPPRESSION = working[0]
+        print(f"  有效的關閉方式：{SUPPRESSION}（後續測試將沿用）")
+        if baseline_think is not None:
+            print(f"  對照：基準組的思考欄位有 {baseline_think} 字")
     else:
-        print("  三種方式皆無效 —— thinking 無法關閉，這是目前最大的效率損失。")
+        print("  三種方式皆無效 —— 模型一律進入思考模式。")
     return working
+
+
+def _suppress_chat(payload):
+    """測試 3/4 用：chat API 只認得 think 參數。"""
+    if SUPPRESSION == "think_false":
+        payload["think"] = False
+    return payload
+
+
+def _suppress_generate(payload, prompt, system=None):
+    """測試 5 用：generate API，依測試 2 的結果套用可用的關閉方式。"""
+    if SUPPRESSION == "think_false":
+        payload["think"] = False
+    elif SUPPRESSION == "raw":
+        payload.pop("system", None)
+        payload["prompt"] = _chatml(prompt, system=system)
+        payload["raw"] = True
+    elif SUPPRESSION == "no_think":
+        payload["prompt"] = payload.get("prompt", prompt) + " /no_think"
+    return payload
 
 
 def test_tool_single():
     """單輪 tool calling —— 這是整個 MCP 階段的前提。"""
     print("\n【3/5】Tool calling — 單輪（MCP 階段的前提）", flush=True)
-    resp = _post(
-        "/api/chat",
-        {
-            "model": MODEL,
-            "messages": [{"role": "user", "content": "台北現在天氣如何？"}],
-            "tools": TOOLS,
-            "stream": False,
-            "options": {"num_predict": 384},
-        },
-    )
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "台北現在天氣如何？"}],
+        "tools": TOOLS,
+        "stream": False,
+        "options": {"num_predict": 384},
+    }
+    resp = _post("/api/chat", _suppress_chat(payload))
     message = resp.get("message", {})
     calls = message.get("tool_calls") or []
     count, dur, tps = _speed(resp)
@@ -305,16 +334,14 @@ def test_tool_multi(first_calls):
             ),
         },
     ]
-    resp = _post(
-        "/api/chat",
-        {
-            "model": MODEL,
-            "messages": messages,
-            "tools": TOOLS,
-            "stream": False,
-            "options": {"num_predict": 512},
-        },
-    )
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "tools": TOOLS,
+        "stream": False,
+        "options": {"num_predict": 512},
+    }
+    resp = _post("/api/chat", _suppress_chat(payload))
     message = resp.get("message", {})
     content = message.get("content") or ""
     again = message.get("tool_calls") or []
@@ -340,15 +367,19 @@ def test_traditional_chinese():
     不可與「通過」混為一談。
     """
     print("\n【5/5】繁體中文輸出控制", flush=True)
+    system = "你必須一律使用繁體中文回答，嚴禁使用簡體字。"
+    prompt = "用一句話說明什麼是 MCP。"
+    if SUPPRESSION:
+        print(f"  （沿用測試 2 的關閉方式：{SUPPRESSION}）")
+    payload = {
+        "model": MODEL,
+        "system": system,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": 512},
+    }
     resp = _post(
-        "/api/generate",
-        {
-            "model": MODEL,
-            "system": "你必須一律使用繁體中文回答，嚴禁使用簡體字。",
-            "prompt": "用一句話說明什麼是 MCP。",
-            "stream": False,
-            "options": {"num_predict": 512},
-        },
+        "/api/generate", _suppress_generate(payload, prompt, system=system)
     )
     answer = resp.get("response") or ""
     count, dur, tps = _speed(resp)
@@ -395,18 +426,25 @@ def main():
         return 2
     print(f"前置檢查通過：模型 {MODEL} 存在")
 
-    speed = _guard(test_baseline)
-    working = _guard(test_suppression) or []
-    calls = _guard(test_tool_single)
-    multi_ok = _guard(test_tool_multi, calls)
-    chinese_ok = _guard(test_traditional_chinese)
+    only = {s.strip() for s in os.environ.get("VERIFY_ONLY", "").split(",") if s.strip()}
+    if only:
+        print(f"\n（僅執行測試 {'、'.join(sorted(only))}）")
+
+    def want(n):
+        return not only or str(n) in only
+
+    speed = _guard(test_baseline) if want(1) else None
+    working = (_guard(test_suppression) or []) if want(2) else []
+    calls = _guard(test_tool_single) if want(3) else None
+    multi_ok = _guard(test_tool_multi, calls) if want(4) else False
+    chinese_ok = _guard(test_traditional_chinese) if want(5) else None
 
     # ── 總結 ────────────────────────────────────────────
     print("\n" + "=" * 62)
     print(" 總結")
     print("=" * 62)
     print(f"  生成速度      : {f'{speed:.2f} tok/s' if speed else '未取得（測試 1 失敗）'}")
-    print(f"  可關閉 thinking: {'、'.join(working) if working else '沒有可用方式'}")
+    print(f"  可關閉 thinking: {working[0] if working else '沒有可用方式'}")
     print(f"  單輪 tool call: {'通過' if calls else '未通過'}")
     print(f"  多輪 tool call: {'通過' if multi_ok else '未通過'}")
     if chinese_ok is None:
@@ -414,6 +452,10 @@ def main():
     else:
         print(f"  繁體中文控制  : {'通過' if chinese_ok else '未通過'}")
     print("=" * 62)
+
+    if only:
+        print("（僅執行部分測試，不做整體結論）")
+        return 0
 
     critical = bool(speed) and bool(calls) and bool(multi_ok)
     if critical:

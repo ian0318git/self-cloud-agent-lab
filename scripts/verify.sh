@@ -6,6 +6,11 @@
 # ai-net 互通，因此借用已在執行的 open-webui 容器（內建 Python）來發請求。
 #
 # 這樣做同時避開了「在終端機貼上長指令被折行」的問題 —— 腳本以檔案形式進版控。
+#
+# 用法：
+#   bash scripts/verify.sh          跑全部五項（約 10 分鐘）
+#   bash scripts/verify.sh 2        只跑第 2 項（關閉 thinking，約 1 分鐘）
+#   bash scripts/verify.sh 2,5      只跑第 2 與第 5 項
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -15,6 +20,7 @@ load_env
 
 MODEL="${OLLAMA_MODEL:-qwen3:4b}"
 REMOTE=/tmp/verify_api.py
+VERIFY_ONLY="${1:-}"
 
 # ── 前置檢查 ────────────────────────────────────────────
 running_services() {
@@ -42,7 +48,11 @@ if ! $COMPOSE cp "$PROJECT_ROOT/scripts/verify_api.py" "open-webui:$REMOTE"; the
   exit 1
 fi
 
-info "開始實測（整輪約 10 分鐘，請勿中斷）..."
+if [[ -n "$VERIFY_ONLY" ]]; then
+  info "開始實測（僅測試 $VERIFY_ONLY，請勿中斷）..."
+else
+  info "開始實測（整輪約 10 分鐘，請勿中斷）..."
+fi
 echo
 
 # 暫時關閉 errexit，才能取得測試的結束碼再自行判斷
@@ -50,6 +60,7 @@ set +e
 $COMPOSE exec -T \
   -e "OLLAMA_MODEL=$MODEL" \
   -e "OLLAMA_BASE_URL=http://ollama:11434" \
+  -e "VERIFY_ONLY=$VERIFY_ONLY" \
   open-webui python3 "$REMOTE"
 STATUS=$?
 set -e
