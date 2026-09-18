@@ -1,57 +1,62 @@
 # self-cloud-agent-lab
 
-在**免費雲端額度內**驗證一套 self-hosted AI 平台的可行性：
-自己執行 LLM、讀自己的資料、透過 MCP 使用工具、並讓 agent 自主完成工作。
+**English** | [繁體中文](README.zh-TW.md)
 
-> **本專案的定位是「驗證沙箱」，不是常駐服務。**
-> 原因見下方「為什麼不是常駐服務」一節 —— 這是最重要的前提，請先讀。
+A proof of concept validating whether a self-hosted AI platform can run **inside free cloud quotas**:
+running your own LLM, reading your own data, using tools over MCP, and letting an agent work autonomously.
 
----
-
-## 目錄
-
-- [為什麼不是常駐服務](#為什麼不是常駐服務)
-- [架構](#架構)
-- [快速開始](#快速開始)
-- [驗證清單](#驗證清單)
-- [額度管理](#額度管理)
-- [第二階段](#第二階段)
-- [疑難排解](#疑難排解)
+> **This project is a validation sandbox, not a persistent service.**
+> The reason is below and it is the single most important thing to understand before you start.
 
 ---
 
-## 為什麼不是常駐服務
+## Table of contents
 
-GitHub Codespaces 免費額度的實際換算：
+- [Why this is not a persistent service](#why-this-is-not-a-persistent-service)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Verification checklist](#verification-checklist)
+- [Quota management](#quota-management)
+- [Phase 2](#phase-2)
+- [Codespaces gotchas](#codespaces-gotchas)
+- [Troubleshooting](#troubleshooting)
 
-| 項目 | 免費額度 | 換算後的真實可用量 |
+---
+
+## Why this is not a persistent service
+
+GitHub Codespaces free tier, converted into real numbers:
+
+| Resource | Free allowance | What it actually buys |
 |---|---|---|
-| Compute | 120 core-hours/月 | 2-core 機器消耗 2 core-hours/小時 → **僅 60 真實小時/月** |
-| Storage | 15 GB-month | **codespace 存在期間就計費，停止狀態照算** |
-| Idle timeout | 預設 30 分鐘 | 閒置即自動停止 |
-| Port 可見性 | **預設 private** | 需手動改為 public |
+| Compute | 120 core-hours/month | 2-core burns 2 core-hours/hour → **only 60 real hours/month** |
+| Storage | 15 GB-month | **Billed while the codespace exists — including when stopped** |
+| Idle timeout | 30 minutes default | 240 minutes maximum |
+| Port visibility | **Private by default** | Must be changed manually to public |
 
-**60 小時 ÷ 30 天 ≈ 每天 2 小時。** 若嘗試 24/7 常駐，
-額度會在 **2.5 天內耗盡**，接著 $0 spending limit 會直接中斷環境。
+**60 hours ÷ 30 days ≈ 2 hours per day.** Running this 24/7 would exhaust the
+entire monthly allowance in **about 2.5 days**, after which the `$0` spending
+limit blocks the environment entirely.
 
-儲存額度的計算方式是：
+Storage is calculated as:
 
 ```
-GB-month = (佔用 GB × 存在小時) ÷ 730
+GB-month = (GB used × hours existing) ÷ 730
 ```
 
-因此要讓一個 codespace 24/7 存在整月，總佔用必須 ≤ 15 GB。
-關鍵陷阱：`docker compose down` 或停止 codespace **都不會停止儲存計費**，
-只有**刪除整個 codespace** 才會。
+So keeping one codespace alive 24/7 for a full month requires total usage ≤ 15 GB.
+**The trap:** neither `docker compose down` nor stopping a codespace stops the
+storage meter. Only **deleting the entire codespace** does.
 
-**結論**：本專案適合用來驗證「這套架構能不能跑、模型夠不夠聰明」，
-驗證完就刪除。若要建立真正常駐的服務，需要另尋宿主（見 [第二階段](#第二階段)）。
+**Conclusion:** this project is for answering *"does the architecture work, and is
+the model smart enough?"* — then delete it. A genuinely persistent deployment needs
+a different host; see [Phase 2](#phase-2).
 
 ---
 
-## 架構
+## Architecture
 
-第一階段（本 repo 已實作）：
+Phase 1 (implemented in this repo):
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -64,41 +69,42 @@ GB-month = (佔用 GB × 存在小時) ÷ 730
 │   │  │  ollama  │◄─────│ open-webui│  │     │
 │   │  │  :11434  │      │   :8080   │  │     │
 │   │  └──────────┘      └─────┬─────┘  │     │
-│   │   （不對外發布）          │        │     │
+│   │   (not published)         │        │     │
 │   └───────────────────────────┼───────┘     │
 │                               │             │
-│                        埠轉發 :3000         │
+│                      port forward :3000     │
 └───────────────────────────────┼─────────────┘
                                 ▼
-                        瀏覽器（Open WebUI）
+                        Browser (Open WebUI)
 ```
 
-| 元件 | 角色 |
+| Component | Role |
 |---|---|
-| **Ollama** | 本地 LLM 推論引擎 |
-| **Qwen3 4B** | 預設模型（2.5 GB，支援 256K context 與 tool calling） |
-| **Open WebUI** | 網頁聊天介面 + 內建 RAG + 原生 MCP 支援 |
+| **Ollama** | Local LLM inference engine |
+| **Qwen3 4B** | Default model (2.5 GB, 256K context, tool calling) |
+| **Open WebUI** | Chat UI + built-in RAG + native MCP support |
 
 ---
 
-## 快速開始
+## Quick start
 
-### 在 Codespaces 上
+### On Codespaces
 
-1. 在 GitHub 上開啟此 repo → **Code** → **Codespaces** → **Create codespace on main**
-2. 選擇 **2-core / 8GB** 機器（**不要選 4-core，會讓額度消耗變成 4 倍**）
-3. 等待建立完成 —— `postCreateCommand` 會自動執行 `scripts/up.sh`，
-   包含下載模型（首次約需數分鐘）
-4. 開啟 **PORTS** 面板 → 點擊 **3000** 埠的網址
-5. 註冊第一個帳號（**它會自動成為管理員**）
-6. 登入後，將 `.env` 的 `ENABLE_SIGNUP` 改為 `false`，再執行：
+1. Open this repo on GitHub → **Code** → **Codespaces** → **Create codespace on main**
+2. Select the **2-core / 8GB** machine (**do not pick 4-core — it quadruples your quota burn**)
+3. Wait for creation — `postCreateCommand` runs `scripts/up.sh` automatically,
+   including the model download (a few minutes on first run)
+4. Open the **PORTS** panel → click the URL for port **3000**
+5. Register the first account (**it automatically becomes the administrator**)
+6. Once logged in, set `ENABLE_SIGNUP=false` in `.env`, then:
    ```bash
    docker compose up -d open-webui
    ```
 
-### 在本機
+### Locally
 
-需求：Docker 與 Compose v2。**至少 8GB RAM**（本機若只有 4GB 請改用 `qwen3:1.7b`）。
+Requires Docker and Compose v2. **At least 8GB RAM**
+(on a 4GB machine, switch to `qwen3:1.7b`).
 
 ```bash
 git clone https://github.com/ian0318git/self-cloud-agent-lab.git
@@ -106,162 +112,226 @@ cd self-cloud-agent-lab
 bash scripts/up.sh
 ```
 
-開啟 <http://localhost:3000>。
+Open <http://localhost:3000>.
 
-### 指令一覽
+### Commands
 
-| 指令 | 用途 |
+| Command | Purpose |
 |---|---|
-| `bash scripts/up.sh` | 啟動堆疊 + 確保模型存在（冪等） |
-| `bash scripts/down.sh` | 停止容器，**保留**模型與對話紀錄 |
-| `bash scripts/down.sh --purge` | 停止容器並**刪除**所有 volume |
-| `bash scripts/pull-model.sh` | 單獨重試模型下載 |
-| `bash scripts/status.sh` | 顯示容器狀態、模型清單、記憶體用量 |
+| `bash scripts/up.sh` | Start the stack + ensure the model exists (idempotent) |
+| `bash scripts/down.sh` | Stop containers, **keep** models and chat history |
+| `bash scripts/down.sh --purge` | Stop containers and **delete** all volumes |
+| `bash scripts/pull-model.sh` | Retry the model download on its own |
+| `bash scripts/status.sh` | Container status, model list, memory usage |
 
 ---
 
-## 驗證清單
+## Verification checklist
 
-本專案**沒有自動化測試** —— 這是一個以「驗證可行性」為目的的 POC，
-且核心行為（模型推論品質、agent 工具呼叫穩定性）本質上需要人工判斷。
-以下為手動驗證步驟。
+This project has **no automated tests**. It is a feasibility POC, and its core
+behaviour — inference quality, MCP tool-calling reliability — is inherently a
+human judgement call. The steps below are performed manually.
 
-### 第一階段：基礎堆疊
+### Phase 1: base stack
 
-- [ ] **容器健康** — `bash scripts/status.sh` 顯示兩個容器皆為 `running`，
-      且 `open-webui` 的 healthcheck 為 `healthy`
-- [ ] **模型就緒** — `status.sh` 的模型清單中出現 `qwen3:4b`
-- [ ] **推論正常** — 在 Open WebUI 中送出「用三句話解釋什麼是 MCP」，
-      約 10–30 秒內取得合理回答
-- [ ] **串流正常** — 回答是逐字浮現，而非停頓後一次出現
-- [ ] **記憶體未爆** — 對話進行中，`status.sh` 的 `Mem` 一行顯示
-      available 仍有餘裕（未被 swap 吃光）
-- [ ] **模型卸載** — 靜置超過 `OLLAMA_KEEP_ALIVE` 後，
-      `docker stats` 顯示 ollama 容器記憶體明顯下降
-- [ ] **重啟存活** — `bash scripts/down.sh && bash scripts/up.sh` 後，
-      **模型不需重新下載**，且先前的對話紀錄仍在
+- [ ] **Containers healthy** — `bash scripts/status.sh` shows both containers
+      `running` and `open-webui` as `healthy`
+- [ ] **Model ready** — `qwen3:4b` appears in the model list
+- [ ] **Inference works** — ask "explain MCP in three sentences" in Open WebUI;
+      a sensible answer arrives within 10–30 seconds
+- [ ] **Streaming works** — the answer appears token by token, not in one block
+      after a pause
+- [ ] **Memory holds** — during a conversation, the `Mem` line in `status.sh`
+      still shows headroom (not fully consumed by swap)
+- [ ] **Model unloads** — after idling past `OLLAMA_KEEP_ALIVE`, `docker stats`
+      shows the ollama container's memory drop noticeably
+- [ ] **Survives restart** — after `bash scripts/down.sh && bash scripts/up.sh`,
+      the model is **not** re-downloaded and prior conversations are still there
 
-### 第二階段：RAG
+### Phase 2: RAG
 
-- [ ] 在 Open WebUI 的 **Workspace → Knowledge** 建立知識庫
-- [ ] 上傳一份 PDF 或 Markdown 文件
-- [ ] 對該知識庫提問，確認回答引用了文件內容而非憑空生成
-- [ ] **反例測試**：詢問一個文件中**不存在**的細節，
-      確認模型回答「不知道」而非編造
+- [ ] Create a knowledge base under **Workspace → Knowledge**
+- [ ] Upload a PDF or Markdown document
+- [ ] Ask a question about it and confirm the answer cites the document rather
+      than being generated from nothing
+- [ ] **Negative test:** ask about a detail that is *not* in the document and
+      confirm the model says it doesn't know instead of inventing an answer
 
-### 第二階段：MCP
+> **Note for non-English documents:** Open WebUI's default embedding model is
+> `sentence-transformers/all-MiniLM-L6-v2` — English-only, 384 dimensions,
+> ~500MB RAM. For Chinese or other non-English documents, retrieval quality will
+> be poor unless you switch to a multilingual embedding model via
+> `RAG_EMBEDDING_ENGINE=ollama` and `RAG_EMBEDDING_MODEL=nomic-embed-text`.
+> **Changing the embedding model later requires re-embedding every document**,
+> so decide before you upload. Note also that a larger embedding model has been
+> reported to spike RAM from 2GB to 14GB — on a small VM, budget for it.
 
-- [ ] 在 **Admin Settings → External Tools** 新增一個 MCP server
-      （Type 選 **MCP (Streamable HTTP)**，不是 OpenAPI）
-- [ ] 確認工具出現在對話的 tools 清單中，且帶有 `server:mcp:` 前綴
-- [ ] 觸發一次工具呼叫，確認**模型自行決定**使用工具（而非被明確指示）
-- [ ] **多輪測試**：需要連續呼叫兩次以上工具的任務，
-      確認 4B 模型能維持流程不中斷
+### Phase 2: MCP
 
-> **本階段最關鍵的待驗證假設**：4B 等級的模型能否穩定執行多輪 tool calling。
-> 若失敗率過高，需改用 `qwen3:8b` 並接受記憶體壓力，或改用更大的機器。
+- [ ] Add an MCP server under **Admin Settings → External Tools**
+      (Type must be **MCP (Streamable HTTP)** — not OpenAPI)
+- [ ] Confirm the tool appears in the conversation's tool list with a
+      `server:mcp:` prefix
+- [ ] Trigger a tool call and confirm the model **decides on its own** to use
+      the tool rather than being explicitly told to
+- [ ] **Multi-turn test:** a task requiring two or more sequential tool calls —
+      confirm the 4B model can hold the flow together
+
+> **The critical unknown for this phase:** whether a 4B-class model can perform
+> reliable multi-turn tool calling. If the failure rate is too high, either move
+> to `qwen3:8b` and accept the memory pressure, or use a larger machine.
 
 ---
 
-## 額度管理
+## Quota management
 
-### 查看用量
+### Check your usage
 
-<https://github.com/settings/billing> — 會有兩個獨立的進度條：
+<https://github.com/settings/billing> — two independent meters:
 
 - **Compute** — 120 core-hours
 - **Storage** — 15 GB-month
 
-### 降低消耗的做法
+### Reducing consumption
 
-| 做法 | 效果 |
+| Action | Effect |
 |---|---|
-| 選 2-core 而非 4-core | 額度消耗減半 |
-| 工作結束即 `bash scripts/down.sh` | 停止 compute 計費 |
-| 用 `gh codespace stop -c <name>` 停止 codespace | 停止 compute 計費 |
-| **刪除** codespace（非僅停止） | 停止**儲存**計費 |
-| 關閉編輯器分頁 | 避免被判定為活躍而持續計費 |
+| Choose 2-core over 4-core | Halves quota burn |
+| Run `bash scripts/down.sh` when done | Stops compute billing |
+| `gh codespace stop -c <name>` | Stops compute billing |
+| **Delete** the codespace (not just stop) | Stops **storage** billing |
+| Close the editor tab | Avoids being counted as active |
 
-### 重要提醒
+### Important
 
-執行中的程序、終端機輸出、或已開啟的埠流量**都會讓 codespace 被判定為活躍**，
-即使你人不在電腦前。最保險的做法永遠是手動停止。
+Running processes, terminal output, and traffic on an open port all count as
+activity — **even when you are away from the keyboard**. Manually stopping is
+always the safe move.
+
+Once either quota is exhausted and no payment method is on file, you **cannot
+create or resume codespaces** until the monthly reset.
 
 ---
 
-## 第二階段
+## Phase 2
 
-Open WebUI **自 v0.6.31 起原生支援 MCP**，且內建 agentic mode 的工具已涵蓋
-原計畫多數需求：
+Open WebUI has supported MCP **natively since v0.6.31**, and its built-in agentic
+tools already cover most of the original plan:
 
-| 原計畫需求 | Open WebUI 內建工具 |
+| Original requirement | Open WebUI built-in tool |
 |---|---|
-| RAG 文件知識庫 | `query_knowledge_bases` / `search_knowledge_files` / `view_knowledge_file` |
-| 記憶 | `search_memories` / `add_memory` |
-| 網路檢索 | `search_web` / `fetch_url` |
-| 筆記 / 對話歷史 | `search_notes` / `write_note` / `search_chats` |
+| RAG knowledge base | `query_knowledge_bases` / `search_knowledge_files` / `view_knowledge_file` |
+| Memory | `search_memories` / `add_memory` |
+| Web retrieval | `search_web` / `fetch_url` |
+| Notes / chat history | `search_notes` / `write_note` / `search_chats` |
 
-**因此 LangGraph 暫不引入** —— 僅在出現「需要自訂多步驟 workflow 或明確狀態機」
-的需求時才評估。理由與完整取捨見 [`DECISIONS.md`](DECISIONS.md) 的 D-005。
+**LangGraph is therefore not introduced for now** — it is evaluated only when a
+need appears for custom multi-step workflows or an explicit state machine.
+See [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 
-### 啟用 MCP
+> **Licensing warning, verified:** the `langgraph-server` / `langgraph-api`
+> production container image is **Elastic License 2.0**. Self-hosting it in
+> production requires a license key (`LANGSMITH_API_KEY` on Plus or higher, or
+> `LANGGRAPH_CLOUD_LICENSE_KEY`); without one it raises `INVALID_LICENSE` at
+> startup. The `langgraph` **library** is MIT and free — use it inside your own
+> service, or use `langgraph dev`, and avoid the commercial server image.
 
-`ENABLE_MCP=true` 已預設開啟。接著：
+### Enabling MCP
+
+`ENABLE_MCP=true` is already set. Then:
 
 1. **Admin Settings → External Tools** → **+**
-2. Type 選 **MCP (Streamable HTTP)**
-3. 填入 Server URL 與認證方式
-4. 儲存
+2. Set Type to **MCP (Streamable HTTP)**
+3. Enter the server URL and authentication
+4. Save
 
-> `stdio` 類的本地 MCP server（如 Claude Desktop 用的那些）無法直連，
-> 需透過 **MCPO proxy** 橋接。
+**Known constraints:**
+
+- **Streamable HTTP only** — no stdio, no SSE. This is deliberate
+  (browser and multi-tenant security).
+- **MCP servers are admin-only.** Non-admins can only add OpenAPI servers.
+- **stdio-based servers** (the kind Claude Desktop uses) need the
+  [**mcpo**](https://github.com/open-webui/mcpo) proxy to bridge them to OpenAPI.
+- OAuth 2.1 tools **cannot** be set as model defaults — they need an interactive
+  redirect.
 
 ---
 
-## 疑難排解
+## Codespaces gotchas
 
-### `WEBUI_SECRET_KEY 未設定` 導致啟動失敗
+Verified issues that are easy to lose hours to:
 
-這是刻意的設計，不是 bug。執行 `bash scripts/up.sh` 會自動產生；
-或手動 `cp .env.example .env` 後填入任意 32 bytes 十六進位字串。
+| Gotcha | Detail |
+|---|---|
+| **No GPU, ever** | The Codespaces GPU machine type was **deprecated 2025-08-29**. All inference is CPU-only. |
+| **Slow inference** | A 3B–4B Q4 model on 2 shared vCPUs runs at roughly single-digit tokens/sec. Open WebUI's default 300-second HTTP timeout can be hit by long completions. |
+| **Pulls need ~2× disk** | Model downloads need space for the compressed *and* extracted forms at the same time, so a nearly-full volume fails pulls — sometimes silently. |
+| **Storage may run out first** | Sources disagree on whether storage counts disk *used* or the full 32GB volume allocation. If it is the allocation, one codespace alive for a month is 32 GB-month against a 15 GB-month allowance and runs out in ~2 weeks, before compute does. Watch the billing page. |
+| **`localhost` is not the host** | From inside a devcontainer, reach a host service via `host.docker.internal` (add `--add-host=host.docker.internal:host-gateway` on Linux), or — as this repo does — make Ollama a compose service reachable at `http://ollama:11434`. |
+| **No Ollama devcontainer feature exists** | There is no `ghcr.io/devcontainers/features/ollama`. Every approach installs it via `onCreateCommand`, uses it as a compose service, or points at a host instance. This repo uses the compose-service approach. |
 
-**不要**為了繞過而留空 —— 那會導致第二階段的 MCP 工具在每次容器重建後
-出現 `Error decrypting tokens`。
+---
 
-### 模型下載中斷
+## Troubleshooting
+
+### Startup fails with `WEBUI_SECRET_KEY 未設定`
+
+This is deliberate, not a bug. `bash scripts/up.sh` generates the key
+automatically; or `cp .env.example .env` and fill in any 32-byte hex string.
+
+**Do not** leave it empty to work around this — it causes Phase 2's MCP tools to
+fail with `Error decrypting tokens` after every container rebuild.
+
+### Model download interrupted
 
 ```bash
 bash scripts/pull-model.sh
 ```
 
-Ollama 支援中斷續傳。
+Ollama supports resuming partial downloads.
 
-### 回答速度很慢
+### Responses are very slow
 
-在 2-core 的機器上這是預期行為。可嘗試：
+Expected on a 2-core machine. Try:
 
-- 改用更小的模型：修改 `.env` 的 `OLLAMA_MODEL=qwen3:1.7b`，再執行 `bash scripts/up.sh`
-- 縮短 `OLLAMA_KEEP_ALIVE`（代價是每次對話需重新載入模型）
+- A smaller model: set `OLLAMA_MODEL=qwen3:1.7b` in `.env`, then `bash scripts/up.sh`
+- Shorten `OLLAMA_KEEP_ALIVE` (at the cost of reloading the model each conversation)
 
-### 容器一直重啟 / 被 OOM killer 終止
+### Containers keep restarting / killed by the OOM killer
 
-記憶體不足。依序嘗試：
+Out of memory. In order:
 
-1. 確認 `.env` 的 `OLLAMA_MODEL` 不是 `qwen3:8b` 或更大
-2. `docker stats` 找出是哪個容器在吃記憶體
-3. 縮短 `OLLAMA_KEEP_ALIVE` 讓模型更快釋放
+1. Confirm `OLLAMA_MODEL` in `.env` is not `qwen3:8b` or larger
+2. Use `docker stats` to find which container is consuming memory
+3. Shorten `OLLAMA_KEEP_ALIVE` so the model is released sooner
 
-### 找不到 3000 埠的網址
+### Can't find the port 3000 URL
 
-在 Codespaces 中，埠**預設為 private**，只有在該埠有流量時才會出現在
-**PORTS** 面板。若沒看到，手動加入：
+In Codespaces, ports are **private by default** and only appear in the **PORTS**
+panel once there is traffic. If it's missing, add it manually:
 
-1. **PORTS** 面板 → **Add Port** → 輸入 `3000`
-2. 右鍵該埠 → **Port Visibility** → 依需求選擇
-   （維持 private 即可，只有你能存取）
+1. **PORTS** panel → **Add Port** → enter `3000`
+2. Right-click the port → **Port Visibility** → choose as needed
+   (leaving it private is fine — only you can reach it)
 
 ---
 
-## 授權
+## A note on model naming
 
-個人 POC 專案。
+The original plan specified "Qwen 3B/7B". Those sizes do not exist in **Qwen3**:
+
+| Family | Available sizes |
+|---|---|
+| **Qwen3** | 0.6b · 1.7b · 4b · 8b · 14b · 30b · 32b · 235b |
+| **Qwen2.5** | 0.5b · 1.5b · **3b** · **7b** · 14b · 32b · 72b |
+
+Qwen2.5 **does** have 3B and 7B — so if that is what was meant, `qwen2.5:3b`
+(1.9 GB) is a reasonable alternative to `qwen3:4b`. This repo defaults to
+Qwen3 because it is newer and fully Apache-2.0 (Qwen2.5's 3B and 72B use the
+Qwen license).
+
+---
+
+## License
+
+Personal POC project.

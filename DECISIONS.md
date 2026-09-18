@@ -132,10 +132,95 @@ LangGraph 延後引入，僅在出現「需要自訂多步驟 workflow 或明確
 **理由**：在額度受限的環境中，每一層額外元件都是額外的記憶體開銷與維護成本。
 先驗證既有能力是否足夠，可避免過早最佳化。
 
-**已知限制**：`stdio` 類的本地 MCP server 需透過 **MCPO proxy** 橋接，
-Open WebUI 無法直接連線。
+**已知限制**（2026-09-18 查證）：
+
+- **僅支援 Streamable HTTP** —— 不支援 stdio、不支援 SSE，這是刻意的設計
+  （瀏覽器與多租戶安全考量）。
+- **MCP server 僅限管理員設定**，非管理員只能新增 OpenAPI server。
+- **`stdio` 類的本地 MCP server**（Claude Desktop 用的那種）需透過
+  [**mcpo**](https://github.com/open-webui/mcpo)（4,379★, MIT）橋接為 OpenAPI。
+- **OAuth 2.1 工具無法設為模型預設值** —— 需要互動式重導向。
+- 官方文件仍將 OpenAPI（經由 mcpo）列為多數部署情境的「偏好路徑」。
 
 **待驗證**：4b 等級的模型能否穩定執行多輪 tool calling —— 這是本階段最需要實測的假設。
+
+---
+
+## D-007：不採用 `langgraph-server` 商業容器映像檔
+
+**日期**：2026-09-18
+**狀態**：已決定
+
+**查證結果**：`langgraph-server` / `langgraph-api` 生產容器映像檔採用
+**Elastic License 2.0**。在生產環境自架需要授權金鑰
+（Plus 方案以上的 `LANGSMITH_API_KEY`，或 `LANGGRAPH_CLOUD_LICENSE_KEY`）；
+沒有金鑰會在啟動時直接拋出 `INVALID_LICENSE`。
+
+**決策**：
+- **`langgraph` 函式庫本身是 MIT，可自由使用** —— 若日後確實需要，
+  應將它以函式庫形式嵌入自己的服務，或使用 `langgraph dev`
+- **不採用商業版 server 映像檔**
+
+**理由**：本專案的前提是「完全免費」。引入一個啟動時就需要付費授權的元件，
+會直接違反這個前提，而且是在部署階段才會發現 —— 屬於高成本的延遲失敗。
+
+**與 D-005 的關係**：這是支持「第二階段先不引入 LangGraph」的**第二個獨立理由**。
+D-005 的理由是「既有能力可能已經足夠」，本項的理由是「商業版元件的授權成本」。
+兩者獨立成立。
+
+---
+
+## D-008：RAG 嵌入模型需在上傳文件前決定
+
+**日期**：2026-09-18
+**狀態**：待第二階段實測後確認
+
+**查證結果**：Open WebUI 內建 RAG 的預設嵌入模型為
+`sentence-transformers/all-MiniLM-L6-v2` —— **僅支援英文**、384 維、
+CPU 執行、約 500MB RAM。向量儲存於內嵌的 ChromaDB。
+
+**問題**：本專案的使用者文件預期包含**繁體中文**。
+英文嵌入模型對中文文件的檢索品質會顯著低落，
+這會直接影響第二階段 RAG 驗證結果的有效性 ——
+若未察覺，可能誤判為「RAG 不可行」，而實際上只是嵌入模型選錯。
+
+**決策**：
+- 第二階段上傳任何文件**之前**，先切換至多語言嵌入模型：
+  `RAG_EMBEDDING_ENGINE=ollama` + `RAG_EMBEDDING_MODEL=nomic-embed-text`
+- **切換嵌入模型需要重新嵌入所有既有文件**，因此這是一旦開始上傳就難以回頭的決定
+
+**已知風險**：有回報指出較大的嵌入模型會讓 RAM 從 2GB 暴增至 14GB。
+在 8GB 的 codespace 上，這與 Ollama 主模型直接競爭記憶體。
+需在實測時以 `scripts/status.sh` 密切監控。
+
+---
+
+## D-009：儲存額度的計費基準存疑，採保守策略
+
+**日期**：2026-09-18
+**狀態**：待實測確認
+
+**背景**：GitHub 官方文件描述儲存計費為
+「the amount of disk space the codespace or prebuild occupies」，
+字面上指向「實際佔用」。但社群回報中有說法指其計費的是
+**整個 32GB 的 volume 配置量**，而非實際用量。
+
+**影響**：這個差異很大 ——
+
+| 計費基準 | 單一 codespace 存活一個月的消耗 | 對照 15 GB-month 額度 |
+|---|---|---|
+| 實際佔用（假設 ~9GB） | 9 GB-month | 可存活整月，有餘裕 |
+| 完整配置（32GB） | 32 GB-month | **約兩週即耗盡，比 compute 更早** |
+
+**決策**：無法從文件確認，因此採保守策略 ——
+**假設最壞情況（32GB 配置量計費）**，並在 README 的
+[Codespaces 的坑](README.zh-TW.md#codespaces-的坑)一節中
+明確標示此為未定事項。
+
+**行動**：實際使用時應在第一週就檢查
+<https://github.com/settings/billing> 的儲存進度條，
+以實測數據取代文件推論。這個數字會直接決定
+「codespace 可以保留多久才需要刪除重建」的操作節奏。
 
 ---
 
