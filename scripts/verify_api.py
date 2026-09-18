@@ -415,7 +415,9 @@ def test_traditional_chinese():
         "system": system,
         "prompt": prompt,
         "stream": False,
-        "options": {"num_predict": 512},
+        # 上限放到 1024：thinking 佔絕大部分，512 會來不及講完就被截斷
+        # （2026-09-18 實測即為如此），那樣只能得到「無法判定」。
+        "options": {"num_predict": 1024},
     }
     resp = _post(
         "/api/generate", _suppress_generate(payload, prompt, system=system)
