@@ -1,0 +1,58 @@
+{
+  "name": "self-cloud-agent-lab",
+
+  // 使用官方 base image + docker-in-docker feature。
+  // 不在這裡自訂 Dockerfile，是為了讓 Codespaces 的 prebuild 與
+  // 「以預設映像檔建立的容器不計入儲存額度」這項規則得以適用。
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "dockerDashComposeVersion": "v2"
+    }
+  },
+
+  // 明確要求「至少」2 core / 8GB。
+  // Codespaces 會挑選滿足條件的最小機器，因此這不會導致升級到 4-core。
+  // 之所以明寫，是為了避免誤選 4-core —— 那會讓額度消耗變成 4 倍
+  // （每月 120 core-hours ÷ 4 cores = 僅 30 真實小時）。
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  "forwardPorts": [3000],
+
+  "portsAttributes": {
+    "3000": {
+      "label": "Open WebUI",
+      "onAutoForward": "notify"
+    }
+  },
+
+  // 不要在 forwarded port 上做 port-forwarding 的 11434 —— docker-compose.yml
+  // 已刻意不發布該埠。若日後需要除錯，再取消該檔中的註解並在此加入。
+
+  // postCreateCommand 只在建立 codespace 時執行一次
+  // postStartCommand 每次啟動（含從停止狀態恢復）都執行
+  // up.sh 是冪等的，兩者都呼叫是安全的。
+  "postCreateCommand": "bash scripts/up.sh",
+  "postStartCommand": "bash scripts/up.sh",
+
+  "remoteUser": "vscode",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "redhat.vscode-yaml",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

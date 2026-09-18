@@ -1,0 +1,99 @@
+# self-cloud-agent-lab — 第一階段：Ollama + Open WebUI
+#
+# 設計前提：這是在 GitHub Codespaces 免費額度內運作的「驗證用」堆疊。
+# 額度是有限的（2-core 機器每月 60 真實小時），因此本檔案刻意：
+#   1. 不對外發布 Ollama 埠（Ollama 無任何認證機制）
+#   2. 限制 Ollama 同時載入的模型數與平行度，降低 OOM 風險
+#   3. 透過 healthcheck 確保 Open WebUI 只在 Ollama 就緒後才啟動
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+
+    # 注意：這裡刻意「不」發布 11434 埠。
+    # Ollama 沒有任何認證機制，任何能觸及該埠的人都可以讀取、刪除、推送模型。
+    # open-webui 透過下方的 ai-net 網路以 http://ollama:11434 直達，無需對外暴露。
+    # 若真的需要從 codespace 主機除錯，請改用：
+    #   docker compose exec ollama ollama list
+    # 或暫時取消下列註解（僅綁定 loopback）：
+    # ports:
+    #   - "127.0.0.1:11434:11434"
+
+    environment:
+      # 同時只載入一個模型，避免在 8GB 機器上把記憶體吃光
+      - OLLAMA_MAX_LOADED_MODELS=1
+      # 單一平行請求，降低 KV cache 佔用的記憶體
+      - OLLAMA_NUM_PARALLEL=1
+      # 模型閒置多久後卸載；額度有限時縮短可釋放記憶體
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+
+    volumes:
+      - ollama_storage:/root/.ollama
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    networks:
+      - ai-net
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+
+    ports:
+      - "3000:8080"
+
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+
+      # 必填。Open WebUI 用它加密儲存 MCP 的 OAuth token；
+      # 未設定時每次容器重建都會出現 "Error decrypting tokens"，
+      # 導致 MCP 工具連線失效。由 scripts/up.sh 自動產生。
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY 未設定，請先執行 scripts/up.sh 或複製 .env.example 為 .env}
+
+      # 第二階段 MCP 的總開關（Open WebUI v0.6.31+ 原生支援）
+      - ENABLE_MCP=${ENABLE_MCP:-true}
+
+      # 首次啟動需要註冊管理員帳號，建立完成後請設為 false
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-true}
+
+      - DO_NOT_TRACK=true
+      - SCARF_NO_ANALYTICS=true
+      - ANONYMIZED_TELEMETRY=false
+
+    volumes:
+      - open_webui_storage:/app/backend/data
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+    healthcheck:
+      # open-webui 映像檔保證有 python，用標準庫檢查 /health 以免依賴 curl
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=3).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    networks:
+      - ai-net
+
+volumes:
+  ollama_storage:
+  open_webui_storage:
+
+networks:
+  ai-net:
+    driver: bridge

@@ -1,0 +1,17 @@
+# 機密 —— 絕對不可提交
+.env
+
+# 模型權重若被下載到專案目錄內（正常情況應在 docker volume 中）
+models/
+*.gguf
+
+# 執行期產物
+*.log
+logs/
+tmp/
+.cache/
+
+# 編輯器 / 系統
+.vscode/
+.idea/
+.DS_Store
