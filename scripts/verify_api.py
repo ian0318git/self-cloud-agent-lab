@@ -171,8 +171,19 @@ def _chatml(prompt, system=None):
     return "".join(parts)
 
 
+# _guard 專用的哨兵。回傳它代表「測試本身拋出例外」，
+# 這與「測試正常執行但回傳 None」是兩件不同的事，不可混為一談。
+# 2026-09-18 實測時測試 5 收到 HTTP 500（模型端 unexpected EOF），
+# 就是因為兩者共用 None，總結才會顯示成「無法判定（輸出為空）」——
+# 原因完全錯誤。這與 D-011 記錄的兩次判準失誤是同一類毛病。
+FAILED = object()
+
+
 def _guard(fn, *args):
-    """執行單一測試並捕捉例外，不讓一個測試拖垮整輪。"""
+    """執行單一測試並捕捉例外，不讓一個測試拖垮整輪。
+
+    成功時回傳測試的傳回值；拋出例外時回傳 FAILED。
+    """
     try:
         return fn(*args)
     except urllib.error.HTTPError as exc:
@@ -180,7 +191,7 @@ def _guard(fn, *args):
         print(f"  ✗ HTTP {exc.code}：{body}")
     except Exception as exc:  # noqa: BLE001 - 這裡刻意廣抓，確保失敗可見
         print(f"  ✗ {type(exc).__name__}：{exc}")
-    return None
+    return FAILED
 
 
 # ── 測試 ────────────────────────────────────────────────
@@ -488,8 +499,10 @@ def main():
         return not only or str(n) in only
 
     speed = _guard(test_baseline) if want(1) else None
-    working = (_guard(test_suppression) or []) if want(2) else []
-    calls = _guard(test_tool_single) if want(3) else None
+    working_raw = _guard(test_suppression) if want(2) else []
+    working = working_raw if isinstance(working_raw, list) else []
+    calls_raw = _guard(test_tool_single) if want(3) else None
+    calls = calls_raw if isinstance(calls_raw, list) else None
     multi_ok = _guard(test_tool_multi, calls) if want(4) else False
     chinese_ok = _guard(test_traditional_chinese) if want(5) else None
 
@@ -497,37 +510,46 @@ def main():
     print("\n" + "=" * 62)
     print(" 總結")
     print("=" * 62)
-    # 未執行的測試不可顯示成「未通過」—— 那會讓人以為功能退步了。
-    # 這個缺陷是 2026-09-18 用 VERIFY_ONLY 部分執行時自己製造出來的。
+    def tri(ran, value):
+        """五種狀態必須分得開：未執行 / 執行失敗 / 無法判定 / 通過 / 未通過。
+
+        把它們併成「未通過」會讓人以為功能退步；併成「無法判定」則會掩蓋
+        真正的錯誤。這兩個缺陷都是 2026-09-18 實測時自己製造出來的。
+        """
+        if not ran:
+            return "未執行"
+        if value is FAILED:
+            return "執行失敗（見上方錯誤）"
+        if value is None:
+            return "無法判定（輸出為空）"
+        return "通過" if value else "未通過"
+
     if not want(1):
         speed_text = "未執行"
-    elif speed:
+    elif speed is FAILED:
+        speed_text = "執行失敗（見上方錯誤）"
+    elif isinstance(speed, float):
         speed_text = f"{speed:.2f} tok/s"
     else:
         speed_text = "未取得"
-
-    if not want(5):
-        chinese_text = "未執行"
-    elif chinese_ok is None:
-        chinese_text = "無法判定（輸出為空）"
-    else:
-        chinese_text = "通過" if chinese_ok else "未通過"
 
     print(f"  生成速度      : {speed_text}")
     if working:
         print(f"  可關閉 thinking: {working[0]}（欄位清空且作答正確）")
     else:
         print("  可關閉 thinking: 沒有可用方式 —— 維持預設（thinking 開啟）")
-    print(f"  單輪 tool call: {'通過' if calls else ('未通過' if want(3) else '未執行')}")
-    print(f"  多輪 tool call: {'通過' if multi_ok else ('未通過' if want(4) else '未執行')}")
-    print(f"  繁體中文控制  : {chinese_text}")
+    print(f"  單輪 tool call: {tri(want(3), calls_raw)}")
+    print(f"  多輪 tool call: {tri(want(4), multi_ok)}")
+    print(f"  繁體中文控制  : {tri(want(5), chinese_ok)}")
     print("=" * 62)
 
     if only:
         print("（僅執行部分測試，不做整體結論）")
         return 0
 
-    critical = bool(speed) and bool(calls) and bool(multi_ok)
+    # FAILED 是物件，bool() 為真 —— 必須明確比對，否則「執行失敗」會被
+    # 當成「通過」。這裡刻意不用 bool()，就是要擋掉這種情形。
+    critical = isinstance(speed, float) and bool(calls) and multi_ok is True
     if critical:
         print(" 結論：MCP 階段的核心前提（多輪 tool calling）成立。")
     else:

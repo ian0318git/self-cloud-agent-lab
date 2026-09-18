@@ -70,11 +70,18 @@ assert v._speed({}) == (0, 0.0, None)
 assert v._speed({"eval_count": 5, "eval_duration": 0}) == (5, 0.0, None)
 assert v._speed({"eval_count": None, "eval_duration": None}) == (0, 0.0, None)
 
-# ── _guard：例外必須被吞掉並回傳 None，不得往外炸 ────────
+# ── _guard：例外必須被吞掉並回傳 FAILED，不得往外炸 ──────
 # 註：這兩行會印出 ✗ 訊息，那是 _guard 的預期行為，不是測試失敗。
-assert v._guard(lambda: 1 / 0) is None
+#
+# 回傳 FAILED 而非 None 是關鍵：測試正常執行也可能回傳 None（代表無法
+# 判定）。2026-09-18 測試 5 收到 HTTP 500，就是因為兩者共用 None，
+# 總結才把它顯示成「無法判定（輸出為空）」—— 原因完全錯誤。
+assert v._guard(lambda: 1 / 0) is v.FAILED
 assert v._guard(lambda x: x * 2, 21) == 42
-assert v._guard(lambda: (_ for _ in ()).throw(ValueError("boom"))) is None
+assert v._guard(lambda: (_ for _ in ()).throw(ValueError("boom"))) is v.FAILED
+# FAILED 是物件，bool() 為真 —— 這是它最危險的地方
+assert bool(v.FAILED) is True
+assert v.FAILED is not None
 
 # ── SIMPLIFIED_HINTS：不可誤收繁體亦合法的字 ─────────────
 for ch in "后里台面只干云准":
