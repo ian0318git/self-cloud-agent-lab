@@ -10,7 +10,15 @@
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
       "dockerDashComposeVersion": "v2"
-    }
+    },
+
+    // 必要。devcontainers/base 映像檔「不含」SSH server，
+    // 少了這個 gh codespace ssh 會失敗並顯示：
+    //   "failed to start SSH server: Please check if an SSH server
+    //    is installed in the container."
+    // 官方 Codespaces 預設映像檔本身有 sshd，但我們用的是 base image。
+    // 這不影響 Open WebUI 的瀏覽器存取，只影響 CLI 進容器操作。
+    "ghcr.io/devcontainers/features/sshd:1": {}
   },
 
   // 明確要求「至少」2 core / 8GB。
