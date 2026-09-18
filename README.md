@@ -15,6 +15,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 - [Why this is not a persistent service](#why-this-is-not-a-persistent-service)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
+- [Securing remote access](#securing-remote-access)
 - [Verification checklist](#verification-checklist)
 - [Quota management](#quota-management)
 - [Phase 2](#phase-2)
@@ -83,6 +84,7 @@ Phase 1 (implemented in this repo):
 | **Ollama** | Local LLM inference engine |
 | **Qwen3 4B** | Default model (2.5 GB, 256K context, tool calling) |
 | **Open WebUI** | Chat UI + built-in RAG + native MCP support |
+| **cloudflared** | *Optional*, off by default. Outbound tunnel for remote access — see [Securing remote access](#securing-remote-access) |
 
 ---
 
@@ -96,9 +98,9 @@ Phase 1 (implemented in this repo):
    including the model download (a few minutes on first run)
 4. Open the **PORTS** panel → click the URL for port **3000**
 5. Register the first account (**it automatically becomes the administrator**)
-6. Once logged in, set `ENABLE_SIGNUP=false` in `.env`, then:
+6. Once logged in, **lock registration**:
    ```bash
-   docker compose up -d open-webui
+   bash scripts/lock-signup.sh
    ```
 
 ### Locally
@@ -126,6 +128,94 @@ Open <http://localhost:3000>.
 | `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, Chinese output (~10 min) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
+| `bash scripts/lock-signup.sh` | Set `ENABLE_SIGNUP=false` and restart Open WebUI (idempotent) |
+
+---
+
+## Securing remote access
+
+**Phase 1 carries no private data, so this section did not matter yet. RAG is what
+changes that** — the moment you upload your own documents, the transport between
+your browser and the model becomes the thing worth protecting. Do this **before**
+you upload anything. See [`DECISIONS.md`](DECISIONS.md) D-012.
+
+An unauthenticated Open WebUI is not just a chat window. Whoever reaches it can
+read every conversation already stored, use your model, and — if `ENABLE_SIGNUP`
+is still `true` — **register an account**, where the first registrant becomes
+administrator.
+
+### Choose one
+
+| Option | Identity check | Needs a domain | Notes |
+|---|---|---|---|
+| **Codespaces private port** (default) | GitHub account | No | Zero setup. Only you, authenticated, can reach it. **The baseline — already on.** |
+| **Cloudflare Tunnel + Access** | Email OTP / Google / GitHub SSO | Yes | Stable hostname, survives codespace rebuilds. Free Zero Trust tier covers 50 users. |
+| **Tailscale** | Device | No | Device-level rather than user-level; simplest if all your clients can join the tailnet. |
+
+If you only ever reach it from a browser where you are signed in to GitHub, the
+default private port is already sufficient and you can stop reading. The tunnel
+earns its place when you want a **memorable hostname** that keeps working after
+the codespace is recreated, or **access from a device that is not GitHub-authenticated**.
+
+### Cloudflare Tunnel + Access
+
+The tunnel is established **outbound** by a `cloudflared` container, so **no port
+is ever published** — the same reasoning as Ollama in [D-003](DECISIONS.md). Because
+the tunnel's identity lives in Cloudflare rather than in the codespace, an
+ephemeral environment reconnects to the **same hostname** on every rebuild.
+
+1. **Cloudflare Zero Trust → Networks → Tunnels → Create a tunnel**
+2. Add a **Public hostname**; set the service to `http://open-webui:8080`
+   (the *container* port 8080, **not** the published 3000)
+3. Copy the tunnel token (`eyJ…`) into `.env` as `CLOUDFLARE_TUNNEL_TOKEN`
+4. **Access → Applications** → add a policy allowing only your own email
+5. Uncomment `COMPOSE_PROFILES=tunnel` in `.env`, then:
+   ```bash
+   bash scripts/up.sh
+   ```
+
+`cloudflared` runs under the `tunnel` compose profile and is **not created at all**
+unless you enable it. `bash scripts/up.sh` refuses to start if the profile is on
+but the token is empty — a missing token would otherwise surface only as a
+confusing error in the container log.
+
+**Verify it worked:**
+
+```bash
+bash scripts/status.sh                      # shows whether cloudflared registered
+docker compose logs --tail=20 cloudflared   # "Registered tunnel connection"
+```
+
+**To turn the tunnel off:** comment `COMPOSE_PROFILES` back out and run
+`bash scripts/up.sh`. Disabling a profile does **not** stop a container that is
+already running — `up.sh` and `down.sh` pass `--remove-orphans` so the stale
+`cloudflared` is actually removed. Without that, "I turned the tunnel off" would
+be a false belief while the service stayed reachable.
+
+> ⚠️ **Never use a Quick Tunnel (`*.trycloudflare.com`) for private data.**
+> Quick Tunnels have **no Access policy attached** and are effectively public to
+> anyone who learns the URL. They are for demos with nothing at stake. This repo
+> never uses one.
+
+> ⚠️ **The tunnel token is equivalent to control of that tunnel.** Anyone holding
+> it can point your hostname at a server they control. It belongs in `.env`
+> (gitignored) and nowhere else.
+
+> **What this does not protect against:** Cloudflare terminates TLS, so Cloudflare
+> sees plaintext in transit, as any reverse proxy would. If that is unacceptable,
+> use Codespaces' private port or Tailscale instead — with those, no third party
+> sits in the path.
+
+### Lock down registration
+
+Whichever option you choose, do this **first**:
+
+```bash
+bash scripts/lock-signup.sh
+```
+
+It sets `ENABLE_SIGNUP=false` in `.env`, restarts Open WebUI, and verifies the
+write actually landed. Existing accounts are unaffected.
 
 ---
 
@@ -150,6 +240,14 @@ human judgement call. The steps below are performed manually.
       shows the ollama container's memory drop noticeably
 - [ ] **Survives restart** — after `bash scripts/down.sh && bash scripts/up.sh`,
       the model is **not** re-downloaded and prior conversations are still there
+
+### Phase 2: before uploading any document
+
+- [ ] `ENABLE_SIGNUP=false` is in effect — run `bash scripts/lock-signup.sh`
+- [ ] You have chosen how the service is reached, and are aware of that choice's
+      trade-offs (see [Securing remote access](#securing-remote-access) — staying
+      on the default private port is a valid answer)
+- [ ] You are **not** using a Quick Tunnel
 
 ### Phase 2: RAG
 

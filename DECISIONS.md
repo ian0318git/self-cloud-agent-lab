@@ -397,3 +397,118 @@ Client Protocol"。兩顆模型、兩種不同的錯法、都講得理直氣壯�
 - 一個簡單問答約需 30–110 秒（thinking 佔絕大部分）
 - 對互動式使用偏慢；批次／非同步的工作流程則可接受
 - 本結論僅適用於 2-core CPU；4-core 預期約兩倍速度
+
+---
+
+## D-012：對外連線採 Cloudflare Tunnel + Access，且必須早於 RAG
+
+**日期**：2026-09-18
+**狀態**：已決定（**程式與文件已完成，尚未實地驗證** —— 見文末）
+
+**背景**：使用者提出「可以使用 Cloudflare + Open WebUI 來完成安全連線嗎？
+要不然我的電腦連 Open WebUI 的資料就不安全了」。
+
+這個問題問得比它表面上看起來更關鍵。第一階段整個堆疊裡**沒有任何私有資料** ——
+只有模型與空的對話紀錄，所以傳輸安全在當時確實不重要。**會改變這件事的是 RAG**：
+一旦上傳自己的文件，瀏覽器到模型之間的那段路就開始承載值得保護的內容。
+
+**查證結果**：
+
+| 事實 | 影響 |
+|---|---|
+| Codespaces 的埠**預設 private**，需 GitHub 認證才連得到 | 這已經是一個有效的身分驗證層，不是「沒有防護」 |
+| GitHub 會終結 TLS，因此它看得到明文 | 與 Cloudflare 的取捨相同，只是換一個第三方 |
+| cloudflared 由容器**對外**建立連線 | **不需要發布任何埠**，也繞過了 Codespaces 埠轉送的可得性問題 |
+| Tunnel 的身分存在於 Cloudflare，不在 codespace | codespace 重建後**連回同一個主機名** —— 這對短命環境是決定性優點 |
+| Cloudflare Access 免費層涵蓋 50 位使用者 | 個人使用完全在免費範圍內 |
+| **Quick Tunnel（`*.trycloudflare.com`）沒有 Access 政策** | **等同公開，不可承載私有資料** |
+| tunnel token 可重新導向該主機名 | token 外洩 = tunnel 控制權外洩，只放 `.env` |
+| Cloudflare 會終結 TLS | 它看得到明文，與任何反向代理相同 |
+
+**決策**：
+
+1. 對外連線採 **Cloudflare Tunnel + Access**，做成 compose 的 `tunnel` profile，
+   **預設關閉** —— 沒啟用就不會被建立。
+2. **不強制**使用者走 tunnel。文件同時列出三個選項（Codespaces 私有埠／
+   Cloudflare Tunnel + Access／Tailscale），並明說「留在預設私有埠」是有效答案。
+3. `ENABLE_SIGNUP` 的關閉做成腳本 `scripts/lock-signup.sh`，不只是一行註解提醒。
+4. **順序固定：安全層先於 RAG。** 見下方理由。
+
+**理由**：
+
+- **為什麼不強制 tunnel**：使用者的實際威脅模型是「我的資料在傳輸中被誰看到」。
+  若他只從已登入 GitHub 的瀏覽器存取，預設的私有埠就已經滿足這個需求，
+  多架一層只是多一個第三方（Cloudflare）看到明文。**安全措施要對應真實威脅，
+  不是越多越好** —— 加一個會看到明文的仲介，可能讓整體更差而不是更好。
+- **為什麼順序不能顛倒**：安全層是「保護既有資料」的機制。若先上傳文件、
+  之後才補安全層，那份文件在補上之前的每一次傳輸都是未受保護的，
+  而且**已經來不及**。這是不可逆的順序，不是偏好問題。
+- **為什麼 `lock-signup` 要做成腳本**：`ENABLE_SIGNUP=true` 期間，任何能觸及
+  Open WebUI 的人都能自行註冊，且**第一位註冊者成為管理員**。這種「一行設定
+  決定整個系統歸屬」的項目，靠 `.env.example` 裡的註解提醒是不夠的 ——
+  註解會被略過，腳本會回報結果。
+
+**推翻了什麼**：
+
+- 推翻了「安全連線是第二階段後期再處理的事」。它必須在 RAG **之前**，
+  理由是順序不可逆，而不是因為它比較重要。
+- 推翻了「要安全就一律上 tunnel」的直覺。多一層不等於更安全 ——
+  Cloudflare 一樣看得到明文。真正的判準是「誰坐在傳輸路徑上」。
+- 推翻了「把 codespace 埠改成 public」這個沒被說出口的選項。使用者從未授權
+  這件事，本決策也不採用；`README` 只在疑難排解中說明埠可見性的操作方式。
+
+**實作**：
+
+| 檔案 | 內容 |
+|---|---|
+| `docker-compose.yml` | `cloudflared` 服務，掛 `profiles: ["tunnel"]` |
+| `.env.example` | `CLOUDFLARE_TUNNEL_TOKEN`、`COMPOSE_PROFILES=tunnel`、五步設定說明 |
+| `scripts/up.sh` | profile 啟用但 token 為空時，**在啟動前**擋下 |
+| `scripts/status.sh` | 顯示 cloudflared 是否執行、日誌是否出現註冊成功訊息 |
+| `scripts/lock-signup.sh` | 設定 `ENABLE_SIGNUP=false`、重啟、並驗證寫入生效 |
+| `README.md` / `README.zh-TW.md` | 「Securing remote access／對外連線的安全性」整節 |
+
+**踩到的坑（三個，都已修正）**：
+
+1. `docker-compose.yml` 原本想在 cloudflared 上用 `${CLOUDFLARE_TUNNEL_TOKEN:?...}`
+   做必填驗證。**這是錯的** —— compose 會對**整個檔案**做變數插值，
+   **即使該 profile 沒有啟用**也會觸發，結果是沒用 tunnel 的人反而起不來。
+   驗證因此移到 `scripts/up.sh`。
+
+2. **`lock-signup.sh` 原本會無聲地失敗。** compose 的變數優先序是
+   **「shell 環境 > .env 檔」**（已查證 Docker 官方文件），而 `load_env`
+   會用 `set -a` 把 `.env` 的舊值匯出到 shell。因此「改 `.env` → 重啟」
+   這個寫法會用**舊值 `true`** 重建容器，指令卻回報成功 —— 註冊功能根本沒關掉。
+   修正：改完檔案後明確 `export ENABLE_SIGNUP=false`，讓兩個來源一致。
+   **這與 D-011 的 `OLLAMA_MODEL` 覆蓋問題是同一個根因**：`load_env` 把 `.env`
+   灌進 shell，此後 shell 的值就壓過檔案。這個根因已經造成兩次靜默失敗。
+
+3. **停用 profile 不等於停掉服務。** 使用者把 `COMPOSE_PROFILES=tunnel` 註解掉
+   之後，已建立的 cloudflared 容器並不會自動停止，會繼續把服務對外 ——
+   「我已經把 tunnel 關掉了」於是成為錯誤的認知。修正：`up.sh` 與 `down.sh`
+   都加上 `--remove-orphans`。這在別的專案是清理動作，在這裡是安全措施。
+
+**已離線驗證**（不需要 docker，因此可以當場做完）：
+
+- `docker-compose.yml` 的 YAML 結構、`cloudflared` 的 profile 正確、未發布任何埠
+- 沒有任何服務發布 Ollama 的 11434 埠（D-003 仍然成立）
+- `lock-signup.sh` 的 `.env` 寫入邏輯，以六個案例實測：一般情況、已註解、
+  完全沒有該鍵、重複套用（冪等，不會產生第二行）、行尾有註解、CRLF 換行
+  —— 六者皆正確收斂為 `ENABLE_SIGNUP=false`
+- 所有 shell 腳本 `bash -n` 通過；`scripts/test_verify_api.py` 全數通過
+
+**未驗證（重要）**：
+
+**需要 docker 才能執行的部分完全沒有跑過。** 原因：實作時 codespace 已依 D-001
+刪除，且沒有可用的網域與 tunnel token。以下幾點**不可視為已驗證**：
+
+- `cloudflared` 在本 repo 的 compose 設定下能否正常連上 Cloudflare
+- `COMPOSE_PROFILES` 經 `load_env` 匯出後，各腳本是否都正確看見該 profile
+- `status.sh` 對 cloudflared 日誌的判斷字串是否與實際輸出相符
+- `--remove-orphans` 是否確實清掉停用 profile 後的殘留容器
+- 「shell 環境 > `.env`」這條優先序規則來自 Docker 官方文件，**未在本機實測**
+  （本機沒有 compose 外掛）。不過修正後的寫法不依賴這條規則 ——
+  檔案與環境變數被設成同一個值，兩個來源一致。
+
+下次有 codespace 時，**應先驗證這五項再進行 RAG**。這與 D-011 的教訓一致：
+本專案已經兩次把「推論」寫成「結論」，不應再來第三次。

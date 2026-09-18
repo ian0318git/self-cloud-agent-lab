@@ -11,10 +11,28 @@ load_env
 
 MODEL="${OLLAMA_MODEL:-qwen3:4b}"
 
+# ── Cloudflare Tunnel（選用）────────────────────────────
+# 缺 token 就在啟動前擋下來，不要讓 cloudflared 帶著空 token 起來後才在
+# 日誌裡留下看不懂的錯誤。compose 檔無法做這個檢查，原因見該檔的註解。
+if [[ ",${COMPOSE_PROFILES:-}," == *",tunnel,"* ]]; then
+  if [[ -z "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+    fail "COMPOSE_PROFILES 含 tunnel，但 CLOUDFLARE_TUNNEL_TOKEN 是空的。"
+    fail "請在 .env 填入 Cloudflare Zero Trust 的 tunnel token，"
+    fail "或將 COMPOSE_PROFILES 那行註解掉以停用 tunnel。"
+    exit 1
+  fi
+  ok "Cloudflare Tunnel 已啟用"
+fi
+
 info "啟動容器（等待 healthcheck 通過，首次可能需要 1-2 分鐘）..."
 # --wait 會等到所有帶 healthcheck 的服務轉為 healthy 才返回；
 # 任一服務失敗則以非零結束，不會靜默通過。
-if ! $COMPOSE up -d --wait; then
+#
+# --remove-orphans 在這裡是安全措施，不只是清理：
+# 若使用者停用 tunnel profile 後執行本腳本，舊的 cloudflared 容器並不會
+# 因為「不在作用中的 profile 裡」而自動停止 —— 它會繼續把服務對外。
+# 少了這個旗標，「我已經把 tunnel 關掉了」就會是個錯誤的認知。
+if ! $COMPOSE up -d --wait --remove-orphans; then
   fail "容器啟動失敗。以下為最近日誌："
   $COMPOSE logs --tail=40 >&2
   exit 1
@@ -46,9 +64,10 @@ Open WebUI 位址：
 
 首次使用：
   1. 註冊第一個帳號 —— 它會自動成為管理員
-  2. 登入後將 .env 的 ENABLE_SIGNUP 改為 false，再執行：
-       docker compose up -d open-webui
-     以避免其他人取得管理權限
+  2. 登入後立刻鎖住註冊：bash scripts/lock-signup.sh
+
+⚠  在 ENABLE_SIGNUP=true 的期間，任何能觸及 Open WebUI 的人都能自行
+   註冊帳號並使用你的模型。對外之前務必先做上面的步驟 2。
 
 ⚠  額度提醒：2-core codespace 每月僅有 60 真實小時。
    用完請務必停止：bash scripts/down.sh

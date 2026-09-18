@@ -90,6 +90,35 @@ services:
     networks:
       - ai-net
 
+  # ── Cloudflare Tunnel（選用，第二階段的對外連線）────────
+  # 讓 Open WebUI 透過你自己的網域對外，並由 Cloudflare Access 控管身分。
+  # 這條路線由容器「對外」建立連線，因此不需要發布任何埠，也不需要
+  # Codespaces 的埠轉送 —— 與上面 ollama 不發布埠是同一個思路。
+  #
+  # 啟用方式：在 .env 設定 CLOUDFLARE_TUNNEL_TOKEN 與 COMPOSE_PROFILES=tunnel，
+  # 再執行 bash scripts/up.sh。未啟用時這個服務完全不會被建立。
+  #
+  # 注意：這裡刻意不用 ${VAR:?} 驗證 token —— compose 會對整個檔案做變數
+  # 插值，即使 profile 沒啟用也會觸發，反而讓沒用 tunnel 的人起不來。
+  # 缺 token 的檢查改由 scripts/up.sh 執行。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+
+    # 刻意不設 healthcheck：cloudflared 的就緒端點需要額外的 metrics 旗標，
+    # 設錯會讓容器反覆重啟，反而比沒有 healthcheck 更難診斷（見 D-006）。
+    # 需要確認狀態時看日誌：docker compose logs --tail=20 cloudflared
+
+    depends_on:
+      open-webui:
+        condition: service_healthy
+
+    networks:
+      - ai-net
+
 volumes:
   ollama_storage:
   open_webui_storage:

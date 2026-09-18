@@ -30,10 +30,13 @@ if [[ "$PURGE" == true ]]; then
     info "已取消"
     exit 0
   fi
-  $COMPOSE down -v
+  $COMPOSE down -v --remove-orphans
   ok "容器與 volume 已刪除"
 else
-  $COMPOSE down
+  # --remove-orphans：若 cloudflared 是在 tunnel profile 啟用時建立、
+  # 而現在該 profile 已被停用，它不屬於作用中的 compose 設定，
+  # 不加這個旗標就會留在背景繼續把服務對外（見 up.sh 的同名說明）。
+  $COMPOSE down --remove-orphans
   ok "容器已停止（volume 保留，模型無需重新下載）"
   info "若要一併清除 volume：bash scripts/down.sh --purge"
 fi

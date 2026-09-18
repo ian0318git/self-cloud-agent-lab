@@ -15,6 +15,7 @@
 - [為什麼不是常駐服務](#為什麼不是常駐服務)
 - [架構](#架構)
 - [快速開始](#快速開始)
+- [對外連線的安全性](#對外連線的安全性)
 - [驗證清單](#驗證清單)
 - [額度管理](#額度管理)
 - [第二階段](#第二階段)
@@ -81,6 +82,7 @@ GB-month = (佔用 GB × 存在小時) ÷ 730
 | **Ollama** | 本地 LLM 推論引擎 |
 | **Qwen3 4B** | 預設模型（2.5 GB，256K context，支援 tool calling） |
 | **Open WebUI** | 聊天介面 + 內建 RAG + 原生 MCP 支援 |
+| **cloudflared** | *選用*，預設關閉。對外連線用的 outbound tunnel，見[對外連線的安全性](#對外連線的安全性) |
 
 ---
 
@@ -94,9 +96,9 @@ GB-month = (佔用 GB × 存在小時) ÷ 730
    包含下載模型（首次約需數分鐘）
 4. 開啟 **PORTS** 面板 → 點擊 **3000** 埠的網址
 5. 註冊第一個帳號（**會自動成為管理員**）
-6. 登入後，將 `.env` 的 `ENABLE_SIGNUP` 改為 `false`，再執行：
+6. 登入後立刻**鎖住註冊**：
    ```bash
-   docker compose up -d open-webui
+   bash scripts/lock-signup.sh
    ```
 
 ### 在本機
@@ -124,6 +126,85 @@ bash scripts/up.sh
 | `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、繁中輸出（約 10 分鐘） |
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
+| `bash scripts/lock-signup.sh` | 將 `ENABLE_SIGNUP` 設為 `false` 並重啟 Open WebUI（冪等） |
+
+---
+
+## 對外連線的安全性
+
+**第一階段沒有私有資料，所以這一節還不重要。會改變這件事的是 RAG** ——
+一旦你上傳自己的文件，瀏覽器與模型之間的傳輸就成為值得保護的一環。
+請在**上傳任何文件之前**完成。決策記錄見 [`DECISIONS.md`](DECISIONS.md) D-012。
+
+未經認證的 Open WebUI 不只是聊天視窗。能觸及它的人可以讀取已儲存的所有對話、
+使用你的模型，而且 —— 若 `ENABLE_SIGNUP` 仍是 `true` —— **自行註冊帳號**，
+其中第一位註冊者會成為管理員。
+
+### 三選一
+
+| 方案 | 身分驗證 | 需要網域 | 說明 |
+|---|---|---|---|
+| **Codespaces 私有埠**（預設） | GitHub 帳號 | 不需要 | 零設定。只有你、且經過 GitHub 認證才連得到。**這是基準，而且已經是開啟的。** |
+| **Cloudflare Tunnel + Access** | Email OTP / Google / GitHub SSO | 需要 | 固定主機名，codespace 重建後仍可沿用。Zero Trust 免費層可涵蓋 50 位使用者。 |
+| **Tailscale** | 裝置 | 不需要 | 驗證層級是「裝置」而非「使用者」；若你的用戶端都能加入同一個 tailnet 則最簡單。 |
+
+如果你永遠只從「已登入 GitHub 的瀏覽器」存取，預設的私有埠就已經足夠，
+這節可以不用再看。Tunnel 的價值在於：**好記的主機名**、
+codespace 重建後仍然有效，或是**從非 GitHub 認證的裝置存取**。
+
+### Cloudflare Tunnel + Access
+
+Tunnel 由 `cloudflared` 容器**對外**建立連線，因此**完全不發布任何埠** ——
+與 [D-003](DECISIONS.md) 中 Ollama 不對外發布是同一個思路。也因為 tunnel 的身分
+存在於 Cloudflare 而非 codespace，短命的環境在每次重建後都會連回**同一個主機名**。
+
+1. **Cloudflare Zero Trust → Networks → Tunnels → Create a tunnel**
+2. 新增 **Public hostname**，Service 指向 `http://open-webui:8080`
+   （是**容器內**的 8080，**不是**對外的 3000）
+3. 複製 tunnel token（`eyJ…` 開頭）填到 `.env` 的 `CLOUDFLARE_TUNNEL_TOKEN`
+4. **Access → Applications** 建立政策，例如只允許你自己的 email
+5. 取消 `.env` 中 `COMPOSE_PROFILES=tunnel` 的註解，然後：
+   ```bash
+   bash scripts/up.sh
+   ```
+
+`cloudflared` 掛在 `tunnel` 這個 compose profile 下，**沒啟用就不會被建立**。
+若 profile 開了但 token 是空的，`bash scripts/up.sh` 會在啟動前擋下來 ——
+否則這個錯誤只會以看不懂的訊息出現在容器日誌裡。
+
+**確認是否生效：**
+
+```bash
+bash scripts/status.sh                      # 顯示 cloudflared 是否已註冊
+docker compose logs --tail=20 cloudflared   # 應出現 "Registered tunnel connection"
+```
+
+**要關掉 tunnel：** 把 `COMPOSE_PROFILES` 註解回去，執行 `bash scripts/up.sh`。
+停用 profile **不會**停止已經在跑的容器 —— `up.sh` 與 `down.sh` 都帶了
+`--remove-orphans`，才會真正把殘留的 `cloudflared` 移除。少了這個旗標，
+「我已經把 tunnel 關掉了」會是個錯誤的認知，而服務其實仍連得到。
+
+> ⚠️ **絕對不要用 Quick Tunnel（`*.trycloudflare.com`）承載私有資料。**
+> Quick Tunnel **沒有附掛任何 Access 政策**，任何知道網址的人都連得到，
+> 實質上等於公開。它只適合沒有損失的展示。本 repo 完全不使用。
+
+> ⚠️ **tunnel token 等同該 tunnel 的控制權。** 持有它的人可以把你的主機名
+> 指到他自己控制的伺服器。它只該放在 `.env`（已被 gitignore），不做他想。
+
+> **這條路不保護什麼：** Cloudflare 會終結 TLS，因此它在傳輸過程中看得到明文，
+> 這與任何反向代理相同。若這不可接受，請改用 Codespaces 私有埠或 Tailscale ——
+> 那兩條路上沒有第三方坐在中間。
+
+### 鎖住註冊
+
+不論選哪一個方案，都先做這件事：
+
+```bash
+bash scripts/lock-signup.sh
+```
+
+它會把 `.env` 的 `ENABLE_SIGNUP` 設為 `false`、重啟 Open WebUI，
+並確認寫入真的生效。既有帳號不受影響。
 
 ---
 
@@ -147,6 +228,13 @@ bash scripts/up.sh
       顯示 ollama 容器記憶體明顯下降
 - [ ] **重啟存活** —— `bash scripts/down.sh && bash scripts/up.sh` 後，
       模型**不需重新下載**，且先前的對話紀錄仍在
+
+### 第二階段：上傳文件之前
+
+- [ ] `ENABLE_SIGNUP=false` 已生效 —— 執行 `bash scripts/lock-signup.sh`
+- [ ] 已決定對外連線方式，且對該方式的取捨有意識
+      （見[對外連線的安全性](#對外連線的安全性)；留在預設的私有埠也是有效答案）
+- [ ] 已確認**沒有**使用 Quick Tunnel
 
 ### 第二階段：RAG
 
