@@ -4,6 +4,11 @@
 只驗證不涉及 HTTP 的純函式 —— 解析、速率計算、thinking 判定、防呆與邊界條件。
 這些是最容易在真實環境中出錯、卻最難從輸出看出來的部分。
 
+其中三項是 2026-09-18 首次實跑後補上的迴歸測試，對應當時真實發生的誤判：
+  • thinking 內容在獨立欄位 → _thinking_text
+  • 空輸出必須明講「（空）」→ _show
+  • 多輪被 num_predict 截斷 → 由呼叫端的額度調整處理，此處僅鎖住解析行為
+
 執行：python3 scripts/test_verify_api.py
 """
 
@@ -14,32 +19,42 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import verify_api as v  # noqa: E402
 
-# ── _answer_only：必須正確剝除 thinking 段落 ────────────
-assert v._answer_only("思考中</think>\n\n正常") == "正常"
-assert v._answer_only("正常") == "正常"
-assert v._answer_only("") == ""
-# 模型可能回傳 content: null（多輪 tool calling 時的常見情形）
-assert v._answer_only(None) == ""
-# 只有一個 </think> 時，取第一個之後的全部
-assert v._answer_only("a</think>b</think>c") == "b</think>c"
+# ── _thinking_text：思考內容在獨立欄位，不在 response ─────
+assert v._thinking_text({"thinking": "想很久"}) == "想很久"
+assert v._thinking_text({"thinking": None}) == ""
+assert v._thinking_text({}) == ""
+assert v._thinking_text({"response": "答案"}) == ""
 
-# ── _speed：速率計算與零除保護 ──────────────────────────
-assert v._speed({"eval_count": 100, "eval_duration": 50_000_000_000}) == (100, 50.0, 2.0)
-assert v._speed({}) == (0, 0.0, None)
-# eval_count 有值但時間為 0 → 不可回傳速率，避免 ZeroDivisionError
-assert v._speed({"eval_count": 5, "eval_duration": 0}) == (5, 0.0, None)
-assert v._speed({"eval_count": None, "eval_duration": None}) == (0, 0.0, None)
+# ── _show：空輸出必須明講，不可讓空白冒充成功 ─────────────
+assert v._show("") == "（空）"
+assert v._show("   ") == "（空）"
+assert v._show(None) == "（空）"
+assert v._show("\n\n") == "（空）"
+assert v._show("正常") == "正常"
+assert v._show("a" * 300).endswith("…")
 
-# ── _thinking_state：三種狀態必須可區分 ─────────────────
-assert "有" in v._thinking_state({"response": "x</think>y", "done_reason": "stop"})
-assert "可能" in v._thinking_state({"response": "x", "done_reason": "length"})
-assert "未觀察" in v._thinking_state({"response": "正常", "done_reason": "stop"})
-# </think> 優先於 done_reason
-assert "有" in v._thinking_state({"response": "x</think>", "done_reason": "length"})
-# response 為 null 或欄位從缺時，不得拋例外
-assert "未觀察" in v._thinking_state({"response": None, "done_reason": "stop"})
-assert "未觀察" in v._thinking_state({})
-assert "可能" in v._thinking_state({"response": None, "done_reason": "length"})
+# ── _thinking_state：以 thinking 欄位為準 ────────────────
+assert "有" in v._thinking_state({"thinking": "想很久"})
+assert "無" in v._thinking_state({"thinking": "", "done_reason": "stop"})
+assert "可能" in v._thinking_state({"thinking": "", "done_reason": "length"})
+# thinking 欄位有內容時，優先於 done_reason
+assert "有" in v._thinking_state({"thinking": "x", "done_reason": "length"})
+# 欄位從缺或為 null 時不得拋例外
+assert "無" in v._thinking_state({})
+assert "無" in v._thinking_state({"thinking": None, "done_reason": "stop"})
+
+# ── _chatml：Qwen3 關閉 thinking 的預填格式 ──────────────
+plain = v._chatml("說：正常")
+assert plain.endswith("<|im_start|>assistant\n" + v.THINK_BLOCK_CLOSED)
+assert "<|im_start|>user\n說：正常<|im_end|>" in plain
+assert "<|im_start|>system" not in plain
+# 鎖住結構：前後各兩個換行，中間是關閉標記
+assert v.THINK_BLOCK_CLOSED.count("\n") == 4
+assert v.THINK_BLOCK_CLOSED.startswith("<" + "think" + ">")
+assert v.THINK_BLOCK_CLOSED.endswith("</" + "think" + ">" + "\n\n")
+with_system = v._chatml("問題", system="系統提示")
+assert with_system.startswith("<|im_start|>system\n系統提示<|im_end|>\n")
+assert "<|im_start|>user\n問題<|im_end|>" in with_system
 
 # ── _clip：截斷與 None 防護 ────────────────────────────
 assert v._clip("a" * 300).endswith("…")
@@ -47,6 +62,13 @@ assert len(v._clip("a" * 300)) == 181
 assert v._clip("abc") == "abc"
 assert v._clip(None) == ""
 assert v._clip("有\n換行") == "有 換行"
+
+# ── _speed：速率計算與零除保護 ──────────────────────────
+assert v._speed({"eval_count": 100, "eval_duration": 50_000_000_000}) == (100, 50.0, 2.0)
+assert v._speed({}) == (0, 0.0, None)
+# eval_count 有值但時間為 0 → 不可回傳速率，避免 ZeroDivisionError
+assert v._speed({"eval_count": 5, "eval_duration": 0}) == (5, 0.0, None)
+assert v._speed({"eval_count": None, "eval_duration": None}) == (0, 0.0, None)
 
 # ── _guard：例外必須被吞掉並回傳 None，不得往外炸 ────────
 # 註：這兩行會印出 ✗ 訊息，那是 _guard 的預期行為，不是測試失敗。

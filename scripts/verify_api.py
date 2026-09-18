@@ -8,12 +8,18 @@ open-webui 容器（內建 Python）來發請求。
 
 只用 Python 標準函式庫，容器內不需要額外安裝任何套件。
 
-要回答的三個問題：
+要回答的四個問題：
   1. 4b 在 2-core CPU 上的實際生成速度（tok/s）
-  2. 4b 能否穩定產生 tool calls —— 這是 MCP 階段的前提（見 D-005）
-  3. 能否用系統提示詞強制繁體中文輸出
+  2. 4b 能否產生 tool calls，並在多輪之後收斂成答案（見 D-005）
+  3. 能否關閉 thinking 模式 —— 它會吃掉大量 token 與時間
+  4. 能否用系統提示詞強制繁體中文輸出
 
-任何未預期的錯誤都會印出並計入失敗，不靜默通過。
+v2 修正（源自 2026-09-18 首次實跑的三個發現）：
+  • thinking 模型的思考內容位於獨立的 thinking 欄位，不在 response。
+    v1 只讀 response，造成「明明有產出卻顯示空白」。
+  • 空輸出必須明講「（空）」。v1 讓繁體中文檢測在空字串上誤判為通過 ——
+    這是典型的靜默失敗。
+  • num_predict 上限過小，模型還在思考就被截斷，多輪測試因此假性失敗。
 """
 
 import json
@@ -25,7 +31,7 @@ import urllib.request
 
 BASE = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
 MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
-TIMEOUT = int(os.environ.get("VERIFY_TIMEOUT", "600"))
+TIMEOUT = int(os.environ.get("VERIFY_TIMEOUT", "900"))
 
 # 僅用於啟發式提示的簡化字集合。刻意排除「后、里、台、面、只、干、云、准」
 # 等同時也是合法繁體的字，避免誤判。這只是輔助線索，最終仍以肉眼判讀為準。
@@ -81,13 +87,25 @@ def _clip(text, limit=180):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _answer_only(text):
-    """去掉 thinking 段落，只留下最終答案。"""
-    text = text or ""  # 模型可能回傳 content: null，不能讓它炸掉
-    marker = "</think>"
-    if marker in text:
-        return text.split(marker, 1)[1].strip()
-    return text.strip()
+def _show(text, limit=180):
+    """輸出用的字串。空的一律明講「（空）」，不讓空白冒充成功。"""
+    stripped = (text or "").strip()
+    return "（空）" if not stripped else _clip(stripped, limit)
+
+
+def _thinking_text(resp):
+    """thinking 模型的思考內容位於獨立欄位，不在 response。"""
+    return resp.get("thinking") or ""
+
+
+def _thinking_state(resp):
+    """判斷這次生成是否有思考內容。以 thinking 欄位為準。"""
+    think = _thinking_text(resp)
+    if think.strip():
+        return f"有（thinking 欄位 {len(think)} 字）"
+    if resp.get("done_reason") == "length":
+        return "可能有（輸出被 num_predict 截斷）"
+    return "無"
 
 
 def _speed(resp):
@@ -103,19 +121,28 @@ def _fmt_speed(count, dur, tps):
     return f"{count} tokens / {dur:.1f}s = {tps:.2f} tok/s"
 
 
-def _thinking_state(resp):
-    """判斷這次生成是否處於 thinking 模式。
+# thinking 相關的字面值以串接方式組成。直接連著寫時，這些字串會在
+# 編輯與傳輸過程中被當成標籤處理而遺失，因此刻意拆開。
+THINK_OPEN = "<" + "think" + ">"
+THINK_CLOSE = "</" + "think" + ">"
+THINK_BLOCK_CLOSED = THINK_OPEN + "\n\n" + THINK_CLOSE + "\n\n"
 
-    </think> 出現  → 確定有思考
-    被長度截斷     → 很可能還卡在思考中
-    其餘           → 沒有觀察到思考
+
+def _chatml(prompt, system=None):
+    """手工組出 Qwen3 的 ChatML，並預填一個「已關閉的思考區塊」。
+
+    Qwen3 的對話樣板在關閉思考時，會把 assistant 段預先填成
+    「THINK_OPEN ＋ 兩個換行 ＋ THINK_CLOSE ＋ 兩個換行」，模型接著就直接輸出答案。
+    這條路 bypass 掉 Ollama 的樣板，因此不受 think 參數是否被支援影響。
+
+    注意：這是實驗性做法，格式若不對就會失敗 —— 而失敗本身也是有用的資訊。
     """
-    text = resp.get("response") or ""
-    if "</think>" in text:
-        return "有（偵測到 </think>）"
-    if resp.get("done_reason") == "length":
-        return "可能有（輸出被 num_predict 截斷，未及產出答案）"
-    return "未觀察到"
+    parts = []
+    if system:
+        parts.append(f"<|im_start|>system\n{system}<|im_end|>\n")
+    parts.append(f"<|im_start|>user\n{prompt}<|im_end|>\n")
+    parts.append("<|im_start|>assistant\n" + THINK_BLOCK_CLOSED)
+    return "".join(parts)
 
 
 def _guard(fn, *args):
@@ -141,64 +168,93 @@ def test_baseline():
             "model": MODEL,
             "prompt": "說：正常",
             "stream": False,
-            "options": {"num_predict": 64},
+            "options": {"num_predict": 384},
         },
     )
     count, dur, tps = _speed(resp)
+    answer = resp.get("response") or ""
+    thinking = _thinking_text(resp)
 
     print(f"  模型載入      : {_secs(resp.get('load_duration')):.1f}s")
     print(f"  牆鐘耗時      : {time.time() - started:.1f}s")
     print(f"  生成速率      : {_fmt_speed(count, dur, tps)}")
     print(f"  thinking 狀態 : {_thinking_state(resp)}")
-    print(f"  原始輸出      : {_clip(resp.get('response'))}")
+    print(f"  最終答案      : {_show(answer)}")
+    # 首次實跑時，思考內容被誤當成「沒有輸出」。這裡明示它存在。
+    print(f"  思考內容摘要  : {_show(thinking, 120)}")
     return tps
 
 
-def test_no_think():
-    """比較兩種關閉 thinking 的方式，看哪一種真的有效。
+def test_suppression():
+    """比較三種關閉 thinking 的方式，看哪一種真的有效。
 
-    判準是生成 token 數：答案只有兩個字，若 thinking 關閉，token 數應該個位數；
-    若仍開啟，會暴增到數十至數百。
+    判準是「是否提早收斂」：答案只有兩個字，若 thinking 關閉，模型會遠在
+    上限之前就停下；若仍開啟，會一路撞上 num_predict 上限。
     """
-    print("\n【2/5】關閉 thinking 的兩種方式是否有效", flush=True)
-    outcome = {}
+    print("\n【2/5】關閉 thinking 的三種方式（效率關鍵）", flush=True)
+    probe = "說：正常"
+    cap = 128
+    working = []
 
-    # 方式 A：提示詞加上 /no_think（Qwen3 的軟開關）
-    resp = _post(
-        "/api/generate",
-        {
-            "model": MODEL,
-            "prompt": "說：正常 /no_think",
-            "stream": False,
-            "options": {"num_predict": 64},
-        },
-    )
-    count, _, _ = _speed(resp)
-    outcome["提示詞加 /no_think"] = (count, _thinking_state(resp))
-
-    # 方式 B：API 的 think 參數（Ollama 伺服器層級）
-    try:
-        resp = _post(
+    def method_prompt():
+        return _post(
             "/api/generate",
             {
                 "model": MODEL,
-                "prompt": "說：正常",
+                "prompt": probe + " /no_think",
                 "stream": False,
-                "think": False,
-                "options": {"num_predict": 64},
+                "options": {"num_predict": cap},
             },
         )
-        count, _, _ = _speed(resp)
-        outcome["API think=false"] = (count, _thinking_state(resp))
-    except urllib.error.HTTPError as exc:
-        outcome["API think=false"] = (None, f"API 拒絕（HTTP {exc.code}）")
 
-    for name, (count, state) in outcome.items():
-        tokens = "？（未取得）" if count is None else f"{count} tokens"
-        print(f"  • {name}：{tokens}｜thinking {state}")
+    def method_think_param():
+        return _post(
+            "/api/generate",
+            {
+                "model": MODEL,
+                "prompt": probe,
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": cap},
+            },
+        )
 
-    print("  判讀：token 數若在個位數 → 該方式有效；若數十以上 → 無效。")
-    return outcome
+    def method_raw():
+        return _post(
+            "/api/generate",
+            {
+                "model": MODEL,
+                "prompt": _chatml(probe),
+                "raw": True,
+                "stream": False,
+                "options": {"num_predict": cap},
+            },
+        )
+
+    methods = (
+        ("提示詞加 /no_think", method_prompt),
+        ("API think=false", method_think_param),
+        ("raw 預填空思考區塊", method_raw),
+    )
+
+    for name, fn in methods:
+        try:
+            resp = fn()
+        except urllib.error.HTTPError as exc:
+            print(f"  ✗ {name}：API 拒絕（HTTP {exc.code}）")
+            continue
+        count = resp.get("eval_count") or 0
+        if count < cap and not _thinking_text(resp).strip():
+            print(f"  ✓ {name}：有效（{count} tokens 即收斂，無思考內容）")
+            working.append(name)
+        else:
+            print(f"  ✗ {name}：{_thinking_state(resp)}｜{count} tokens")
+
+    if working:
+        print(f"  可用的關閉方式：{'、'.join(working)}")
+    else:
+        print("  三種方式皆無效 —— thinking 無法關閉，這是目前最大的效率損失。")
+    return working
 
 
 def test_tool_single():
@@ -211,7 +267,7 @@ def test_tool_single():
             "messages": [{"role": "user", "content": "台北現在天氣如何？"}],
             "tools": TOOLS,
             "stream": False,
-            "options": {"num_predict": 256},
+            "options": {"num_predict": 384},
         },
     )
     message = resp.get("message", {})
@@ -226,7 +282,7 @@ def test_tool_single():
             print(f"      {fn.get('name')}({args})")
     else:
         print("  ✗ 沒有產生 tool call，模型改以自然語言回覆：")
-        print(f"      {_clip(_answer_only(message.get('content', '')))}")
+        print(f"      {_show(message.get('content'))}")
     print(f"  生成速率：{_fmt_speed(count, dur, tps)}")
     return calls
 
@@ -256,28 +312,33 @@ def test_tool_multi(first_calls):
             "messages": messages,
             "tools": TOOLS,
             "stream": False,
-            "options": {"num_predict": 256},
+            "options": {"num_predict": 512},
         },
     )
     message = resp.get("message", {})
-    content = _answer_only(message.get("content", ""))
+    content = message.get("content") or ""
     again = message.get("tool_calls") or []
     count, dur, tps = _speed(resp)
 
     if again:
         print("  ! 第二輪仍要求呼叫工具，未收斂成答案（可能是循環）")
-    if content:
+    if content.strip():
         print("  ✓ 產生了最終自然語言回覆：")
-        print(f"      {_clip(content, 240)}")
+        print(f"      {_show(content, 240)}")
     else:
-        print("  ✗ 沒有產生最終回覆")
+        print("  ✗ 沒有最終回覆（content 為空）")
+        print(f"      思考內容摘要：{_show(_thinking_text(resp), 120)}")
     print(f"  生成速率：{_fmt_speed(count, dur, tps)}")
 
-    return bool(content) and not again
+    return bool(content.strip()) and not again
 
 
 def test_traditional_chinese():
-    """測試能否用系統提示詞強制繁體輸出。"""
+    """測試能否用系統提示詞強制繁體輸出。
+
+    回傳 True / False / None 三態 —— None 代表無法判定（輸出為空），
+    不可與「通過」混為一談。
+    """
     print("\n【5/5】繁體中文輸出控制", flush=True)
     resp = _post(
         "/api/generate",
@@ -286,16 +347,22 @@ def test_traditional_chinese():
             "system": "你必須一律使用繁體中文回答，嚴禁使用簡體字。",
             "prompt": "用一句話說明什麼是 MCP。",
             "stream": False,
-            "options": {"num_predict": 200},
+            "options": {"num_predict": 512},
         },
     )
-    answer = _answer_only(resp.get("response", ""))
+    answer = resp.get("response") or ""
     count, dur, tps = _speed(resp)
-    hits = sorted(set(answer) & SIMPLIFIED_HINTS)
 
-    print(f"  輸出：{_clip(answer, 240)}")
+    if not answer.strip():
+        print("  ? 無法判定：response 為空，模型輸出全落在 thinking 欄位")
+        print(f"      思考內容摘要：{_show(_thinking_text(resp), 120)}")
+        print(f"  生成速率：{_fmt_speed(count, dur, tps)}")
+        return None
+
+    hits = sorted(set(answer) & SIMPLIFIED_HINTS)
+    print(f"  輸出：{_show(answer, 240)}")
     if hits:
-        print(f"  ! 偵測到疑似簡化字：{''.join(hits)}（啟發式，請複核）")
+        print(f"  ✗ 偵測到簡化字：{''.join(hits)}（啟發式，請複核）")
     else:
         print("  ✓ 未偵測到常見簡化字")
     print(f"  生成速率：{_fmt_speed(count, dur, tps)}")
@@ -312,22 +379,24 @@ def main():
     print(" 每項測試可能耗時 1-3 分鐘，整輪約 10 分鐘，請勿中斷。")
     print("=" * 62)
 
-    # 前置檢查：模型不存在就沒必要往下跑，先講清楚
+    # 前置檢查：連不上或模型不存在就沒必要往下跑，先講清楚
     try:
         tags = _get("/api/tags")
+        version = _get("/api/version").get("version", "未知")
     except Exception as exc:  # noqa: BLE001 - 連不上就沒戲唱，直接回報
         print(f"\n✗ 無法連線 Ollama（{BASE}）：{exc}")
         return 2
 
     names = [m.get("name") for m in tags.get("models", []) if m.get("name")]
+    print(f"\nOllama 版本：{version}")
     if MODEL not in names:
-        print(f"\n✗ 模型 {MODEL} 不存在。目前已有：{', '.join(names) or '（無）'}")
+        print(f"✗ 模型 {MODEL} 不存在。目前已有：{', '.join(names) or '（無）'}")
         print("   請先執行：bash scripts/up.sh")
         return 2
-    print(f"\n前置檢查通過：模型 {MODEL} 存在")
+    print(f"前置檢查通過：模型 {MODEL} 存在")
 
     speed = _guard(test_baseline)
-    _guard(test_no_think)
+    working = _guard(test_suppression) or []
     calls = _guard(test_tool_single)
     multi_ok = _guard(test_tool_multi, calls)
     chinese_ok = _guard(test_traditional_chinese)
@@ -336,18 +405,19 @@ def main():
     print("\n" + "=" * 62)
     print(" 總結")
     print("=" * 62)
-    if speed:
-        print(f"  生成速度      : {speed:.2f} tok/s")
-    else:
-        print("  生成速度      : 未取得（測試 1 失敗）")
+    print(f"  生成速度      : {f'{speed:.2f} tok/s' if speed else '未取得（測試 1 失敗）'}")
+    print(f"  可關閉 thinking: {'、'.join(working) if working else '沒有可用方式'}")
     print(f"  單輪 tool call: {'通過' if calls else '未通過'}")
     print(f"  多輪 tool call: {'通過' if multi_ok else '未通過'}")
-    print(f"  繁體中文控制  : {'通過' if chinese_ok else '未通過或未偵測'}")
+    if chinese_ok is None:
+        print("  繁體中文控制  : 無法判定（輸出為空）")
+    else:
+        print(f"  繁體中文控制  : {'通過' if chinese_ok else '未通過'}")
     print("=" * 62)
 
     critical = bool(speed) and bool(calls) and bool(multi_ok)
     if critical:
-        print(" 結論：MCP 階段的核心前提（tool calling）成立。")
+        print(" 結論：MCP 階段的核心前提（多輪 tool calling）成立。")
     else:
         print(" 結論：有關鍵項目未通過，第二階段需調整模型或策略。")
     return 0 if critical else 1
