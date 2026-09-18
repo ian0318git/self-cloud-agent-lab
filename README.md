@@ -123,6 +123,8 @@ Open <http://localhost:3000>.
 | `bash scripts/down.sh --purge` | Stop containers and **delete** all volumes |
 | `bash scripts/pull-model.sh` | Retry the model download on its own |
 | `bash scripts/status.sh` | Container status, model list, memory usage |
+| `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, Chinese output (~10 min) |
+| `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 
 ---
 

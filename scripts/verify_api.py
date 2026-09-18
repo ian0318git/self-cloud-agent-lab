@@ -21,14 +21,25 @@ v2 修正（源自 2026-09-18 首次實跑的三個發現）：
     這是典型的靜默失敗。
   • num_predict 上限過小，模型還在思考就被截斷，多輪測試因此假性失敗。
 
-v3 修正（源自同一次實跑，但屬於判準本身的缺陷）：
+v3 修正（同一次實跑，但屬於判準本身的缺陷）：
   • 測試 2 原本以「token 數是否提早收斂」判斷 thinking 是否被關閉，這是錯的
-    判準 —— 模型即使不思考，也可能對模糊的提示詞長篇回覆。實測資料反而顯示
-    think=false 與 raw 兩種方式的 thinking 欄位都是空的（相對於基準組的 610
-    字），也就是「有效」卻被判成無效。現改以 thinking 欄位本身為判準，並加
-    入基準對照組同時列出。
-  • 測試 2 找到可用的關閉方式後，測試 3/4/5 會沿用（SUPPRESSION），讓整輪
-    更接近實際使用情境，也讓測試 5 能在額度內產出可判讀的答案。
+    判準 —— 模型即使不思考，也可能對模糊的提示詞長篇回覆。
+  • 改以 thinking 欄位為判準，並加入基準對照組。
+  • 找到可用的關閉方式後，測試 3/4/5 沿用（SUPPRESSION）。
+
+v4 修正（2026-09-18 第二次實跑，推翻了 v3 的結論）：
+  • 「thinking 欄位被清空」不等於「thinking 被關閉」。實測 think=false 的
+    欄位確實是 0 字，但模型仍在思考，內容改從 response 流出 —— 252 字的
+    內心獨白，沒有作答，比基準組（169 tokens、正確答案「2」）更慢更差。
+    它關掉的是標籤，不是行為。判準因此必須一併檢查答案本身。
+  • /no_think 與 raw 在 Ollama 0.34.2 皆回 HTTP 500，這兩條路已斷。
+  • 測試 5 的「沒有簡化字」是假通過：輸出是外流的思考、內容是幻覺、且撞上
+    上限中斷。現加入複述題目、done_reason=length 兩項檢查。
+  • 部分執行（VERIFY_ONLY）時，未執行的測試不可顯示成「未通過」，verify.sh
+    也不可宣稱「關鍵項目全數通過」。
+
+結論：本環境沒有可用的 thinking 關閉方式，維持預設即可 —— Ollama 會把思考
+隔離在 thinking 欄位，消費端只讀 response 就能拿到乾淨答案。
 
 用法：
   VERIFY_ONLY=2 python3 verify_api.py      只跑測試 2（見 scripts/verify.sh）
@@ -221,7 +232,8 @@ def test_suppression():
         ("raw", "raw 預填已關閉的思考區塊", {"prompt": _chatml(probe), "raw": True}),
     )
 
-    working = []
+    working = []   # 真正有效：欄位清空「且」答案合格
+    cleared = []   # 只有欄位被清空，答案卻更差 —— 假象，不可採用
     baseline_think = None
 
     for key, name, extra in variants:
@@ -240,32 +252,59 @@ def test_suppression():
             continue
 
         think = _thinking_text(resp)
+        answer = resp.get("response") or ""
         count = resp.get("eval_count") or 0
         is_baseline = key == "baseline"
         think_off = not think.strip()
+        compliant = _answer_compliant(answer, "2")
 
+        print(f"  • {name}{'（對照組）' if is_baseline else ''}")
         if is_baseline:
             baseline_think = len(think)
-            note = "（對照組）"
-        elif think_off:
-            working.append(key)
-            note = "  ← thinking 已關閉"
-        else:
-            note = ""
-
-        print(f"  • {name}{note}")
-        print(f"      思考欄位：{len(think)} 字")
-        print(f"      最終答案：{_show(resp.get('response'), 80)}")
+        blank = "  ← 欄位已清空" if think_off and not is_baseline else ""
+        print(f"      思考欄位：{len(think)} 字{blank}")
+        print(f"      最終答案：{_show(answer, 80)}")
         print(f"      生成    ：{count} tokens / {wall:.0f}s")
+
+        if is_baseline:
+            continue
+        if think_off and compliant:
+            working.append(key)
+            print("      ✓ 欄位清空且直接作答 —— 有效")
+        elif think_off:
+            cleared.append(key)
+            print("      ✗ 欄位雖清空，但思考內容被搬進 response，答案並未變好")
+        else:
+            print("      ✗ 仍在思考")
 
     if working:
         SUPPRESSION = working[0]
-        print(f"  有效的關閉方式：{SUPPRESSION}（後續測試將沿用）")
-        if baseline_think is not None:
-            print(f"  對照：基準組的思考欄位有 {baseline_think} 字")
+        print(f"  真正有效的關閉方式：{SUPPRESSION}（後續測試將沿用）")
     else:
-        print("  三種方式皆無效 —— 模型一律進入思考模式。")
+        SUPPRESSION = None
+        print("  沒有真正可用的關閉方式 —— 維持 thinking 開啟（預設）。")
+        if cleared:
+            print("  注意：下列方式只是清空 thinking 欄位，模型其實仍在思考，")
+            print("        內容改從 response 流出，答案更長也更差。不可採用：")
+            for key in cleared:
+                print(f"        • {key}")
+    if baseline_think is not None:
+        print(f"  對照：基準組的思考欄位有 {baseline_think} 字")
     return working
+
+
+def _answer_compliant(answer, expected):
+    """模型被要求「只回答數字」時，合格的答案必須短且直接。
+
+    這個檢查是 2026-09-18 第二次實跑後補上的。當時 think=false 讓 thinking
+    欄位清空，看似成功，實際上思考內容被搬進了 response —— 輸出長達 252 字
+    且沒有作答。只看欄位會把它誤判為有效，必須一併檢查答案本身。
+
+    用「包含」而非「開頭等於」：模型被要求只回答數字，但回「答案是 2」也
+    算合格，不該因此判成失敗。真正要擋的是長篇大論，長度才是主要判準。
+    """
+    text = (answer or "").strip()
+    return expected in text and len(text) <= 8
 
 
 def _suppress_chat(payload):
@@ -383,6 +422,7 @@ def test_traditional_chinese():
     )
     answer = resp.get("response") or ""
     count, dur, tps = _speed(resp)
+    truncated = resp.get("done_reason") == "length"
 
     if not answer.strip():
         print("  ? 無法判定：response 為空，模型輸出全落在 thinking 欄位")
@@ -391,13 +431,25 @@ def test_traditional_chinese():
         return None
 
     hits = sorted(set(answer) & SIMPLIFIED_HINTS)
+    # 把題目或系統提示複述出來，代表模型在「處理這個問題」而不是「回答它」，
+    # 也就是思考內容外流到 response。這種輸出即使沒有簡化字也不算通過。
+    leaked = prompt in answer or system in answer
+
     print(f"  輸出：{_show(answer, 240)}")
     if hits:
         print(f"  ✗ 偵測到簡化字：{''.join(hits)}（啟發式，請複核）")
     else:
         print("  ✓ 未偵測到常見簡化字")
+    if leaked:
+        print("  ✗ 複述了題目或系統提示 —— 這是外流的思考內容，不是答案")
+    if truncated:
+        print(f"  ✗ 撞上 num_predict 上限（{count} tokens）即中斷，未產出完整答案")
+
+    ok = not hits and not leaked and not truncated
+    if not ok and not hits:
+        print("  → 沒有簡化字，但輸出不合格，不可視為通過。")
     print(f"  生成速率：{_fmt_speed(count, dur, tps)}")
-    return not hits
+    return ok
 
 
 # ── 主流程 ──────────────────────────────────────────────
@@ -443,14 +495,30 @@ def main():
     print("\n" + "=" * 62)
     print(" 總結")
     print("=" * 62)
-    print(f"  生成速度      : {f'{speed:.2f} tok/s' if speed else '未取得（測試 1 失敗）'}")
-    print(f"  可關閉 thinking: {working[0] if working else '沒有可用方式'}")
-    print(f"  單輪 tool call: {'通過' if calls else '未通過'}")
-    print(f"  多輪 tool call: {'通過' if multi_ok else '未通過'}")
-    if chinese_ok is None:
-        print("  繁體中文控制  : 無法判定（輸出為空）")
+    # 未執行的測試不可顯示成「未通過」—— 那會讓人以為功能退步了。
+    # 這個缺陷是 2026-09-18 用 VERIFY_ONLY 部分執行時自己製造出來的。
+    if not want(1):
+        speed_text = "未執行"
+    elif speed:
+        speed_text = f"{speed:.2f} tok/s"
     else:
-        print(f"  繁體中文控制  : {'通過' if chinese_ok else '未通過'}")
+        speed_text = "未取得"
+
+    if not want(5):
+        chinese_text = "未執行"
+    elif chinese_ok is None:
+        chinese_text = "無法判定（輸出為空）"
+    else:
+        chinese_text = "通過" if chinese_ok else "未通過"
+
+    print(f"  生成速度      : {speed_text}")
+    if working:
+        print(f"  可關閉 thinking: {working[0]}（欄位清空且作答正確）")
+    else:
+        print("  可關閉 thinking: 沒有可用方式 —— 維持預設（thinking 開啟）")
+    print(f"  單輪 tool call: {'通過' if calls else ('未通過' if want(3) else '未執行')}")
+    print(f"  多輪 tool call: {'通過' if multi_ok else ('未通過' if want(4) else '未執行')}")
+    print(f"  繁體中文控制  : {chinese_text}")
     print("=" * 62)
 
     if only:

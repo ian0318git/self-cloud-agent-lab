@@ -121,6 +121,8 @@ bash scripts/up.sh
 | `bash scripts/down.sh --purge` | 停止容器並**刪除**所有 volume |
 | `bash scripts/pull-model.sh` | 單獨重試模型下載 |
 | `bash scripts/status.sh` | 容器狀態、模型清單、記憶體用量 |
+| `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、繁中輸出（約 10 分鐘） |
+| `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 
 ---
 

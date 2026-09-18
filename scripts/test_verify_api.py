@@ -82,6 +82,23 @@ for ch in "后里台面只干云准":
 for ch in "说这个请时间对开关们会":
     assert ch in v.SIMPLIFIED_HINTS, f"漏收簡化字：{ch}"
 
+# ── _answer_compliant：答案本身也要檢查，不能只看 thinking 欄位 ──
+# 這是 2026-09-18 第二次實跑後補的迴歸測試。當時 think=false 清空了
+# thinking 欄位，看似成功，實際上思考內容被搬進 response、長達 252 字
+# 且沒有作答。只看欄位會把它誤判為有效。
+assert v._answer_compliant("2", "2") is True
+assert v._answer_compliant("  2  ", "2") is True
+assert v._answer_compliant("2。", "2") is True
+# 門檻是 8 字：夠寬容簡短的說明，但擋得住整段外流的思考
+assert v._answer_compliant("答案是 2", "2") is True
+assert len("答案是 2") <= 8
+assert v._answer_compliant("嗯，用户问的是「1+1 等於多少？」…", "2") is False
+# 沒有作答、答錯、或整個從缺，一律不合格
+assert v._answer_compliant("", "2") is False
+assert v._answer_compliant(None, "2") is False
+assert v._answer_compliant("3", "2") is False
+assert v._answer_compliant("2" * 20, "2") is False
+
 # ── _suppress_chat / _suppress_generate：沿用機制 ────────
 # 這兩個函式決定「測試 2 找到的關閉方式，如何套用到後續測試」。
 # 錯在這裡不會有例外，只會安靜地讓後續測試失去效力，因此值得鎖住。

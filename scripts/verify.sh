@@ -73,6 +73,17 @@ echo "── 執行後記憶體 ────────────────
 free -h | awk 'NR==1 || /^Mem:/'
 echo
 
+# 部分執行時不可宣稱「關鍵項目全數通過」—— 沒跑的項目不代表通過。
+# 這個假通過是 2026-09-18 加上 VERIFY_ONLY 時自己製造出來的。
+if [[ -n "$VERIFY_ONLY" ]]; then
+  if [[ $STATUS -eq 0 ]]; then
+    ok "部分測試執行完畢（測試 $VERIFY_ONLY）—— 未做整體結論"
+  else
+    fail "部分測試有項目失敗（結束碼 $STATUS）"
+  fi
+  exit $STATUS
+fi
+
 if [[ $STATUS -eq 0 ]]; then
   ok "驗證完成，關鍵項目全數通過"
   cat <<'EOF'
