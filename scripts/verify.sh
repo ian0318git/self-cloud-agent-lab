@@ -8,9 +8,13 @@
 # 這樣做同時避開了「在終端機貼上長指令被折行」的問題 —— 腳本以檔案形式進版控。
 #
 # 用法：
-#   bash scripts/verify.sh          跑全部五項（約 10 分鐘）
-#   bash scripts/verify.sh 2        只跑第 2 項（關閉 thinking，約 1 分鐘）
-#   bash scripts/verify.sh 2,5      只跑第 2 與第 5 項
+#   bash scripts/verify.sh                跑全部五項（約 10 分鐘）
+#   bash scripts/verify.sh 2              只跑第 2 項（關閉 thinking，約 1 分鐘）
+#   bash scripts/verify.sh 2,5            只跑第 2 與第 5 項
+#   bash scripts/verify.sh 3,4 qwen3:1.7b 用指定模型跑第 3、4 項
+#
+# 模型必須用第二個參數指定，不能靠環境變數 —— load_env 會 source .env，
+# 把 OLLAMA_MODEL 覆蓋回 .env 的值，命令列的環境變數會被吃掉。
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -18,9 +22,10 @@ require_docker
 detect_compose
 load_env
 
-MODEL="${OLLAMA_MODEL:-qwen3:4b}"
-REMOTE=/tmp/verify_api.py
 VERIFY_ONLY="${1:-}"
+MODEL_OVERRIDE="${2:-}"
+MODEL="${MODEL_OVERRIDE:-${OLLAMA_MODEL:-qwen3:4b}}"
+REMOTE=/tmp/verify_api.py
 
 # ── 前置檢查 ────────────────────────────────────────────
 running_services() {
