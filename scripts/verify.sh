@@ -8,7 +8,7 @@
 # 這樣做同時避開了「在終端機貼上長指令被折行」的問題 —— 腳本以檔案形式進版控。
 #
 # 用法：
-#   bash scripts/verify.sh                跑全部五項（約 10 分鐘）
+#   bash scripts/verify.sh                跑全部五項（約 15 分鐘）
 #   bash scripts/verify.sh 2              只跑第 2 項（關閉 thinking，約 1 分鐘）
 #   bash scripts/verify.sh 2,5            只跑第 2 與第 5 項
 #   bash scripts/verify.sh 3,4 qwen3:1.7b 用指定模型跑第 3、4 項
@@ -56,7 +56,7 @@ fi
 if [[ -n "$VERIFY_ONLY" ]]; then
   info "開始實測（僅測試 $VERIFY_ONLY，請勿中斷）..."
 else
-  info "開始實測（整輪約 10 分鐘，請勿中斷）..."
+  info "開始實測（整輪約 15 分鐘，請勿中斷）..."
 fi
 echo
 
@@ -95,6 +95,10 @@ if [[ $STATUS -eq 0 ]]; then
 
 後續：
   • 若 tool calling 通過，第二階段可直接以 Open WebUI 原生 MCP 進行
+  • 事實正確性那一項請看「對照題」的結果，不是看目標題（D-014）：
+      目標題（MCP）不正確是**預期**的 —— 訓練資料早於 MCP 發布，
+      換同世代模型也不會改善，這正是第二階段需要 RAG 的理由。
+      對照題（HTTP）不正確才是「該換模型」的訊號。
   • 請將上方完整輸出保留，作為更新 DECISIONS.md 的依據
 EOF
 else

@@ -124,7 +124,7 @@ bash scripts/up.sh
 | `bash scripts/down.sh --purge` | 停止容器並**刪除**所有 volume |
 | `bash scripts/pull-model.sh` | 單獨重試模型下載 |
 | `bash scripts/status.sh` | 容器狀態、模型清單、記憶體用量 |
-| `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、繁中輸出（約 10 分鐘） |
+| `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、事實正確性（含對照題）、繁中輸出（約 15 分鐘） |
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | 模型的答案**事實是否正確**，外加速度。每道事實題都附一道對照題（每題約 1–2 分鐘） |

@@ -126,7 +126,7 @@ Open <http://localhost:3000>.
 | `bash scripts/down.sh --purge` | Stop containers and **delete** all volumes |
 | `bash scripts/pull-model.sh` | Retry the model download on its own |
 | `bash scripts/status.sh` | Container status, model list, memory usage |
-| `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, Chinese output (~10 min) |
+| `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, factual correctness (with a control question), Chinese output (~15 min) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | Whether the model's answers are **factually correct**, plus speed. Every factual question ships with a control question (~1–2 min per question) |
