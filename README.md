@@ -19,6 +19,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 - [Verification checklist](#verification-checklist)
 - [Quota management](#quota-management)
 - [Phase 2](#phase-2)
+- [Phase 3 and 4 — planned, not yet measured](#phase-3-and-4--planned-not-yet-measured)
 - [Codespaces gotchas](#codespaces-gotchas)
 - [Troubleshooting](#troubleshooting)
 
@@ -128,6 +129,7 @@ Open <http://localhost:3000>.
 | `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, Chinese output (~10 min) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
+| `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | Whether the model's answers are **factually correct**, plus speed. Every factual question ships with a control question (~1–2 min per question) |
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 
@@ -248,17 +250,39 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 
 ## Verification checklist
 
-This project has **no automated tests**. It is a feasibility POC, and its core
-behaviour — inference quality, MCP tool-calling reliability — is inherently a
-human judgement call. The steps below are performed manually.
+This project **does** have automated tests — `scripts/test_rag_probe.py` (57
+checks) and `scripts/verify.sh` (5 tests against the live API). An earlier
+version of this section claimed the opposite, and that claim is kept here as a
+record of what it caused: once *"inference quality is inherently a human
+judgement call"* was written down as a premise, nothing ever checked whether an
+answer was **true**. `verify_api.py` test 5 asks the model about MCP and graded
+only its **form** — response non-empty, no prompt leakage, not truncated. When
+the model replied *"MCP is a model provided by Alibaba Cloud"*, every check
+passed. See `DECISIONS.md` D-014.
+
+The steps below are still performed by hand. What must **not** be by hand is
+factual correctness — that is what `scripts/ask_probe.sh` is for.
 
 ### Phase 1: base stack
 
 - [ ] **Containers healthy** — `bash scripts/status.sh` shows both containers
       `running` and `open-webui` as `healthy`
 - [ ] **Model ready** — `qwen3:4b` appears in the model list
-- [ ] **Inference works** — ask "explain MCP in three sentences" in Open WebUI;
-      a sensible answer arrives within 10–30 seconds
+- [ ] **Inference works** — ask a question whose answer you can check by eye.
+      Ask about **HTTP, not MCP**: this item used to say "explain MCP", and
+      `qwen3:4b` answers that one confidently and **wrongly**, so
+      "a sensible answer arrived" passes while being false (D-014)
+- [ ] **Facts are mechanically checked, not eyeballed** —
+      `bash scripts/ask_probe.sh qwen3:4b` passes **both** the `mcp` question
+      and its `http` control question. The control question is the whole point:
+      without it you cannot tell *"this model is unreliable"* from *"this model
+      never saw MCP"*, and those have opposite fixes (D-014)
+- [ ] **Speed is measured, not assumed** — expect roughly **30–110 s** per
+      answer, and **264–293 s** for `qwen3:4b` with thinking on. The
+      "10–30 seconds" previously written here matched no measurement; it
+      coexisted with D-011's contradicting numbers for a full day before anyone
+      noticed. Thinking, not model size, is the dominant cost — the same class
+      of model without it answers in **7–15 s** (D-011, D-014)
 - [ ] **Streaming works** — the answer appears token by token, not in one block
       after a pause
 - [ ] **Memory holds** — during a conversation, the `Mem` line in `status.sh`
@@ -318,9 +342,18 @@ human judgement call. The steps below are performed manually.
 - [ ] **Multi-turn test:** a task requiring two or more sequential tool calls —
       confirm the 4B model can hold the flow together
 
-> **The critical unknown for this phase:** whether a 4B-class model can perform
-> reliable multi-turn tool calling. If the failure rate is too high, either move
-> to `qwen3:8b` and accept the memory pressure, or use a larger machine.
+> **This is no longer an open question.** D-011 verified that multi-turn tool
+> calling **passes** on this stack, so listing "can a 4B-class model do this at
+> all?" as *the critical unknown* for this phase was stale (D-014).
+>
+> **But the result is narrower than it reads, and the difference decides
+> Phase 3.** That evidence was gathered through **Open WebUI's own tool-calling
+> pipeline**. A LangGraph agent calls tools through `bind_tools` / the Ollama
+> integration's native function calling — a **different code path entirely**.
+> D-011's pass therefore does **not** transfer, and must be re-measured inside
+> the agent framework before Phase 3 leans on it. This is the exact failure mode
+> D-014 is about: a result measured under one set of conditions, remembered as a
+> conclusion, then reused under conditions it was never measured in.
 
 ---
 
@@ -366,9 +399,11 @@ tools already cover most of the original plan:
 | Web retrieval | `search_web` / `fetch_url` |
 | Notes / chat history | `search_notes` / `write_note` / `search_chats` |
 
-**LangGraph is therefore not introduced for now** — it is evaluated only when a
-need appears for custom multi-step workflows or an explicit state machine.
-See [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
+**LangGraph is not introduced for Phase 2** — D-005 deferred it until *"a need
+appears for custom multi-step workflows or an explicit state machine."* That
+condition is now being invoked deliberately for Phase 3, which is a state
+machine by definition; see [Phase 3 and 4](#phase-3-and-4--planned-not-yet-measured)
+below and [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 
 > **Licensing warning, verified:** the `langgraph-server` / `langgraph-api`
 > production container image is **Elastic License 2.0**. Self-hosting it in
@@ -404,6 +439,91 @@ tokens".
   [**mcpo**](https://github.com/open-webui/mcpo) proxy to bridge them to OpenAPI.
 - OAuth 2.1 tools **cannot** be set as model defaults — they need an interactive
   redirect.
+
+---
+
+## Phase 3 and 4 — planned, not yet measured
+
+> **Status: a plan, not a result.** Nothing on this page has been run. The
+> section exists so the design is written down *before* it is built, and so the
+> assumptions it rests on are visible enough to be tested. Every claim below is
+> marked **[verified]** (checked against docs/source on 2026-09-19) or **[open]**
+> (measured by nothing yet).
+
+This revisits **D-005**, which deferred LangGraph until *"a need appears for
+custom multi-step workflows or an explicit state machine."* That condition is
+now being invoked deliberately, not quietly assumed away — Phase 3 is a state
+machine by definition. D-005's status was *"pending review after Phase 1
+verification"*, and Phase 1 is complete. **D-007 still stands unchanged and
+unaffected:** the `langgraph` *library* is MIT; the `langgraph-server` /
+`langgraph-api` commercial container image is Elastic License 2.0 and is not
+used.
+
+### The planned stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| State machine | `langgraph` (library) | MIT — embed in our own service, never the ELv2 server image |
+| Model binding | `langchain-ollama` | binds `qwen3:4b` / `qwen2.5:3b` once Phase 1 benchmarking settles the choice |
+| Tool bridge | `langchain.mcp` → `MCPAdapter` | **[verified]** — see the correction below |
+| Loop guard | `recursion_limit=5` | see **[open]** item 4 |
+| Memory | `mem0` + ChromaDB | **[open]** items 2 and 3 |
+| Scheduler | `APScheduler`, in-process | **[open]** item 6 |
+| Multi-step | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
+| Multi-agent | LangGraph Supervisor (tool-based) | `langgraph-supervisor-py` optional, not introduced up front |
+
+**Correction on the MCP bridge.** The plan said to use `langchain-mcp-adapters`
+only if it were still current, pinning the version otherwise. Checking was the
+right instinct — **it is no longer the recommended path.** As of LangChain's
+2026-09-03 release, MCP ships inside the main package as `langchain.mcp`, and
+`MCPAdapter` "replaces the standalone `langchain-mcp-adapters` package."
+Install is `pip install "langchain[mcp]"`, requiring `langchain[mcp]>=1.4.0`.
+`MultiServerMCPClient.get_tools()` maps to `MCPAdapter.list_tools()`, and
+transports are now **inferred from the target** rather than named explicitly.
+Be aware `langchain.mcp` is **beta** — importing it raises `LangChainBetaWarning`
+and the API may still change, so pin the version once chosen.
+
+### Open items that decide whether this works
+
+Each of these is a measurement this project has not made. They are listed in
+the order they should be settled, because later ones are wasted effort if an
+earlier one fails.
+
+1. **[open] Does tool calling survive the change of code path?** D-011 proved
+   multi-turn tool calling through **Open WebUI's** pipeline. LangGraph binds
+   tools via `bind_tools` and the Ollama integration's native function calling —
+   a different implementation. **Re-measure before building anything on it**;
+   see the Phase 2 MCP note above and D-014.
+
+2. **[open] Chroma will reject this project's embeddings by default.** mem0's
+   Chroma backend defaults to **1536 dimensions** (OpenAI-sized). This project's
+   embedding model is `qwen3-embedding:0.6b`, measured at **1024 dimensions**
+   (D-013). Left at defaults this fails at write time with a shape mismatch.
+   `embedding_dims` and the collection's dimensions must both be pinned to 1024
+   — and the embedding model must not be changed later without re-embedding,
+   for the same reason noted in Phase 2 above.
+
+3. **[open] mem0 costs one extra LLM call per conversation, on 2 vCPU.**
+   mem0's write path runs an LLM to extract facts before storing them. That call
+   is *in addition to* generating the answer. At the rates measured here
+   (3.8–6.9 tok/s, D-011/D-014) this may be the single largest cost in Phase 4 —
+   large enough that it should be timed on its own before memory is designed in,
+   not discovered after.
+
+4. **[open] `recursion_limit=5` is likely too tight for Plan-and-Execute.**
+   The limit counts graph super-steps, and Plan → Execute → Check → Retry can
+   exceed five by itself once a retry occurs. Set the guard deliberately per
+   graph rather than inheriting one global value; a limit that trips during
+   normal operation gets raised until it stops meaning anything.
+
+5. **[open] A second vector store on 8GB.** Open WebUI already maintains its own
+   store for Knowledge; ChromaDB would be a second. The 8GB budget in D-001
+   (OS 1.0 + Open WebUI 1.0 + model 3.0 ≈ 5.0GB) never included it.
+
+6. **[open] `APScheduler` in-process loses its jobs on restart.** In-process
+   avoids a Redis container, which is the point — but without a persistent job
+   store, every container restart silently drops the schedule. Decide whether
+   the schedules must survive restarts before relying on them.
 
 ---
 

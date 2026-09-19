@@ -19,6 +19,7 @@
 - [驗證清單](#驗證清單)
 - [額度管理](#額度管理)
 - [第二階段](#第二階段)
+- [第三與第四階段 —— 計畫中，尚未量測](#第三與第四階段--計畫中尚未量測)
 - [Codespaces 的坑](#codespaces-的坑)
 - [疑難排解](#疑難排解)
 
@@ -126,6 +127,7 @@ bash scripts/up.sh
 | `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、繁中輸出（約 10 分鐘） |
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
+| `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | 模型的答案**事實是否正確**，外加速度。每道事實題都附一道對照題（每題約 1–2 分鐘） |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 
@@ -234,17 +236,36 @@ bash scripts/lock-signup.sh
 
 ## 驗證清單
 
-本專案**沒有自動化測試**。這是可行性 POC，其核心行為 ——
-推論品質、MCP tool calling 的穩定性 —— 本質上需要人工判斷。
-以下步驟以手動方式執行。
+本專案**有**自動化測試 —— `scripts/test_rag_probe.py`（57 項檢查）與
+`scripts/verify.sh`（5 項對實際 API 的測試）。本節原本寫的是相反的句子，
+而把那個句子留在這裡是有意義的：一旦「推論品質本質上需要人工判斷」被寫成前提，
+就再也沒有任何檢查去看答案**是否為真**。`verify_api.py` 第 5 項問模型
+MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、未被截斷。
+當模型回答「MCP 是阿里雲提供的模型」時，每一項檢查都通過。
+見 `DECISIONS.md` D-014。
+
+以下步驟仍以人工執行。但**事實正確性不能靠人工** ——
+那是 `scripts/ask_probe.sh` 的職責。
 
 ### 第一階段：基礎堆疊
 
 - [ ] **容器健康** —— `bash scripts/status.sh` 顯示兩個容器皆為 `running`，
       且 `open-webui` 為 `healthy`
 - [ ] **模型就緒** —— 模型清單中出現 `qwen3:4b`
-- [ ] **推論正常** —— 在 Open WebUI 中送出「用三句話解釋什麼是 MCP」，
-      約 10–30 秒內取得合理回答
+- [ ] **推論正常** —— 送出一道你能用眼睛核對答案的題目。
+      問 **HTTP，不要問 MCP**：本項原本寫「用三句話解釋什麼是 MCP」，
+      而 `qwen3:4b` 對那題的答案是**自信地錯誤**，
+      於是「取得了合理的回答」會在答案是假的時候照樣通過（D-014）
+- [ ] **事實靠機械檢查，不靠肉眼** ——
+      `bash scripts/ask_probe.sh qwen3:4b` 需**同時**通過 `mcp` 題與其
+      `http` 對照題。對照題正是重點：少了它，就無法區分
+      「這顆模型不可靠」與「這顆模型根本沒見過 MCP」——
+      而這兩者的處置完全相反（D-014）
+- [ ] **速度是量出來的，不是假設的** —— 每題約需 **30–110 秒**；
+      `qwen3:4b` 開著 thinking 時為 **264–293 秒**。此處原本寫的
+      「10–30 秒」對不上任何一次實測，卻與 D-011 的數字直接衝突並存了
+      一整天後才被發現。主因是 thinking，不是模型大小 ——
+      同級模型關掉 thinking 只需 **7–15 秒**（D-011、D-014）
 - [ ] **串流正常** —— 回答逐字浮現，而非停頓後一次出現
 - [ ] **記憶體未爆** —— 對話進行中，`status.sh` 的 `Mem` 一行仍有餘裕
       （未被 swap 吃光）
@@ -296,8 +317,17 @@ bash scripts/lock-signup.sh
 - [ ] **多輪測試**：需要連續呼叫兩次以上工具的任務，
       確認 4B 模型能維持流程不中斷
 
-> **本階段最關鍵的未知數**：4B 等級的模型能否穩定執行多輪 tool calling。
-> 若失敗率過高，需改用 `qwen3:8b` 並接受記憶體壓力，或改用更大的機器。
+> **這已經不是未知數了。** D-011 已驗證本堆疊的多輪 tool calling **會通過**，
+> 因此把「4B 等級模型到底能不能做這件事」列為本階段最關鍵的未知數，
+> 是過期的資訊（D-014）。
+>
+> **但這個結果的適用範圍比字面上窄，而那個差別決定了第三階段。**
+> 那份證據是在 **Open WebUI 自己的 tool calling 流程**中取得的。
+> LangGraph 是透過 `bind_tools` / Ollama 整合的原生 function calling
+> 呼叫工具 —— 那是**完全不同的程式路徑**。因此 D-011 的通過結果
+> **不會自動轉移**，必須在 agent 框架內重新量測，第三階段才能依賴它。
+> 這正是 D-014 在講的失效模式：在某組條件下量到的結果，被記成結論，
+> 然後套用到它從未在那組條件下量過的地方。
 
 ---
 
@@ -342,8 +372,10 @@ Open WebUI **自 v0.6.31 起原生支援 MCP**，且內建 agentic mode 的工�
 | 網路檢索 | `search_web` / `fetch_url` |
 | 筆記 / 對話歷史 | `search_notes` / `write_note` / `search_chats` |
 
-**因此 LangGraph 暫不引入** —— 僅在出現「需要自訂多步驟 workflow 或
-明確狀態機」的需求時才評估。完整取捨見
+**第二階段因此不引入 LangGraph** —— D-005 把它延後到「出現需要自訂多步驟
+workflow 或明確狀態機的需求時」才評估。那個條件現在正被刻意援引於第三階段，
+因為第三階段按定義就是狀態機；見下方
+[第三與第四階段](#第三與第四階段--計畫中尚未量測)，完整取捨見
 [`DECISIONS.md`](DECISIONS.md) 的 D-005。
 
 > **授權警告（已查證）**：`langgraph-server` / `langgraph-api` 生產容器映像檔
@@ -377,6 +409,83 @@ stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉�
 - **stdio 類的 server**（Claude Desktop 用的那種）需要透過
   [**mcpo**](https://github.com/open-webui/mcpo) proxy 橋接為 OpenAPI。
 - OAuth 2.1 工具**無法**設為模型預設值 —— 需要互動式重導向。
+
+---
+
+## 第三與第四階段 —— 計畫中，尚未量測
+
+> **狀態：這是計畫，不是結果。** 本節沒有任何一項跑過。它存在的目的是
+> 在動手**之前**把設計寫下來，並讓它所依賴的假設明顯到可以被測試。
+> 以下每一項都標記為 **[已查證]**（2026-09-19 對文件／原始碼查證）或
+> **[未驗證]**（尚無任何量測支持）。
+
+本節是對 **D-005** 的複核。D-005 把 LangGraph 延後到「出現需要自訂多步驟
+workflow 或明確狀態機的需求時」才評估。那個條件現在是被**刻意援引**的，
+不是被悄悄假設掉的 —— 第三階段按定義就是狀態機。D-005 的狀態是
+「待第一階段驗證後複核」，而第一階段已經完成。**D-007 不變且不受影響：**
+`langgraph` **函式庫**是 MIT；`langgraph-server` / `langgraph-api`
+商業容器映像檔是 Elastic License 2.0，本專案不採用。
+
+### 規劃的堆疊
+
+| 層 | 選擇 | 備註 |
+|---|---|---|
+| 狀態機 | `langgraph`（函式庫） | MIT —— 以函式庫形式嵌入自家服務，絕不使用 ELv2 的 server 映像檔 |
+| 模型對接 | `langchain-ollama` | 綁定 `qwen3:4b` / `qwen2.5:3b`，待第一階段 benchmark 定案後決定 |
+| 工具橋接 | `langchain.mcp` → `MCPAdapter` | **[已查證]** —— 見下方更正 |
+| 迴圈防護 | `recursion_limit=5` | 見 **[未驗證]** 第 4 項 |
+| 記憶層 | `mem0` + ChromaDB | **[未驗證]** 第 2、3 項 |
+| 排程器 | `APScheduler`，單一 process 內 | **[未驗證]** 第 6 項 |
+| 多步流程 | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
+| 多代理 | LangGraph Supervisor（tool-based） | `langgraph-supervisor-py` 列為可選，不一開始引入 |
+
+**關於工具橋接的更正。** 原規劃說「`langchain-mcp-adapters` 若仍採用則固定版本」。
+先去查是對的直覺 —— **它已經不是官方推薦路徑了。** 自 LangChain 2026-09-03
+的發布起，MCP 已內建於主套件的 `langchain.mcp` 命名空間，且 `MCPAdapter`
+「取代了獨立的 `langchain-mcp-adapters` 套件」。安裝方式為
+`pip install "langchain[mcp]"`，需要 `langchain[mcp]>=1.4.0`。
+`MultiServerMCPClient.get_tools()` 對應到 `MCPAdapter.list_tools()`，
+而傳輸方式現在是**從目標推斷**，不再用 `transport` 鍵明確指定。
+注意 `langchain.mcp` 仍在 **beta** —— 匯入時會拋出 `LangChainBetaWarning`，
+API 仍可能變動，因此選定後應固定版本。
+
+### 決定這套能不能成立的未驗證項
+
+以下每一項都是本專案尚未做過的量測。排序即為應該解決的順序 ——
+因為若前一項失敗，後面的都是白做工。
+
+1. **[未驗證] tool calling 換了程式路徑之後還成立嗎？** D-011 證明的是
+   **Open WebUI 流程**下的多輪 tool calling。LangGraph 透過 `bind_tools`
+   與 Ollama 整合的原生 function calling 綁定工具 —— 那是不同的實作。
+   **在任何東西蓋上去之前先重新量測**；見上方第二階段 MCP 的註記與 D-014。
+
+2. **[未驗證] Chroma 預設會拒收本專案的嵌入向量。** mem0 的 Chroma 後端
+   預設為 **1536 維**（OpenAI 的尺寸）。本專案的嵌入模型是
+   `qwen3-embedding:0.6b`，實測為 **1024 維**（D-013）。維持預設值會在
+   寫入時以 shape mismatch 失敗。`embedding_dims` 與 collection 的維度
+   都必須固定為 1024 —— 而且日後不能更換嵌入模型而不重新嵌入，
+   理由與上方第二階段所述相同。
+
+3. **[未驗證] mem0 每輪對話要多付一次 LLM 呼叫，而這裡只有 2 vCPU。**
+   mem0 的寫入路徑會先跑一次 LLM 抽取事實，再存進向量庫。那次呼叫是
+   **額外於**生成答案的。以本專案實測的速率（3.8–6.9 tok/s，D-011／D-014）
+   來看，這可能是第四階段最大的一筆成本 —— 大到應該在設計記憶層**之前**
+   單獨計時，而不是設計完才發現。
+
+4. **[未驗證] `recursion_limit=5` 對 Plan-and-Execute 很可能太緊。**
+   這個上限算的是 graph 的 super-step，而 Plan → Execute → Check → Retry
+   只要發生一次重試就可能超過 5。應該針對每個 graph 刻意設定防護值，
+   而不是沿用一個全域數字 —— 一個在正常運作時就會觸發的上限，
+   最後只會被調高到失去意義。
+
+5. **[未驗證] 8GB 上的第二套向量庫。** Open WebUI 本身已為 Knowledge
+   維護一套儲存；ChromaDB 會是第二套。D-001 的 8GB 預算
+   （OS 1.0 + Open WebUI 1.0 + 模型 3.0 ≈ 5.0GB）從未把它算進去。
+
+6. **[未驗證] `APScheduler` 在 process 內，重啟就丟掉排程。**
+   放在 process 內是為了省掉一個 Redis 容器 —— 那正是它的目的 ——
+   但沒有持久化的 job store，每次容器重啟都會安靜地丟掉排程。
+   在依賴排程之前，先決定它是否必須挺過重啟。
 
 ---
 
