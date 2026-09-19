@@ -289,11 +289,23 @@ human judgement call. The steps below are performed manually.
 > **Note for non-English documents:** Open WebUI's default embedding model is
 > `sentence-transformers/all-MiniLM-L6-v2` — English-only, 384 dimensions,
 > ~500MB RAM. For Chinese or other non-English documents, retrieval quality will
-> be poor unless you switch to a multilingual embedding model via
-> `RAG_EMBEDDING_ENGINE=ollama` and `RAG_EMBEDDING_MODEL=nomic-embed-text`.
+> be poor unless you switch to a multilingual embedding model. The candidates
+> were measured on this stack; the decision (see `DECISIONS.md` D-013) is the
+> **`ollama` engine with `qwen3-embedding:0.6b`**.
+>
+> **Set it in the Admin UI — `.env` will not work.** Open WebUI seeds its config
+> table on first boot and existing database values win from then on, so changing
+> `RAG_EMBEDDING_ENGINE` in `.env` and recreating the container does nothing
+> (verified in the source, not inferred — D-013). Use
+> **Admin → Settings → Documents → Embedding**.
+>
+> Pull the model first: `bash scripts/pull-model.sh qwen3-embedding:0.6b`.
 > **Changing the embedding model later requires re-embedding every document**,
-> so decide before you upload. Note also that a larger embedding model has been
-> reported to spike RAM from 2GB to 14GB — on a small VM, budget for it.
+> so decide before you upload.
+>
+> The "RAM spiked from 2GB to 14GB" figure you may have seen is specific to
+> `jina-embeddings-v3`, not a general property of larger embedding models —
+> see D-013.
 
 ### Phase 2: MCP
 

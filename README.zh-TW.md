@@ -272,11 +272,20 @@ bash scripts/lock-signup.sh
 > **非英文文件的注意事項**：Open WebUI 的預設嵌入模型是
 > `sentence-transformers/all-MiniLM-L6-v2` —— **僅支援英文**、384 維、
 > 約 500MB RAM。若文件是中文或其他非英文語言，檢索品質會很差，
-> 必須改用多語言嵌入模型，透過 `RAG_EMBEDDING_ENGINE=ollama` 與
-> `RAG_EMBEDDING_MODEL=nomic-embed-text` 切換。
+> 必須改用多語言嵌入模型。候選模型已在本堆疊上實測過，
+> 決定（見 `DECISIONS.md` D-013）是 **`ollama` 引擎 + `qwen3-embedding:0.6b`**。
+>
+> **請從 Admin UI 設定 —— 改 `.env` 沒有用。** Open WebUI 在首次開機時
+> 把設定寫進 config 表，之後資料庫的既有值一律優先，所以改 `.env` 的
+> `RAG_EMBEDDING_ENGINE` 再重建容器完全不會生效（這是從原始碼確認的，
+> 不是推論 —— 見 D-013）。請用
+> **Admin → Settings → Documents → Embedding**。
+>
+> 模型要先用 `bash scripts/pull-model.sh qwen3-embedding:0.6b` 放進 ollama。
 > **日後更換嵌入模型需要重新嵌入所有文件**，因此請在上傳前決定。
-> 另需注意：有回報指出較大的嵌入模型會讓 RAM 從 2GB 暴增至 14GB ——
-> 在小機器上請預留餘裕。
+>
+> 你可能看過的「RAM 從 2GB 暴增至 14GB」是 `jina-embeddings-v3` 的個案，
+> 不是較大嵌入模型的通性 —— 見 D-013。
 
 ### 第二階段：MCP
 

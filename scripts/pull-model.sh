@@ -23,10 +23,17 @@ if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx ollama; then
   exit 1
 fi
 
-if $COMPOSE exec -T ollama ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$MODEL"; then
-  ok "模型 $MODEL 已存在，略過下載"
-  exit 0
-fi
+# 正規化後再比對（見 lib.sh normalize_model）：`ollama list` 一律顯示
+# 帶 tag 的形式（bge-m3:latest），使用者打的卻是 bge-m3。不比對正規化
+# 形式的話，每次都會對一個已經存在的模型重新發出 pull。
+installed_raw="$($COMPOSE exec -T ollama ollama list 2>/dev/null | awk 'NR>1 {print $1}')"
+want="$(normalize_model "$MODEL")"
+while IFS= read -r line; do
+  if [[ -n "$line" && "$(normalize_model "$line")" == "$want" ]]; then
+    ok "模型 $MODEL 已存在，略過下載"
+    exit 0
+  fi
+done <<<"$installed_raw"
 
 info "下載模型 $MODEL ..."
 $COMPOSE exec -T ollama ollama pull "$MODEL"

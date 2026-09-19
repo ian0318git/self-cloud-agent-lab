@@ -22,12 +22,26 @@
 
 用法（見 scripts/rag_probe.sh，需在容器內執行）：
   python3 rag_probe.py bge-m3 nomic-embed-text
+  python3 rag_probe.py --engine st BAAI/bge-m3
+  python3 rag_probe.py --engine both bge-m3
+
+  --engine both 用同一顆模型的兩個名字跑：Ollama 的標籤走 ollama 那條，
+  HuggingFace 識別碼走 ST 那條。對照關係見 ST_MODEL_IDS；表上沒有的
+  模型用 NAME=HF_ID 明講。
+
+為什麼要支援兩種引擎：
+  Open WebUI 的嵌入可以走 Ollama（在 ollama 容器內跑），也可以走預設的
+  SentenceTransformers（在 open-webui 行程內跑）。**同一顆模型在兩條路上
+  的行為不一定相同** —— 分詞、pooling、正規化的實作不同。
+  只測其中一條，得到的結論不能直接套到另一條。
+  --engine both 就是把這個差異量出來，而不是把它寫成一句警語。
 """
 
 import json
 import math
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -51,6 +65,50 @@ def prefixes_for(model: str) -> tuple:
     """回傳 (查詢前綴, 文件前綴)。找不到就回傳無前綴。"""
     base = model.split(":")[0]
     return PREFIXES.get(base, NO_PREFIX)
+
+
+# ── 模型名稱對照 ────────────────────────────────────────────
+# 同一顆模型在兩條引擎上的名字不同：Ollama 用自己 registry 的標籤
+# （bge-m3、qwen3-embedding:0.6b），SentenceTransformers 用 HuggingFace 的
+# 識別碼（BAAI/bge-m3、Qwen/Qwen3-Embedding-0.6B）。
+#
+# 這張表是 --engine both 能成立的前提：它讓「同一顆模型」在兩條路上被認出來
+# 是同一顆，總結表才能把兩列並排比較。少了它，ST 那條路會拿到
+# "qwen3-embedding:0.6b" 這個不存在的 HF 識別碼，而且會拖到模型下載階段
+# 才失敗 —— 那正是 shell 端明文要避免的「跑到一半才失敗」。
+#
+# 每一組都是「Ollama 上的 GGUF 轉換版」對「原始權重」的關係。量化與否
+# 正是 --engine both 要量的差異之一，所以兩邊的配對必須是同一顆模型。
+ST_MODEL_IDS = {
+    "bge-m3": "BAAI/bge-m3",
+    "qwen3-embedding:0.6b": "Qwen/Qwen3-Embedding-0.6B",
+    "nomic-embed-text": "nomic-ai/nomic-embed-text-v1.5",
+    "nomic-embed-text-v2-moe": "nomic-ai/nomic-embed-text-v2-moe",
+    "granite-embedding:278m": "ibm-granite/granite-embedding-278m-multilingual",
+    "multilingual-e5-large": "intfloat/multilingual-e5-large",
+    "embeddinggemma": "google/embeddinggemma-300m",
+}
+
+# 由 NAME=HF_ID 語法填入（見 parse_args）。存在的理由是：不該為了測一顆
+# 新模型就去改上面的表。
+HF_ID_OVERRIDES = {}
+
+
+def resolve_hf_id(model: str) -> str:
+    """把模型名換成 SentenceTransformers 認得的 HuggingFace 識別碼。
+
+    認不出來時拋 ValueError，而不是把 ollama 標籤直接當識別碼丟出去 ——
+    那樣會在下載階段以一個難以理解的網路錯誤收場。
+    """
+    if model in HF_ID_OVERRIDES:
+        return HF_ID_OVERRIDES[model]
+    hf_id = ST_MODEL_IDS.get(model)
+    if hf_id is None:
+        raise ValueError(
+            f"不知道 {model!r} 對應的 HuggingFace 識別碼。"
+            f"請改用 {model}=<HF_ID> 指定，或將它加進 ST_MODEL_IDS。"
+        )
+    return hf_id
 
 
 # ── 題庫 ────────────────────────────────────────────────────
@@ -300,8 +358,8 @@ def _post(path, payload):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def embed(model, texts):
-    """回傳每段文字的向量。失敗時拋出例外，由呼叫端轉成看得懂的訊息。"""
+def _embed_ollama(model, texts):
+    """走 Ollama 的 /api/embed。模型在 ollama 容器內以量化權重執行。"""
     data = _post("/api/embed", {"model": model, "input": texts})
     vectors = data.get("embeddings")
     if not vectors or len(vectors) != len(texts):
@@ -310,6 +368,100 @@ def embed(model, texts):
             f"{len(vectors) if vectors else 0}）"
         )
     return vectors
+
+
+# SentenceTransformers 的模型只載入一次並快取 —— 每次呼叫都重載的話，
+# 光是載入時間就會主導整個實驗，而且會把記憶體反覆推高又釋放。
+_ST_CACHE = {}
+
+
+def _embed_st(model, texts):
+    """走 SentenceTransformers，在當前行程內執行（Open WebUI 的預設引擎）。
+
+    探針要量的是「Open WebUI 實際會怎麼跑」，不是「我們能把它跑得多好」，
+    所以不自行指定 dtype 或 device。
+
+    但這裡的等價性是**預設值剛好對上**，不是構造上保證 —— Open WebUI 其實
+    不是用 SentenceTransformer(name) 載入的，它傳了四個額外參數
+    （routers/retrieval.py → get_ef）：
+
+        SentenceTransformer(get_model_path(...), device=DEVICE_TYPE,
+                            trust_remote_code=..., backend=...,
+                            model_kwargs=...)
+
+    以本版映像檔（2026-09 查證）它們的預設值是：
+        DEVICE_TYPE                         'cpu'    ← 與這裡一致
+        SENTENCE_TRANSFORMERS_BACKEND       'torch'  ← 與這裡一致
+        SENTENCE_TRANSFORMERS_MODEL_KWARGS  None     ← 與這裡一致
+        RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE  True  ← 這裡明確傳入以對齊
+
+    也就是說：**目前一致，但這依賴上游的預設值不變。** 若哪天上游改了
+    backend 或 model_kwargs 的預設，這支探針就會開始量到跟正式上線不同的
+    東西，而且不會有任何錯誤訊息。改版後請重跑本檔頂端的查證。
+
+    batch_size 同樣要對齊：Open WebUI 的 RAG_EMBEDDING_BATCH_SIZE 預設是 1
+    （config.py），不是這裡以前寫的 8。這只影響速度與峰值記憶體，不影響
+    向量本身，但既然要量「實際會怎麼跑」就不能自己放大。
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "找不到 sentence_transformers。這個後端只能在 open-webui 容器內執行"
+            "（該映像檔內建此套件）。"
+        ) from exc
+
+    if model not in _ST_CACHE:
+        print(f"    （載入 SentenceTransformers 模型 {model}，首次需下載）")
+        _ST_CACHE[model] = SentenceTransformer(model, trust_remote_code=True)
+        # 這行只在載入時印一次。先前寫在每次呼叫的路徑上，於是 32 次呼叫
+        # 就印了 32 次同樣的話，把輸出洗掉了。
+        _batch = int(os.environ.get("ST_BATCH_SIZE", "1"))
+        if _batch == 1:
+            print("    （batch_size=1，與 Open WebUI 的 RAG_EMBEDDING_BATCH_SIZE 預設一致）")
+        else:
+            print(f"    （batch_size={_batch} —— 非 Open WebUI 預設值 1，速度與記憶體不可比）")
+
+    encoder = _ST_CACHE[model]
+    vecs = encoder.encode(texts, batch_size=int(os.environ.get("ST_BATCH_SIZE", "1")))
+    return [list(map(float, v)) for v in vecs]
+
+
+ENGINE = "ollama"
+
+# ── 計時 ────────────────────────────────────────────────────
+# 對「選哪條引擎」而言，兩條路的品質若相同，決定的就是速度與記憶體 ——
+# 所以計時不是附加資訊，是這個實驗的另一半答案。
+#
+# 只做**相對**比較：兩個引擎跑的工作量完全相同，所以「同一顆模型在兩條路上
+# 各花幾秒」可以直接對照。但這不是實際上線的吞吐量 —— 這裡的語料很小、
+# 沒有併發請求、也沒有重疊的文件入庫。不要拿這個數字去推算
+# 「一小時能入庫幾份文件」。
+_TIMING = {"calls": 0, "texts": 0, "seconds": 0.0}
+
+
+def reset_timing():
+    _TIMING.update(calls=0, texts=0, seconds=0.0)
+
+
+def timing():
+    return dict(_TIMING)
+
+
+def embed(model, texts):
+    """回傳每段文字的向量。失敗時拋出例外，由呼叫端轉成看得懂的訊息。"""
+    started = time.perf_counter()
+    try:
+        if ENGINE == "st":
+            # 只有 ST 需要換名字；ollama 那條路用的就是命令列給的標籤。
+            return _embed_st(resolve_hf_id(model), texts)
+        return _embed_ollama(model, texts)
+    finally:
+        # 記在 finally：失敗的呼叫也佔用真實時間，不記的話 --
+        # 一個一直失敗的引擎反而會看起來最快。
+        _TIMING["calls"] += 1
+        _TIMING["texts"] += len(texts)
+        _TIMING["seconds"] += time.perf_counter() - started
 
 
 def cosine(a, b):
@@ -389,13 +541,34 @@ def verdict_for(trad_top1, simp_top1):
     return "介於之間，需人工判讀（見上方明細）", gap
 
 
+def advisory_for(model):
+    """回傳「官方建議但不強制」的用法提示，沒有就回傳 None。
+
+    不擅自套用這些前綴：套用了就不是「Open WebUI 實際會跑的樣子」。
+    Open WebUI 預設不套用任何前綴，除非使用者自己設
+    RAG_EMBEDDING_QUERY_PREFIX。所以探針照預設跑，但把差異講出來。
+    """
+    key = model.lower()
+    if "qwen3-embedding" in key:
+        return ("Qwen3-Embedding 官方建議查詢加上 'Instruct: <任務>\\nQuery: ' 前綴，"
+                "未加仍可用、分數略低。若要套用，在 Open WebUI 設 "
+                "RAG_EMBEDDING_QUERY_PREFIX。")
+    return None
+
+
 def probe(model):
     q_prefix, d_prefix = prefixes_for(model)
     prefix_note = "無" if not q_prefix else f"{q_prefix!r} / {d_prefix!r}"
+    reset_timing()
 
     print(f"\n{'=' * 62}")
     print(f"模型：{model}")
+    print(f"引擎：{ENGINE}（{'open-webui 行程內' if ENGINE == 'st' else 'ollama 容器內'}"
+          f"{'，量化權重' if ENGINE == 'ollama' else '，通常為 fp32'}）")
     print(f"指令前綴（查詢 / 文件）：{prefix_note}")
+    note = advisory_for(model)
+    if note:
+        print(f"⚠  {note}")
     print(f"{'=' * 62}")
 
     results = {}
@@ -433,37 +606,131 @@ def probe(model):
     print(f"     注意：N={len(ITEMS)}，一題即 12.5% —— 這個解析度只能看出"
           f"明顯差距，\n           小幅差異（1 題）不足以判定優劣。")
 
+    t = timing()
+    rate = t["texts"] / t["seconds"] if t["seconds"] else 0.0
+    print(f"\n  ── 速度（僅供兩條引擎相對比較）──")
+    print(f"     {t['calls']} 次呼叫、{t['texts']} 段文字、"
+          f"{t['seconds']:.1f} 秒（{rate:.1f} 段/秒）")
+    print(f"     語料很小且無併發，這不是上線吞吐量；但兩條引擎跑的是同一份"
+          f"工作量，\n     所以同一顆模型的兩個數字可以直接對照。")
+
+    results["timing"] = t
     return results
 
 
+def parse_args(argv):
+    """把 --engine 抽出來，其餘的位置參數都是模型名稱。"""
+    engine = "ollama"
+    models = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--engine":
+            i += 1
+            if i >= len(argv):
+                raise ValueError("--engine 之後缺少值（ollama / st / both）")
+            engine = argv[i]
+        elif arg.startswith("--engine="):
+            engine = arg.split("=", 1)[1]
+        else:
+            # NAME=HF_ID 語法。用 '=' 切是安全的：Ollama 的標籤（bge-m3、
+            # qwen3-embedding:0.6b）與 HuggingFace 識別碼（BAAI/bge-m3）
+            # 都不含 '='。
+            name = arg.split("=", 1)[0]
+            if "=" in arg:
+                HF_ID_OVERRIDES[name] = arg.split("=", 1)[1]
+            models.append(name)
+        i += 1
+
+    if engine not in ("ollama", "st", "both"):
+        raise ValueError(f"未知的引擎：{engine}（可用：ollama / st / both）")
+    return engine, models
+
+
 def main():
-    models = sys.argv[1:]
-    if not models:
-        print("用法：python3 rag_probe.py <模型> [<模型> ...]")
-        print("例：  python3 rag_probe.py bge-m3 nomic-embed-text")
+    try:
+        engine, models = parse_args(sys.argv[1:])
+    except ValueError as exc:
+        print(f"✗ {exc}")
         return 2
+
+    if not models:
+        print("用法：python3 rag_probe.py [--engine ollama|st|both] <模型> [<模型> ...]")
+        print("例：  python3 rag_probe.py qwen3-embedding:0.6b bge-m3")
+        print("      python3 rag_probe.py --engine st Qwen/Qwen3-Embedding-0.6B")
+        print("      python3 rag_probe.py --engine both qwen3-embedding:0.6b")
+        print()
+        print("  <模型> 用 Ollama 的標籤。走 ST 引擎時會查表換成 HuggingFace")
+        print("  識別碼；表上沒有的模型用 NAME=HF_ID 明講，例如：")
+        print("      python3 rag_probe.py --engine both some-model=Org/some-model")
+        return 2
+
+    # 先確認每個模型在要用到的引擎上都認得出來 —— 不要跑到一半才失敗。
+    # 這與 shell 端「執行前先確認模型都已下載」是同一個原則。
+    if engine in ("st", "both"):
+        for m in models:
+            try:
+                resolve_hf_id(m)
+            except ValueError as exc:
+                print(f"✗ {exc}")
+                return 2
 
     _check_test_data()
     print(f"題庫自我檢查通過（{len(ITEMS)} 題，每題 1 正解 + 3 干擾，"
           f"干擾項與正解主題相同、僅差一個屬性）")
-    print(f"隨機猜測的期望 Top-1 = 25%")
+    print("隨機猜測的期望 Top-1 = 25%")
 
-    summary = {}
-    for model in models:
-        summary[model] = probe(model)
+    global ENGINE
+    engines = ["ollama", "st"] if engine == "both" else [engine]
 
-    ok_models = {m: r for m, r in summary.items() if r}
-    if len(ok_models) > 1:
+    # 每個引擎分開跑完整一輪。不把兩者交錯，因為 SentenceTransformers
+    # 的模型載入很慢，交錯會讓輸出難以對照、也讓記憶體高低起伏看不出規律。
+    results = {}   # (engine, model) -> stats 或 None
+    for eng in engines:
+        ENGINE = eng
+        if len(engines) > 1:
+            print(f"\n{'#' * 62}\n### 引擎：{eng}\n{'#' * 62}")
+        for model in models:
+            results[(eng, model)] = probe(model)
+
+    ok = {k: v for k, v in results.items() if v}
+    if len(ok) > 1:
         print(f"\n{'=' * 62}")
         print("總結")
         print(f"{'=' * 62}")
-        print(f"{'模型':<28}{'繁體Top-1':>10}{'簡體Top-1':>10}{'落差':>8}")
-        for model, r in ok_models.items():
+        print(f"{'引擎':<8}{'模型':<30}{'繁體Top-1':>10}{'簡體Top-1':>10}"
+              f"{'落差':>8}{'段/秒':>9}")
+        for (eng, model), r in ok.items():
             gap = r["simp"]["top1"] - r["trad"]["top1"]
-            print(f"{model:<28}{r['trad']['top1']:>9.0%}"
-                  f"{r['simp']['top1']:>10.0%}{gap:>+8.0%}")
+            t = r.get("timing") or {}
+            rate = (t.get("texts", 0) / t["seconds"]) if t.get("seconds") else 0.0
+            print(f"{eng:<8}{model:<30}{r['trad']['top1']:>9.0%}"
+                  f"{r['simp']['top1']:>10.0%}{gap:>+8.0%}{rate:>9.1f}")
 
-    failed = [m for m, r in summary.items() if not r]
+        # 同一個模型在不同引擎下的差異 —— 這正是 --engine both 要回答的問題。
+        # 若同一顆模型在兩個引擎上分數接近，模型選擇就可以脫離引擎決定；
+        # 若差很多，就不能拿一條路的結果去推另一條路。
+        by_model = {}
+        for (eng, model), r in ok.items():
+            by_model.setdefault(model, {})[eng] = r
+        for model, per_engine in by_model.items():
+            if len(per_engine) == 2:
+                diff = abs(per_engine["ollama"]["trad"]["top1"]
+                           - per_engine["st"]["trad"]["top1"])
+                tag = "一致" if diff <= 0.125 else "**不一致，引擎會影響結果**"
+                print(f"\n  {model}：繁體 Top-1 在兩個引擎相差 {diff:.0%} —— {tag}")
+
+                # 速度是引擎選擇的另一半答案：品質若相同，決定的就是這個。
+                times = {e: (r_.get("timing") or {}).get("seconds", 0.0)
+                         for e, r_ in per_engine.items()}
+                if times["st"] and times["ollama"]:
+                    faster = "st" if times["st"] < times["ollama"] else "ollama"
+                    ratio = max(times.values()) / min(times.values())
+                    print(f"  {model}：同一份工作量 —— st {times['st']:.1f}s、"
+                          f"ollama {times['ollama']:.1f}s，"
+                          f"{faster} 快 {ratio:.1f} 倍")
+
+    failed = [f"{e}/{m}" for (e, m), r in results.items() if not r]
     if failed:
         print(f"\n✗ 未能完成：{'、'.join(failed)}")
         return 1

@@ -94,7 +94,18 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      # start_period 要涵蓋「首次開機」的額外工作：Open WebUI 在啟動序列中
+      # 就會下載預設嵌入模型 sentence-transformers/all-MiniLM-L6-v2（約 90MB），
+      # 下載完成前 /health 不會回應。在這段期間失敗的檢查不計入 retries。
+      #
+      # 實測（2026-09-19，慢速 HF 連線）：啟動到 healthy 約 100–110 秒，
+      # 而原本 30s + 5×15s = 105s 的預算剛好卡在邊界上 —— `up.sh` 的
+      # --wait 因此回報 "container open-webui is unhealthy" 而失敗，
+      # 但服務其實完全正常，只是還在抓模型。那是本專案最不想出現的
+      # 「假失敗」：叫人去查一個不存在的問題。
+      #
+      # 180s 讓預算變成 180 + 75 = 255 秒，足以涵蓋慢速連線。
+      start_period: 180s
 
     networks:
       - ai-net

@@ -214,6 +214,154 @@ check("足夠" in v(0.875, 1.0), "差距 1 題但繁體已達標 → 足夠")
 # 落差必須真的傳回來，不能只回傳字串
 check(r.verdict_for(0.5, 1.0)[1] == 0.5, "verdict_for 一併回傳落差")
 
+print("\n[8] 引擎分派與參數解析")
+check(r.parse_args([]) == ("ollama", []), "無參數 → 預設 ollama、無模型")
+check(r.parse_args(["bge-m3"]) == ("ollama", ["bge-m3"]), "只有模型名")
+check(
+    r.parse_args(["--engine", "st", "M"]) == ("st", ["M"]),
+    "--engine st：值不會被誤收成模型名",
+)
+check(r.parse_args(["--engine=both", "a", "b"]) == ("both", ["a", "b"]), "--engine=both")
+check(r.parse_args(["a", "--engine", "ollama"]) == ("ollama", ["a"]), "旗標可在模型之後")
+for bad in (["--engine", "bogus", "a"], ["--engine"]):
+    try:
+        r.parse_args(bad)
+        check(False, f"{bad} 應被拒絕")
+    except ValueError:
+        check(True, f"{bad} 應被拒絕")
+
+print("\n[9] 模型名稱對照（--engine both 的前提）")
+# 同一顆模型在 Ollama 與 HuggingFace 上是不同的名字。認不出來的話，ST 那條
+# 路會拿到一個不存在的識別碼，而且拖到模型下載階段才失敗 —— 所以這張表
+# 是 --engine both 能成立的前提，不是方便功能。
+check(r.resolve_hf_id("bge-m3") == "BAAI/bge-m3", "bge-m3 → BAAI/bge-m3")
+check(
+    r.resolve_hf_id("qwen3-embedding:0.6b") == "Qwen/Qwen3-Embedding-0.6B",
+    "qwen3-embedding:0.6b → Qwen/Qwen3-Embedding-0.6B",
+)
+try:
+    r.resolve_hf_id("no-such-model")
+    check(False, "表上沒有的模型應拋出錯誤，而不是把 ollama 標籤當識別碼送出")
+except ValueError as exc:
+    check("HF_ID" in str(exc), "錯誤訊息要告訴使用者怎麼補救（NAME=HF_ID）")
+
+# NAME=HF_ID：不該為了測一顆新模型就去改表。
+# 用 '=' 切是安全的 —— ollama 標籤與 HF 識別碼都不含 '='。
+_eng, _models = r.parse_args(["--engine", "both", "new-model=Org/New"])
+check(_models == ["new-model"], "NAME=HF_ID 的顯示名只取 '=' 前面那半")
+check(r.resolve_hf_id("new-model") == "Org/New", "NAME=HF_ID 會被 resolve_hf_id 採用")
+r.HF_ID_OVERRIDES.clear()
+
+# 顯示名必須是乾淨的，否則前綴查表會落空 —— 而少了前綴會拉低分數，
+# 那個低分又會被誤讀成「這個模型不好」。
+_eng, _models = r.parse_args(["nomic-embed-text=Org/X"])
+check(_models == ["nomic-embed-text"], "帶 = 的模型名仍能被前綴表認出來")
+check(
+    r.prefixes_for(_models[0]) == ("search_query: ", "search_document: "),
+    "前綴查表用的是去掉 HF 之後的名字",
+)
+r.HF_ID_OVERRIDES.clear()
+
+_orig_ollama, _orig_st, _orig_engine = r._embed_ollama, r._embed_st, r.ENGINE
+_calls = []
+r._embed_ollama = lambda m, t: _calls.append("ollama") or [[1.0]]
+r._embed_st = lambda m, t: _calls.append("st") or [[1.0]]
+try:
+    r.ENGINE = "ollama"
+    r.embed("bge-m3", ["x"])
+    r.ENGINE = "st"
+    # ST 那條會先把 'bge-m3' 換成 HF 識別碼，所以這裡的樁收到的會是
+    # 'BAAI/bge-m3'。用一個不在對照表上的名字（例如 "m"）會在分派之前
+    # 就被 resolve_hf_id 擋掉 —— 那測到的是名稱解析，不是分派。
+    r.embed("bge-m3", ["x"])
+finally:
+    r.ENGINE = _orig_engine
+    r._embed_ollama, r._embed_st = _orig_ollama, _orig_st
+check(_calls == ["ollama", "st"], f"ENGINE 正確分派到兩個後端（實際：{_calls}）")
+
+# 分派要真的把名字換掉，不能只是分派過去。少了這個，ST 那條會拿到
+# ollama 的標籤，然後在下載階段才失敗。
+_seen = []
+r._embed_ollama = lambda m, t: [[1.0]]
+r._embed_st = lambda m, t: _seen.append(m) or [[1.0]]
+try:
+    r.ENGINE = "ollama"
+    r.embed("bge-m3", ["x"])
+    r.ENGINE = "st"
+    r.embed("bge-m3", ["x"])
+finally:
+    r.ENGINE = _orig_engine
+    r._embed_ollama, r._embed_st = _orig_ollama, _orig_st
+check(_seen == ["BAAI/bge-m3"], f"ST 那條收到的是 HF 識別碼（實際：{_seen}）")
+
+check(r.advisory_for("qwen3-embedding:0.6b") is not None, "qwen3-embedding 有前綴建議")
+check(r.advisory_for("Qwen/Qwen3-Embedding-0.6B") is not None, "HF 識別碼也認得")
+check(r.advisory_for("bge-m3") is None, "bge-m3 沒有前綴建議")
+
+print("\n[10] 計時（引擎選擇的另一半答案）")
+# 若兩條引擎的品質相同，決定的就是速度。計時壞掉不會讓任何測試變紅，
+# 只會讓最後的結論建立在錯的數字上 —— 所以它也要被測。
+_saved = (r._embed_ollama, r._embed_st, r.ENGINE)
+r.reset_timing()
+check(
+    r.timing() == {"calls": 0, "texts": 0, "seconds": 0.0},
+    "reset_timing 會歸零",
+)
+r._embed_ollama = lambda m, t: [[1.0] for _ in t]
+r.ENGINE = "ollama"
+try:
+    r.embed("bge-m3", ["a", "b", "c"])
+    _t = r.timing()
+    check(_t["calls"] == 1, f"計一次呼叫（實際 {_t['calls']}）")
+    check(_t["texts"] == 3, f"記三段文字（實際 {_t['texts']}）")
+    check(_t["seconds"] > 0, "確實累加了秒數")
+finally:
+    r._embed_ollama, r._embed_st, r.ENGINE = _saved
+
+# 失敗的呼叫也要計時 —— 否則一個一直失敗的引擎會看起來最快。
+r.reset_timing()
+
+
+def _boom(m, t):
+    raise RuntimeError("boom")
+
+
+r._embed_ollama = _boom
+r.ENGINE = "ollama"
+try:
+    try:
+        r.embed("m", ["x"])
+    except RuntimeError:
+        pass
+    check(
+        r.timing()["calls"] == 1,
+        "失敗的呼叫仍被計入（否則失敗的引擎會看起來最快）",
+    )
+finally:
+    r._embed_ollama, r._embed_st, r.ENGINE = _saved
+    r.reset_timing()
+
+# ST 後端的失敗路徑：本機沒有 sentence_transformers，所以這裡測不到成功的編碼，
+# 但至少可以確認「套件不存在時給的是看得懂的訊息，而不是 ImportError 直接炸開」。
+# 這條路徑很重要 —— 使用者若在容器外執行 --engine st，看到的應該是這句提示。
+try:
+    import sentence_transformers  # noqa: F401
+
+    _has_st = True
+except ImportError:
+    _has_st = False
+
+if _has_st:
+    print("    （本機已安裝 sentence_transformers，略過缺少套件的檢查）")
+else:
+    try:
+        r._embed_st("some/model", ["x"])
+        check(False, "缺少 sentence_transformers 時應拋出可讀的錯誤")
+    except RuntimeError as exc:
+        check("open-webui 容器" in str(exc), "缺少套件時給出可行動的提示")
+    except ImportError:
+        check(False, "直接拋出 ImportError —— 使用者看不懂該怎麼辦")
+
 print()
 if FAILURES:
     print(f"✗ {len(FAILURES)} 項未通過：")

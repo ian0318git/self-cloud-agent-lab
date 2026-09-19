@@ -14,6 +14,27 @@ ok()    { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '\033[0;33m!\033[0m %s\n' "$*" >&2; }
 fail()  { printf '\033[0;31m✗\033[0m %s\n' "$*" >&2; }
 
+# ── Ollama 模型名稱正規化 ───────────────────────────────
+# ollama 把 "bge-m3" 與 "bge-m3:latest" 當成同一個模型，而 `ollama list`
+# 一律顯示帶 tag 的形式。因此「使用者打的名字」與「清單裡的名字」字面上
+# 經常不相等 —— 直接比對字串就會把一個明明已下載的模型誤報成缺漏。
+#
+# 這不是理論問題：實測 `bash scripts/rag_probe.sh bge-m3` 在 bge-m3 已下載
+# 的情況下仍印出「以下模型尚未下載：bge-m3」，然後叫使用者去執行一個
+# 只會回他「已存在，略過下載」的指令。那正是本專案最想避免的假失敗 ——
+# 叫人去查一個不存在的問題。
+#
+# tag 的判定要小心：只有「最後一個 ':' 出現在最後一個 '/' 之後」才是 tag。
+# 前者可能是 registry 的埠號（localhost:5000/foo），那是名字的一部分。
+normalize_model() {
+  local m="${1:-}"
+  if [[ "${m##*/}" == *:* ]]; then
+    printf '%s' "$m"
+  else
+    printf '%s:latest' "$m"
+  fi
+}
+
 # ── Docker Compose 偵測 ─────────────────────────────────
 # Codespaces 提供 compose v2 外掛（docker compose）；
 # 部分較舊環境只有 v1 獨立執行檔（docker-compose）。
