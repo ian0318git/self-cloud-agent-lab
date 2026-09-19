@@ -48,6 +48,44 @@ Being explicit about this, because the whole project depends on not confusing
 Interface conformance is not the same as capacity. The probe deliberately does
 not claim otherwise — its own output says so.
 
+## Terms of use: Kaggle is a measurement tool, not a product environment
+
+**This section did not exist before, and it is the one that decides whether
+this path can be handed to a company.**
+
+Kaggle's [Terms of Use](https://www.kaggle.com/terms) restrict the service to
+**personal, non-commercial** use. The wording, as quoted in Kaggle's own Q&A:
+
+> You will only use the Services for your own internal, personal,
+> non-commercial use, and not on behalf of or for the benefit of any
+> third party.
+
+This project's long-term goal is to let small companies run internal
+assistants — that is commercial use, and the two do not fit together. So keep
+the two purposes apart:
+
+| Purpose | Is Kaggle the right fit? |
+|---|---|
+| Verifying "a larger model actually runs", measuring speed and VRAM | **Yes** — this is exactly what this document is for |
+| The product path: the runtime for a company's internal assistant | **No** — the terms restrict it to personal, non-commercial use |
+
+The product path ends at a VPS + GPU + vLLM (see the last section). **Kaggle is
+one measurement on the way there, not part of that path.**
+
+**How far this claim goes** (this project's rule: a claim carries its evidence,
+and its boundaries):
+
+- The quote above comes from **Kaggle's own Q&A quoting the Terms**, consulted
+  2026-09-19.
+- **The Terms text itself was not read directly.** `kaggle.com/terms` is a
+  JS-rendered page — fetching it returned only the title, no clauses. So this
+  is a **second-hand quote**, not a check against the source.
+- **The Acceptable Use Policy text (`kaggle.com/aup`) was likewise not
+  retrieved**, so nothing here should be read as stating what it says about
+  running a notebook as a server.
+- **This is not legal advice.** Before using it commercially, read the terms
+  yourself, or ask whoever handles that for you.
+
 ---
 
 ## Prerequisites

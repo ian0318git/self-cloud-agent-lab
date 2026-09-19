@@ -1458,6 +1458,46 @@ async def get(key, default=None):
   只有使用者開一次 UI 才算數。
 - Kaggle 的實際額度與硬體**未量測**（且不應寫死 —— 政策會變，P100 已於
   2026-09-15 退役）。
+- **Kaggle 的條款本文與 Acceptable Use Policy 都沒有直接讀到**，只有官方
+  Q&A 的轉引（見第八節）。
+
+### 八、使用條款：Kaggle 不能是產品路徑（2026-09-19 補記）
+
+**這一節補的是一個真空。** 第四到第七節寫了 Kaggle 怎麼接、怎麼驗、有什
+麼風險，但**從頭到尾沒有一句話提到它的使用條款** —— 而條款決定的正是這
+條路「能不能拿去給公司用」。
+
+Kaggle 的[使用條款](https://www.kaggle.com/terms)把服務限定為**個人、非
+商業**用途。官方 Q&A 引述的原文是：
+
+> You will only use the Services for your own internal, personal,
+> non-commercial use, and not on behalf of or for the benefit of any
+> third party.
+
+本專案的長期目標是「讓小公司建內部助理」—— 那是商業用途。所以要把兩種
+用途分開：
+
+| 用途 | Kaggle |
+|---|---|
+| 驗證大模型跑得動、量速度與可用 VRAM | **適合** —— 這正是 D-017 用它的理由 |
+| 產品路徑：公司內部助理的執行環境 | **不適合** —— 條款限定個人、非商業 |
+
+**這不改變任何技術結論。** 探針的結果、runtime 替換點的存在、接線腳本，
+全部照舊。它改變的是**定位**：Kaggle 是驗證工具，產品路徑的終點仍然是
+VPS + GPU + vLLM。
+
+**證據的邊界**（本專案的規矩：連「沒查到什麼」也要寫出來）：
+
+- 引文來自 **Kaggle 官方 Q&A 對條款的引述**，2026-09-19 查閱。
+- **條款本文沒有直接讀到。** `kaggle.com/terms` 是 JS 渲染的頁面，抓取只
+  回傳標題、沒有條文內文 —— 這是**轉引**，不是與原文核對。
+- **Acceptable Use Policy（`kaggle.com/aup`）的本文同樣沒有取得。** 所以
+  本節**不能**宣稱它對「把 notebook 當伺服器」有什麼具體規定，已列為
+  未解（第六節）。
+- **本節不是法律意見。** 要拿去商用之前，請自己讀過條款，或問法務。
+
+已同步寫進 `docs/ENDPOINT.md` 與 `docs/ENDPOINT.zh-TW.md`，那兩份原本
+也都沒有這一節。
 
 ---
 

@@ -43,6 +43,37 @@ $ bash scripts/probe-openai.sh
 
 介面相容不等於承載能力。探針刻意不宣稱後者——它自己的輸出就寫明了這件事。
 
+## 使用條款：Kaggle 是驗證工具，不是產品環境
+
+**這一節原本不存在，是個真空 —— 而它決定的正是「這條路能不能拿去給公司用」。**
+
+Kaggle 的[使用條款](https://www.kaggle.com/terms)把服務限定為**個人、
+非商業**用途。官方 Q&A 引述的原文是：
+
+> You will only use the Services for your own internal, personal,
+> non-commercial use, and not on behalf of or for the benefit of any
+> third party.
+
+本專案的長期目標是「讓小公司建內部助理」——那是商業用途，兩者不相容。
+所以要把兩種用途分開看：
+
+| 用途 | Kaggle 適不適合 |
+|---|---|
+| 驗證「大模型跑得動」、量速度與可用 VRAM | **適合** —— 這正是本文件的目的 |
+| 產品路徑：公司內部助理的執行環境 | **不適合** —— 條款限定個人、非商業 |
+
+產品路徑的終點是 VPS + GPU + vLLM（見最後一節）。**Kaggle 是抵達之前的
+一次量測，不是那條路的一部分。**
+
+**這一段的可信度界線**（本專案的規矩：說法要附證據，也要附它的邊界）：
+
+- 上面的引文來自 **Kaggle 官方 Q&A 對條款的引述**，2026-09-19 查閱。
+- **條款本文沒有直接讀到。** `kaggle.com/terms` 是 JS 渲染的頁面，抓取只
+  回傳標題、沒有條文內文 —— 所以這是**轉引**，不是與原文核對。
+- **Acceptable Use Policy（`kaggle.com/aup`）的本文同樣沒有取得**，所以
+  這裡**不能**宣稱它對「把 notebook 當伺服器」有什麼具體規定。
+- **本節不是法律意見。** 要拿去商用之前，請自己讀過條款，或問法務。
+
 ---
 
 ## 前置條件
