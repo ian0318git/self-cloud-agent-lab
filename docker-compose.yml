@@ -167,6 +167,36 @@ services:
     networks:
       - ai-net
 
+  # ── 測試用 MCP server（第二階段 MCP 清單）────────────────
+  # 唯一目的：讓「Admin → External Tools 新增 MCP (Streamable HTTP)」
+  # 有現成的東西可以接。兩個工具（echo、roll_die）分別對應 MCP 清單的
+  # 基本呼叫與多輪測試（見 README 第二階段 MCP 一節）。
+  #
+  # 刻意不發布埠 —— 與 ollama 同一個思路：open-webui 經 ai-net 內網直達
+  # http://mcp-test-server:8000/mcp，主機與外界都碰不到（D-003）。
+  # 驗證完第二階段 MCP 清單後，刪掉這個服務與 mcp-server/ 目錄即可。
+  mcp-test-server:
+    build: ./mcp-server
+    container_name: mcp-test-server
+    restart: unless-stopped
+
+    # 只檢查「埠有在聽」。streamable-http 對 GET /mcp 的回應不是 200，
+    # 所以不能照 open-webui 那樣用 urllib 驗 HTTP 狀態 —— 那會製造假失敗
+    # （D-006 同一類：healthcheck 本身的錯誤把人送去修不存在的問題）。
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - ai-net
+
   # ── Cloudflare Tunnel（選用，第二階段的對外連線）────────
   # 讓 Open WebUI 透過你自己的網域對外，並由 Cloudflare Access 控管身分。
   # 這條路線由容器「對外」建立連線，因此不需要發布任何埠，也不需要

@@ -491,6 +491,15 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 - [ ] **多輪測試**：需要連續呼叫兩次以上工具的任務，
       確認 4B 模型能維持流程不中斷
 
+> **現成的測試 server**：`docker compose up -d --build mcp-test-server` 會起一個
+> 只活在 ai-net 內網的 Streamable HTTP MCP server（不發布埠，D-003），提供
+> `echo` 與 `roll_die` 兩個工具——前者驗證最基本的工具呼叫，後者讓
+> 「擲兩次骰子並加總」成為現成的多輪測試題。在 Admin → External Tools 新增
+> 時 URL 填 `http://mcp-test-server:8000/mcp`、無認證。加之前可先跑
+> `bash scripts/verify-mcp-server.sh`——它從 open-webui 容器的視角打完整
+> handshake，機械確認這條路全通。驗證完第二階段後，刪掉 compose 裡的
+> `mcp-test-server` 服務與 `mcp-server/` 目錄即可。
+
 > **這已經不是未知數了。** D-011 已驗證本堆疊的多輪 tool calling **會通過**，
 > 因此把「4B 等級模型到底能不能做這件事」列為本階段最關鍵的未知數，
 > 是過期的資訊（D-014）。

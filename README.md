@@ -535,6 +535,16 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 - [ ] **Multi-turn test:** a task requiring two or more sequential tool calls —
       confirm the 4B model can hold the flow together
 
+> **A ready-made test server:** `docker compose up -d --build mcp-test-server`
+> starts a Streamable HTTP MCP server that lives only on the internal `ai-net`
+> network (no published port — D-003), exposing two tools: `echo` (the simplest
+> possible tool call) and `roll_die` ("roll two dice and add them" is a
+> ready-made multi-turn test). In Admin → External Tools, use URL
+> `http://mcp-test-server:8000/mcp` with no auth. Run
+> `bash scripts/verify-mcp-server.sh` first — it performs the full handshake
+> from the open-webui container's point of view. Once Phase 2 verification is
+> done, delete the `mcp-test-server` service and the `mcp-server/` directory.
+
 > **This is no longer an open question.** D-011 verified that multi-turn tool
 > calling **passes** on this stack, so listing "can a 4B-class model do this at
 > all?" as *the critical unknown* for this phase was stale (D-014).
