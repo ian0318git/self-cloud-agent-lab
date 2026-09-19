@@ -218,6 +218,9 @@ bash scripts/up.sh
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | 模型的答案**事實是否正確**，外加速度。每道事實題都附一道對照題（每題約 1–2 分鐘） |
+| `bash scripts/rag-verify.sh` | **第二階段 RAG 的機械驗證**：檢索有沒有挑對段落、模型有沒有真的用它、文件沒寫的東西它會不會照樣發明。走應用程式自己的檢索函式（CPU 上約 2–5 分鐘；三次生成各 41–94 秒，四輪實測見 D-018）。結束碼同上，另加 `3` = 探針自己壞掉（D-018） |
+| `bash scripts/rag-verify.sh --model qwen2.5:3b` | 同上，指定模型（模型必須是參數——`.env` 會覆蓋環境變數）。**請用非思考型模型**：`qwen3:4b` 在 CPU 上三次生成全部撞到預設的 300 秒上限（D-018） |
+| `bash scripts/rag-verify.sh --timeout 900` | 拉長單題時限，給思考型模型用。「太慢」與「連不上」會分開講 —— 兩者要修的東西不同 |
 | `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
 | `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |
 | `bash scripts/probe-openai.sh [URL]` | 任何 OpenAI-compatible runtime 的相容性探針。預設指向 Ollama 的 `/v1` |
@@ -366,9 +369,13 @@ bash scripts/lock-signup.sh
 
 本專案**有**自動化測試 —— `scripts/test_rag_probe.py`（57 項檢查）、
 `scripts/test_verify_api.py`、`scripts/test_ask_probe.py`、
-`scripts/test_egress_probe.py`、`scripts/test_probe_openai.py` 與
-`scripts/test_runtime_state.py` —— 離線單元測試，五支給探針、一支給 runtime
-設定讀寫，以及
+`scripts/test_egress_probe.py`、`scripts/test_probe_openai.py`、
+`scripts/test_runtime_state.py` 與 `scripts/test_rag_grounding_probe.py` ——
+離線單元測試：五支給探針、一支給 runtime 設定讀寫、一支給 RAG 評分，
+而那個評分在 2026-09-19 **連續錯了四次**（四次全是**假失敗**；迴歸測資
+用的是模型實際的回應原文，一字未改）。它的測試也釘住「模型太慢」與
+「模型連不上」的分別 —— 這一項探針自己也弄錯過一次，把慢的模型報成
+連不上的（D-018）。另有
 `scripts/verify.sh`（5 項對實際 API 的測試）。
 `test_ask_probe.py` 直到 D-016 才存在：在那之前它的評分邏輯從未被實測過，
 而**第一次**實際跑到就抓到它自己的假失敗。本節原本寫的是相反的句子，
@@ -430,6 +437,27 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 - [ ] **反例測試**：詢問一個文件中**不存在**的細節，
       確認模型回答「不知道」而非編造
 
+> **這四項可以機械驗證，而且不需要帳號。**
+> `bash scripts/rag-verify.sh` 用一份**虛構**文件跑完這四項，走的是應用程式
+> 自己的檢索函式（`query_collection`、`get_embedding_function`、
+> `VECTOR_DB_CLIENT`、`apply_source_context_to_messages`）。之要用虛構內容，
+> 是關鍵：問真實法規的話，模型可以從自己的記憶答對，那就什麼都證明不了。
+>
+> 它把**檢索與接地分開報**——「對的段落根本沒被撈到」和「撈到了但模型忽略」
+> 是兩種病，修法不同。見 D-018。
+>
+> **它證明不了什麼：** 攝入用的是應用程式自己的切塊器、嵌入函式與向量客戶端，
+> 但**由探針組裝** —— 不是走 `/api/v1/files` 那條 HTTP 路徑。那條路需要一個
+> 已登入的使用者，而本資料庫目前有**零個使用者**：註冊是鎖住的（D-012），
+> 所以建立第一個管理員只有你能做。有了帳號之後，上面四項請在 UI 裡實際做
+> 一次；這支腳本是讓你在做之前就知道該預期什麼。
+>
+> **它也沒有壓到 context 上限。** 探針的文件只有 478 字元（約 765 token），
+> 而本堆疊載入模型時是 **`num_ctx` 4096** —— Open WebUI 從來不設這個值。
+> 在 `chunk_size=1000` 之下，撈回六個滿塊約 6700 token，超出的部分會被
+> **靜默丟棄**，而被丟掉的正是排名最後的那些段落。請把「通過」讀成
+> 「這條鏈能動」，**不要**讀成「RAG 對真實文件也成立」（D-018）。
+
 > **非英文文件的注意事項**：Open WebUI 的預設嵌入模型是
 > `sentence-transformers/all-MiniLM-L6-v2` —— **僅支援英文**、384 維、
 > 約 500MB RAM。若文件是中文或其他非英文語言，檢索品質會很差，
@@ -441,6 +469,12 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 > `RAG_EMBEDDING_ENGINE` 再重建容器完全不會生效（這是從原始碼確認的，
 > 不是推論 —— 見 D-013）。請用
 > **Admin → Settings → Documents → Embedding**。
+>
+> 這個決定有兩支腳本配合：`bash scripts/set-embedding.sh` 讀取／設定該項
+> 設定，而且**送出後會回讀確認**（走 Admin UI 需要帳號，這支不用）；
+> `bash scripts/rag_probe.sh` 對候選模型做繁體／簡體對照檢索實驗。
+> 上面那支 `bash scripts/rag-verify.sh` 回答的則是最後選定的模型
+> **到底會不會接地**。
 >
 > 模型要先用 `bash scripts/pull-model.sh qwen3-embedding:0.6b` 放進 ollama。
 > **日後更換嵌入模型需要重新嵌入所有文件**，因此請在上傳前決定。

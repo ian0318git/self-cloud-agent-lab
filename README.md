@@ -225,6 +225,9 @@ Open <http://localhost:3000>.
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | Whether the model's answers are **factually correct**, plus speed. Every factual question ships with a control question (~1–2 min per question) |
+| `bash scripts/rag-verify.sh` | **Phase-2 RAG, mechanically**: does retrieval pick the right chunk, does the model actually *use* it, and does it refuse to invent what the document doesn't say. Uses the app's own retrieval functions (~2–5 min on CPU; each of the three answers takes 41–94 s, measured across four runs — D-018). Exit codes `0`/`1`/`2` as above, plus `3` = the probe itself broke (D-018) |
+| `bash scripts/rag-verify.sh --model qwen2.5:3b` | Same, against a specific model (the model must be an argument — `.env` overwrites env vars). **Use a non-thinking model**: `qwen3:4b` timed out on all three answers at the 300 s default on CPU (D-018) |
+| `bash scripts/rag-verify.sh --timeout 900` | Raise the per-answer limit, for thinking models. "Too slow" and "unreachable" are reported separately — they send you to different fixes |
 | `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
 | `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
 | `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
@@ -390,10 +393,16 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 
 This project **does** have automated tests — `scripts/test_rag_probe.py` (57
 checks), `scripts/test_verify_api.py`, `scripts/test_ask_probe.py`,
-`scripts/test_egress_probe.py`, `scripts/test_probe_openai.py` and
-`scripts/test_runtime_state.py` — offline unit tests, five for the probes and
-one for the runtime-config reader — and `scripts/verify.sh` (5 tests against
-the live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
+`scripts/test_egress_probe.py`, `scripts/test_probe_openai.py`,
+`scripts/test_runtime_state.py` and `scripts/test_rag_grounding_probe.py` —
+offline unit tests: five for the probes, one for the runtime-config reader,
+and one for the RAG grader, whose judgement was wrong four times in a row on
+2026-09-19 (all four were **false failures**; the regression cases are the
+model's actual replies, kept verbatim). Its tests also pin down the difference
+between "the model is slow" and "the model is unreachable" — the probe itself
+got that one wrong, reporting a slow model as an unreachable one (D-018) —
+plus `scripts/verify.sh` (5 tests
+against the live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
 never been exercised, and its **first** live run exposed a false failure in it.
 An earlier version of this section claimed the opposite, and that claim is kept
 here as a record of what it caused: once *"inference quality is inherently a
@@ -461,6 +470,32 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 - [ ] **Negative test:** ask about a detail that is *not* in the document and
       confirm the model says it doesn't know instead of inventing an answer
 
+> **Those four items are mechanically checkable — and without an account.**
+> `bash scripts/rag-verify.sh` runs them against a **fabricated** document using
+> the application's own retrieval functions (`query_collection`,
+> `get_embedding_function`, `VECTOR_DB_CLIENT`, `apply_source_context_to_messages`),
+> so "the model read the file" cannot be confused with "the model already knew".
+> Every fact it asks about is invented, which is the point: a real regulation
+> would let the model answer from memory and prove nothing.
+>
+> It reports **retrieval and grounding separately**, because "the right chunk was
+> never found" and "the right chunk was found and ignored" are different bugs
+> with different fixes. See D-018.
+>
+> **What it does not prove:** it ingests through the app's own chunker, embedding
+> function and vector client, but *assembled by the probe* — not through the
+> `/api/v1/files` HTTP path. That path needs a logged-in user, and this database
+> currently has **zero users**: sign-up is locked (D-012), so creating the first
+> admin is a step only you can take. Do the four boxes above in the UI once you
+> have an account; use the script to know what to expect beforehand.
+>
+> Nor does it stress the context window. The probe's document is 478 characters
+> (~765 tokens); this stack loads models with **`num_ctx` 4096**, and Open WebUI
+> never sets that value. With `chunk_size=1000`, a retrieval of six full chunks
+> is roughly 6700 tokens — the excess would be **silently dropped**, and what
+> gets dropped is whatever ranked last. Treat the passing result as "the chain
+> works", not as "RAG holds for real documents" (D-018).
+
 > **Note for non-English documents:** Open WebUI's default embedding model is
 > `sentence-transformers/all-MiniLM-L6-v2` — English-only, 384 dimensions,
 > ~500MB RAM. For Chinese or other non-English documents, retrieval quality will
@@ -473,6 +508,13 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 > `RAG_EMBEDDING_ENGINE` in `.env` and recreating the container does nothing
 > (verified in the source, not inferred — D-013). Use
 > **Admin → Settings → Documents → Embedding**.
+>
+> Two scripts serve that decision: `bash scripts/set-embedding.sh` reads or
+> writes the setting with a read-back confirmation (the Admin UI route needs an
+> account; this does not), and `bash scripts/rag_probe.sh` runs a
+> Traditional/Simplified retrieval comparison against candidate models. `bash scripts/rag-verify.sh`
+> above is the one that tells you whether the model you ended up with actually
+> grounds its answers.
 >
 > Pull the model first: `bash scripts/pull-model.sh qwen3-embedding:0.6b`.
 > **Changing the embedding model later requires re-embedding every document**,
