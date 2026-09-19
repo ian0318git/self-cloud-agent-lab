@@ -128,7 +128,21 @@ Open <http://localhost:3000>.
 | `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, Chinese output (~10 min) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
-| `bash scripts/lock-signup.sh` | Set `ENABLE_SIGNUP=false` and restart Open WebUI (idempotent) |
+| `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
+| `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
+
+### Evidence scripts
+
+These exist because this project has twice shipped a "fix" that reported success
+without working. They run real containers and observe real behaviour; run them when you
+change anything they cover.
+
+| Command | What it proves |
+|---|---|
+| `bash scripts/verify-lock-signup.sh` | That `ENABLE_SIGNUP` in `.env` is inert after first boot — three boots, one volume (~25 min) |
+| `python3 scripts/signup_control_probe.py URL` | Which mechanism *does* control signup, confirmed by hitting the real endpoint |
+| `python3 scripts/verify_lock_signup_script.py URL .` | That `lock-signup.sh` locks, is idempotent, and fails loudly |
+| `bash scripts/verify-first-admin.sh` | That `ENABLE_SIGNUP=false` does not lock you out of creating your first admin |
 
 ---
 
@@ -214,8 +228,21 @@ Whichever option you choose, do this **first**:
 bash scripts/lock-signup.sh
 ```
 
-It sets `ENABLE_SIGNUP=false` in `.env`, restarts Open WebUI, and verifies the
-write actually landed. Existing accounts are unaffected.
+It reads the **real** state over HTTP, and if signup is open it closes it through the
+config API and reads the value back to confirm. Existing accounts are unaffected.
+
+> **`ENABLE_SIGNUP` in `.env` does not control this.** It is only read on the very first
+> boot, when Open WebUI seeds its settings database; after that the database wins and
+> editing `.env` (even followed by a container rebuild) has **no effect**. This was
+> measured, not inferred — three boots against a shared volume with the env var flipped
+> each time left the switch unchanged. Full evidence in `DECISIONS.md` D-012.
+>
+> In practice you are protected before you get here: Open WebUI automatically disables
+> signup when the **first** account is created. This script verifies that, and fixes it
+> if it is ever turned back on.
+>
+> `.env.example` ships `ENABLE_SIGNUP=false`. That does **not** lock you out — a fresh
+> install was measured and still creates the first admin (HTTP 200, `role=admin`). See D-012.
 
 ---
 
@@ -243,7 +270,8 @@ human judgement call. The steps below are performed manually.
 
 ### Phase 2: before uploading any document
 
-- [ ] `ENABLE_SIGNUP=false` is in effect — run `bash scripts/lock-signup.sh`
+- [ ] Signup is actually closed — run `bash scripts/lock-signup.sh --check` (exit code 0
+      means verified closed; it does **not** read `.env`, which is not what governs this)
 - [ ] You have chosen how the service is reached, and are aware of that choice's
       trade-offs (see [Securing remote access](#securing-remote-access) — staying
       on the default private port is a valid answer)
@@ -339,12 +367,21 @@ See [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 
 ### Enabling MCP
 
-`ENABLE_MCP=true` is already set. Then:
+There is **no `ENABLE_MCP` environment variable** — it does not exist in Open WebUI
+(verified against the official docs and the backend source), so setting it would only
+make you think MCP was on. MCP is enabled by adding a connection, which is stored in
+the database:
 
 1. **Admin Settings → External Tools** → **+**
 2. Set Type to **MCP (Streamable HTTP)**
 3. Enter the server URL and authentication
 4. Save
+
+Only administrators can add MCP servers, and only the **Streamable HTTP** transport is
+supported natively — for stdio/SSE servers, front them with
+[mcpo](https://github.com/open-webui/mcpo). Set `WEBUI_SECRET_KEY` (this stack does) or
+OAuth-connected MCP tools break on every container restart with "Error decrypting
+tokens".
 
 **Known constraints:**
 

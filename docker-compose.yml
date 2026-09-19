@@ -58,11 +58,20 @@ services:
       # 導致 MCP 工具連線失效。由 scripts/up.sh 自動產生。
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY 未設定，請先執行 scripts/up.sh 或複製 .env.example 為 .env}
 
-      # 第二階段 MCP 的總開關（Open WebUI v0.6.31+ 原生支援）
-      - ENABLE_MCP=${ENABLE_MCP:-true}
+      # 註：這裡原本有一行 ENABLE_MCP。**那個環境變數不存在。**
+      # Open WebUI 自 v0.6.31 起原生支援 MCP，但啟用方式是
+      # Admin → External Tools 新增 MCP (Streamable HTTP) 連線，設定寫進
+      # 資料庫，不是環境變數。設一個不存在的變數只會讓人以為已經開了。
+      # 相關的環境變數只有 MCP_INITIALIZE_TIMEOUT（握手逾時，預設 10 秒）。
 
-      # 首次啟動需要註冊管理員帳號，建立完成後請設為 false
-      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-true}
+      # 是否開放註冊。**只在第一次開機、資料庫還是空的時候有效** —— 之後
+      # Open WebUI 把設定寫進資料庫，改這裡再重建容器完全沒有作用（實測，
+      # 見 DECISIONS.md D-012）。要確認真實現況請執行：
+      #     bash scripts/lock-signup.sh --check
+      #
+      # 這裡的預設值只是最後一道防線（.env 通常已提供此值）。放 false 是
+      # 安全的：已實測確認它不會擋住第一位管理員的建立。
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-false}
 
       - DO_NOT_TRACK=true
       - SCARF_NO_ANALYTICS=true

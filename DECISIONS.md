@@ -115,8 +115,14 @@ Open WebUI 已可透過 `http://ollama:11434` 直達，對外發布沒有任何�
 **背景**：原計畫第二階段為「RAG + MCP + LangGraph」。
 
 **查證結果**：Open WebUI **自 v0.6.31 起原生支援 MCP**
-（`ENABLE_MCP=true`，Admin → External Tools → 選 `MCP (Streamable HTTP)`），
+（Admin → External Tools → 選 `MCP (Streamable HTTP)`），
 且 agentic mode 的內建工具已涵蓋原計畫的多數需求：
+
+> **2026-09-19 更正**：本文原寫「`ENABLE_MCP=true`」，**那個環境變數不存在**。
+> 官方文件與後端原始碼（v0.11.3）皆查無此變數，唯一相關的是握手逾時
+> `MCP_INITIALIZE_TIMEOUT`。MCP 的啟用是新增連線並寫入資料庫，與環境變數無關 ——
+> 與 D-012 補記發現的 `ENABLE_SIGNUP` 是同一類錯誤：把「資料庫驅動的設定」
+> 誤當成「環境變數驅動的設定」。
 
 | 原計畫需求 | Open WebUI 內建工具 |
 |---|---|
@@ -465,7 +471,7 @@ Client Protocol"。兩顆模型、兩種不同的錯法、都講得理直氣壯�
 | `.env.example` | `CLOUDFLARE_TUNNEL_TOKEN`、`COMPOSE_PROFILES=tunnel`、五步設定說明 |
 | `scripts/up.sh` | profile 啟用但 token 為空時，**在啟動前**擋下 |
 | `scripts/status.sh` | 顯示 cloudflared 是否執行、日誌是否出現註冊成功訊息 |
-| `scripts/lock-signup.sh` | 設定 `ENABLE_SIGNUP=false`、重啟、並驗證寫入生效 |
+| `scripts/lock-signup.sh` | 以 HTTP 讀取**真實**狀態；開著時透過 configs API 關閉，並讀回確認 |
 | `README.md` / `README.zh-TW.md` | 「Securing remote access／對外連線的安全性」整節 |
 
 **踩到的坑（三個，都已修正）**：
@@ -475,13 +481,25 @@ Client Protocol"。兩顆模型、兩種不同的錯法、都講得理直氣壯�
    **即使該 profile 沒有啟用**也會觸發，結果是沒用 tunnel 的人反而起不來。
    驗證因此移到 `scripts/up.sh`。
 
-2. **`lock-signup.sh` 原本會無聲地失敗。** compose 的變數優先序是
-   **「shell 環境 > .env 檔」**（已查證 Docker 官方文件），而 `load_env`
-   會用 `set -a` 把 `.env` 的舊值匯出到 shell。因此「改 `.env` → 重啟」
-   這個寫法會用**舊值 `true`** 重建容器，指令卻回報成功 —— 註冊功能根本沒關掉。
-   修正：改完檔案後明確 `export ENABLE_SIGNUP=false`，讓兩個來源一致。
-   **這與 D-011 的 `OLLAMA_MODEL` 覆蓋問題是同一個根因**：`load_env` 把 `.env`
-   灌進 shell，此後 shell 的值就壓過檔案。這個根因已經造成兩次靜默失敗。
+2. **`lock-signup.sh` 原本會無聲地失敗 —— 而且第一次的修正修在錯的層。**
+   最初的診斷是 compose 的變數優先序「shell 環境 > `.env` 檔」：`load_env`
+   會用 `set -a` 把 `.env` 的舊值匯出到 shell，所以「改 `.env` → 重啟」
+   會用舊值 `true` 重建容器。當時的修正是在改完檔案後 `export
+   ENABLE_SIGNUP=false`，讓兩個來源一致。
+
+   **這個修正方向沒錯，但打在錯的層。** 2026-09-19 以三次開機實測
+   （`scripts/verify-lock-signup.sh`）證明：**改 `.env` + 重建容器之後，
+   註冊仍然是開的**。真正的執法點讀的是**資料庫**（`auths.py` →
+   `Config.get('ui.enable_signup')`），而環境變數只在資料庫「沒有」該 key
+   時才生效 —— 第一次開機就已經寫進去了。DB 贏過 shell，也贏過檔案，
+   所以 shell／檔案的優先序之爭從頭到尾都不重要。
+
+   舊版還有第二個假成功路徑：它的冪等檢查讀的是 `.env` 而不是真實狀態，
+   所以 `.env` 是 `false` 但實際開著時，它會印「已是 false，無需變更」就結束，
+   連重啟都不做。
+
+   **修正**：整支腳本改成以 HTTP 讀到的真實狀態為準，並在變更後讀回確認，
+   見下方「2026-09-19 補記」。
 
 3. **停用 profile 不等於停掉服務。** 使用者把 `COMPOSE_PROFILES=tunnel` 註解掉
    之後，已建立的 cloudflared 容器並不會自動停止，會繼續把服務對外 ——
@@ -512,3 +530,90 @@ Client Protocol"。兩顆模型、兩種不同的錯法、都講得理直氣壯�
 
 下次有 codespace 時，**應先驗證這五項再進行 RAG**。這與 D-011 的教訓一致：
 本專案已經兩次把「推論」寫成「結論」，不應再來第三次。
+
+---
+
+### 2026-09-19 補記：`lock-signup.sh` 實測結果（本機 docker，非 codespace）
+
+使用者指示「先確認 lock-signup 是否真的有效」。查證方式是**實測，不是讀原始碼** ——
+受測映像 `ghcr.io/open-webui/open-webui@sha256:1a6399d2…`（`:main`，2026-09-19 拉取），
+docker 29.1.3，拋棄式容器與 volume，只綁 `127.0.0.1`。
+
+**實驗一：`.env` 這條路有效嗎？**（`scripts/verify-lock-signup.sh`，三次開機共用同一 volume）
+
+| 開機 | `ENABLE_SIGNUP` | volume | 觀測到的 `features.enable_signup` |
+|---|---|---|---|
+| 1 | `true` | 全新 | `true` |
+| 2 | **`false`** | **同一個** | **`true`** ← `lock-signup.sh` 的情境 |
+| 3 | `true` | 同一個 | `true` |
+
+**結論：`.env` 的 `ENABLE_SIGNUP` 在 volume 建立後無效。** 改檔案、重建容器，
+註冊仍然是開的。
+
+**實驗二：那什麼才有效？**（`scripts/signup_control_probe.py`，13 項全數通過）
+
+| 機制 | 實測結果 |
+|---|---|
+| **A. 第一位註冊者自動上鎖** | 成立。第一位註冊者取得 `role=admin`、使用者總數為 1，開關自動轉 `false`（`auths.py` 在 `get_num_users() == 1` 時 upsert） |
+| **B. `POST /api/v1/configs/import`** | 成立，且**真的在執法**：開關為 `true` 時第二位註冊者被放行（HTTP 200），為 `false` 時**實際回傳 403** |
+| **B 的安全性** | **部分更新，不是整份覆蓋。** import 前後設定項數目 398 → 398，只動傳入的 key（`configs.py` 是 `Config.upsert`） |
+
+機制 B 的關鍵一步是**實際送出註冊請求撞它**，而不是只看 `/api/config` 的旗標。
+旗標好看不等於端點在管 —— 要證明鎖得住，就得真的去撞。
+
+**修正後的 `scripts/lock-signup.sh`**：
+
+- 一律以 HTTP 讀到的真實狀態為準（`GET /api/config`，未認證端點，回傳的就是
+  執法點讀的同一個值）。**不再讀 `.env` 來判斷狀態** —— 那正是舊版出錯的地方。
+- 開著時：登入管理員 → 呼叫 configs API → **讀回確認**。HTTP 200 只代表請求被
+  接受，不代表值真的變了，所以一律以重新讀到的值為準。
+- 誠實的結束碼：`0` 已確認關閉／`1` 開著或關不掉／`2` 連不上。連不上時**不會**
+  宣稱成功。
+- 不再呼叫 `load_env`，因此不會產生 golden key 等副作用。
+- `.env` 仍會被同步為 `false`，但僅對「將來的全新資料庫」有效，文件中已明確標示。
+
+**實測涵蓋**（`scripts/verify_lock_signup_script.py`，全新容器與同容器重跑各一輪）：
+
+| 情境 | 預期 | 結果 |
+|---|---|---|
+| 開著時 `--check` | 結束碼 1、明講開啟、**不誤報成功** | ✓ |
+| 開著時 `--check` | 不改變任何狀態 | ✓ |
+| 開著時 `--yes`（帶帳密） | 結束碼 0、有讀回確認、狀態確實變 false | ✓ |
+| 已關閉時 `--yes` | 結束碼 0、**不做多餘的登入** | ✓ |
+| 已關閉時 `--check` | 結束碼 0 | ✓ |
+| **獨立驗證：實際送註冊請求** | **HTTP 403** | ✓ |
+| 連不上時 `--check` | 結束碼 2、不宣稱成功 | ✓ |
+
+**附帶風險：把 `.env.example` 改成 `false` 會不會把人鎖在外面？**
+（`scripts/verify-first-admin.sh`）
+
+既然 `.env` 的值只在第一次開機生效，那麼「第一次開機」這個唯一有效的時機就必須
+是對的。舊版 `.env.example` 是 `true`，改成 `false` 之後就產生一個新的失敗模式：
+**全新安裝若被 `false` 擋住，使用者會沒有任何帳號可登入，也就沒有任何方法改回來。**
+
+原始碼顯示不會擋（`auths.py` 對「還沒有任何使用者」另走一條分支，只檢查
+`enable_login_form`，其預設為 `True`，與 `enable_signup` 無關）。但這正是
+「讀起來很合理、錯了卻會讓人完全進不去」的那種地方，所以照樣實測：
+
+| 觀測點 | 結果 |
+|---|---|
+| `features.enable_signup`（全新 volume、`ENABLE_SIGNUP=false`） | `false` |
+| `POST /api/v1/auths/signup` | **HTTP 200** |
+| 回應中的 `role` | **`admin`** |
+
+**結論：`ENABLE_SIGNUP=false` 不會擋住第一位管理員，`.env.example` 可以安全地預設
+`false`。** 而且第一位註冊者仍然是 admin —— 這件事只有在「全新資料庫」時成立；
+已有使用者之後 `enable_signup` 就開始擋人，那正是它應該做的事。
+
+**這一項仍然要說清楚**：以上驗證是在**本機 docker** 上完成的，不是 codespace。
+D-001 的 codespace 已刪除，所以「在 codespace 裡跑起來會如何」仍未驗證；
+但這些行為只與 Open WebUI 的 API 有關，與執行環境無關。
+
+**同時確認了一個文件錯誤**：`ENABLE_MCP` **不存在於 Open WebUI**。官方文件與
+後端原始碼皆無此變數，MCP 是在 Admin → External Tools 新增連線（寫進資料庫），
+不是環境變數。本 repo 有五處斷言它存在，已一併更正。
+
+**方法論上的教訓（第三次了）**：這次的答案與第一次的診斷**不同**。
+第一次說「是 compose 優先序」，第二次說「是資料庫持久化」。兩者都讀得出來，
+但只有實測能分辨哪一個才是真正在起作用的那一層。D-011 的教訓是「不要推論」，
+這次補上的是更精確的版本：**推論出一個「合理的原因」不代表找到了原因。**

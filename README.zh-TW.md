@@ -126,7 +126,20 @@ bash scripts/up.sh
 | `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、繁中輸出（約 10 分鐘） |
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
-| `bash scripts/lock-signup.sh` | 將 `ENABLE_SIGNUP` 設為 `false` 並重啟 Open WebUI（冪等） |
+| `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
+| `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
+
+### 證據腳本
+
+這幾支之所以存在，是因為本專案已經兩次交出「回報成功但其實沒作用」的修正。
+它們會真的開容器、真的打端點，觀察真實行為 —— 動到它們涵蓋的東西時請重跑。
+
+| 指令 | 證明了什麼 |
+|---|---|
+| `bash scripts/verify-lock-signup.sh` | `ENABLE_SIGNUP` 在第一次開機之後就是無效的 —— 三次開機共用一個 volume（約 25 分鐘） |
+| `python3 scripts/signup_control_probe.py URL` | 真正控制註冊的是哪條路徑，並以實際打端點驗證 |
+| `python3 scripts/verify_lock_signup_script.py URL .` | `lock-signup.sh` 真的關得掉、可重複執行、且失敗時會吵 |
+| `bash scripts/verify-first-admin.sh` | `ENABLE_SIGNUP=false` 不會擋住你建立第一位管理員 |
 
 ---
 
@@ -203,8 +216,19 @@ docker compose logs --tail=20 cloudflared   # 應出現 "Registered tunnel conne
 bash scripts/lock-signup.sh
 ```
 
-它會把 `.env` 的 `ENABLE_SIGNUP` 設為 `false`、重啟 Open WebUI，
-並確認寫入真的生效。既有帳號不受影響。
+它會用 HTTP 讀出**真實**狀態；若註冊是開著的，就透過設定 API 關閉，並讀回確認。
+既有帳號不受影響。
+
+> **`.env` 裡的 `ENABLE_SIGNUP` 管不到這件事。** 它只在**第一次開機**、Open WebUI
+> 把設定寫進資料庫時被讀取；之後資料庫贏過一切，改 `.env`（甚至重建容器）**完全沒有效果**。
+> 這是**實測**得到的，不是推論 —— 同一個 volume 開機三次、每次翻轉該環境變數，
+> 開關始終不變。完整證據見 `DECISIONS.md` D-012。
+>
+> 實務上你在跑到這一步之前就已經受保護了：Open WebUI 在**第一個**帳號建立時會
+> 自動關閉註冊。這支腳本的功能是**確認**這件事，並在它被重新打開時修正。
+>
+> `.env.example` 預設 `ENABLE_SIGNUP=false`。這**不會**把你鎖在外面 —— 已實測
+> 確認全新安裝仍可建立第一位管理員（HTTP 200，且該帳號為 `admin`）。見 D-012。
 
 ---
 
@@ -231,7 +255,8 @@ bash scripts/lock-signup.sh
 
 ### 第二階段：上傳文件之前
 
-- [ ] `ENABLE_SIGNUP=false` 已生效 —— 執行 `bash scripts/lock-signup.sh`
+- [ ] 註冊確實已關閉 —— 執行 `bash scripts/lock-signup.sh --check`（結束碼 0 代表已確認
+      關閉；它**不會**去讀 `.env`，因為那並不是控制這件事的地方）
 - [ ] 已決定對外連線方式，且對該方式的取捨有意識
       （見[對外連線的安全性](#對外連線的安全性)；留在預設的私有埠也是有效答案）
 - [ ] 已確認**沒有**使用 Quick Tunnel
@@ -321,12 +346,19 @@ Open WebUI **自 v0.6.31 起原生支援 MCP**，且內建 agentic mode 的工�
 
 ### 啟用 MCP
 
-`ENABLE_MCP=true` 已預設開啟。接著：
+**沒有 `ENABLE_MCP` 這個環境變數** —— 它不存在於 Open WebUI（已查證官方文件與
+後端原始碼），設了只會讓你以為 MCP 已經開啟。MCP 的啟用方式是新增一條連線，
+設定會存進資料庫：
 
 1. **Admin Settings → External Tools** → **+**
 2. Type 選 **MCP (Streamable HTTP)**
 3. 填入 Server URL 與認證方式
 4. 儲存
+
+只有管理員能新增 MCP server，且原生只支援 **Streamable HTTP** 傳輸 ——
+stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉接。
+`WEBUI_SECRET_KEY` 必須設定（本堆疊會自動產生），否則使用 OAuth 的 MCP 工具
+每次容器重建都會出現 "Error decrypting tokens" 而失效。
 
 **已知限制：**
 
