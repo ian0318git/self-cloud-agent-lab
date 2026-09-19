@@ -145,16 +145,8 @@ info "重啟 open-webui 讓設定生效（記憶體中的快取不會自動更�
 $COMPOSE restart open-webui >/dev/null
 
 info "等待服務就緒..."
-READY=0
-for _ in $(seq 1 60); do
-  if $COMPOSE exec -T open-webui python3 -c \
-      "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=3).status==200 else 1)" \
-      >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
-  sleep 3
-done
+READY=1
+wait_for_webui || READY=0
 
 echo
 if [[ $READY -eq 0 ]]; then

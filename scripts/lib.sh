@@ -52,6 +52,28 @@ detect_compose() {
   export COMPOSE
 }
 
+# ── 等待 open-webui 就緒 ────────────────────────────────
+# 需要 $COMPOSE（先呼叫 detect_compose）與執行中的 open-webui 容器。
+# 必須用容器內的 /health，不是主機的 3000 埠 —— 埠的綁定位址是可設定的
+# （WEBUI_BIND_ADDR），而且重啟期間主機埠會先關再開。容器內的 8080 才是
+# 服務本身是否活著。
+#
+# 為什麼要等而不是 sleep 固定秒數：啟動時間取決於首次開機是否要下載嵌入
+# 模型（實測 100–110 秒，慢速連線時更久）。固定的 sleep 不是等太久就是
+# 等不夠，而等不夠會讓後續的檢查對著一個還沒起來的服務下判斷。
+wait_for_webui() {
+  local limit="${1:-60}" i
+  for ((i = 0; i < limit; i++)); do
+    if $COMPOSE exec -T open-webui python3 -c \
+        "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=3).status==200 else 1)" \
+        >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
 # ── Docker daemon 檢查 ──────────────────────────────────
 require_docker() {
   if ! docker info >/dev/null 2>&1; then

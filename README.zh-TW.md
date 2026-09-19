@@ -221,8 +221,15 @@ bash scripts/up.sh
 | `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
 | `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |
 | `bash scripts/probe-openai.sh [URL]` | 任何 OpenAI-compatible runtime 的相容性探針。預設指向 Ollama 的 `/v1` |
+| `bash scripts/connect-endpoint.sh --url URL --check` | 接上 GPU runtime **之前**先驗證相容性，不做任何變更 |
+| `bash scripts/connect-endpoint.sh --url URL` | 接上一個 OpenAI-compatible runtime（先驗證、後接線、再回讀確認） |
+| `bash scripts/connect-endpoint.sh --status` | 目前接的是哪一個 runtime |
+| `bash scripts/connect-endpoint.sh --disconnect` | 切回只有 Ollama |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
+
+接上 GPU runtime（Kaggle + Endpoint，或 VPS + vLLM）另有一份專門的指南：
+[`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md) · [`docs/ENDPOINT.md`](docs/ENDPOINT.md)。
 
 ### 證據腳本
 
@@ -359,8 +366,10 @@ bash scripts/lock-signup.sh
 
 本專案**有**自動化測試 —— `scripts/test_rag_probe.py`（57 項檢查）、
 `scripts/test_verify_api.py`、`scripts/test_ask_probe.py`、
-`scripts/test_egress_probe.py` 與 `scripts/test_probe_openai.py`（四支探針的
-離線單元測試），以及 `scripts/verify.sh`（5 項對實際 API 的測試）。
+`scripts/test_egress_probe.py`、`scripts/test_probe_openai.py` 與
+`scripts/test_runtime_state.py` —— 離線單元測試，五支給探針、一支給 runtime
+設定讀寫，以及
+`scripts/verify.sh`（5 項對實際 API 的測試）。
 `test_ask_probe.py` 直到 D-016 才存在：在那之前它的評分邏輯從未被實測過，
 而**第一次**實際跑到就抓到它自己的假失敗。本節原本寫的是相反的句子，
 而把那個句子留在這裡是有意義的：一旦「推論品質本質上需要人工判斷」被寫成前提，

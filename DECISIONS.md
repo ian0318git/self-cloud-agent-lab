@@ -1355,3 +1355,106 @@ perplexity、image generation 等），它們現在不是風險，但只要有�
   `api.openai.com`**。這是刻意的（保留設定、只關閘門），但意味著若有人日後把
   `openai.enable` 打開，它會若無其事地接回 OpenAI。
 - 尚未實作（承 D-016）：`response` 為空時改判 `thinking` 欄位。
+
+### 七、後續修正（同日，實作 endpoint 接線時）
+
+**7.1 先質疑自己上一輪的驗證。**
+
+`--fix` 的流程是「寫資料庫 → 讀資料庫確認」。那**可能是循環論證** ——
+讀自己剛寫進去的東西，然後宣稱成功。這正是本專案反覆指控的錯誤形狀，
+只是換了一件衣服。所以先查證 `openai.*` 到底以什麼為準：
+
+```python
+@classmethod
+def persistent_enabled_for(cls, key: str) -> bool:
+    if not cls.PERSISTENT_ENABLED:
+        return False
+    if key.startswith('oauth.') and not cls.OAUTH_PERSISTENT_ENABLED:
+        return False
+    return True                       # ← openai.* 落在這裡
+
+@staticmethod
+async def get(key, default=None):
+    if not Config.persistent_enabled_for(key):
+        return Config.default_value(key, default)    # 讀 env
+    ...                                              # ← openai.* 走這條：讀 DB
+```
+
+`openai.*` 是持久的，**資料庫是權威來源** —— 上一輪的修法是對的。
+
+**7.2 但「原始碼說會這樣」不算證明。用誘餌實證。**
+
+在 `ai-net` 網路上起一個受控的 HTTP 伺服器（借 open-webui 映像檔的 Python），
+把 `openai.api_base_urls` 指向它、`openai.enable=true`，重啟，然後問
+**應用程式自己的讀取路徑**：
+
+```
+=== 應用程式自己的讀取路徑（Config.get_many）回傳 ===
+  openai.enable = True
+  openai.api_base_urls = ['http://egress-canary:9999/v1']
+  openai.api_keys = ['canary-token']
+```
+
+這是 `get_all_models` 用的**同一個函式**，它讀出的是誘餌網址。資料庫是
+權威來源 —— 這下是實測，不是推論。
+
+**7.3 但誘餌一個請求都沒收到。**
+
+這才是真正的收穫。重啟後誘餌的請求數仍然是 1（我自己 curl 的那次）。
+原因是 Open WebUI **延遲抓取**：要有人在已登入的狀態下打開模型清單，
+才會對設定的端點發出請求。
+
+所以「設定生效」與「模型抓到了」是**兩件事**，而只有前者是腳本證明得了的。
+`connect-endpoint.sh` 的讀回確認把這句話明寫在輸出裡，不讓它假裝更多。
+
+**7.4 探針自己有同一個缺陷（D-016 的形狀，再次出現）。**
+
+實作接線腳本時，用誘餌當「連得上但不符合協定」的測試對象，結果探針印出
+
+```
+✗ GET /v1/models   未通過  HTTP 404
+結論：無法判定 —— 端點拒絕。          ← 這兩行互相矛盾
+```
+
+回傳 2。於是 `connect-endpoint.sh` 叫使用者去查網路 —— **而網路根本沒問題**。
+一個明確回答「我沒有這個路徑」的端點是**有結論**的，不是「測不出來」。
+
+成因是 `probe()` 把非 200 也標成 `aborted`，而 `main()` 先判斷 `aborted`
+才判斷 `p.failed()`，於是 FAIL 被吞掉。**這正是 D-016 修過的同一件事，
+發生在我自己寫的檔案裡** —— 那次是「對照題答對卻被判錯」，這次是
+「端點有回應卻被說成連不上」。
+
+判準已收斂為一句：**只有連不上（無 HTTP 回應）才是「無法判定」；
+端點有回應就是有結論。** 迴歸測試用替換 `_request` 的方式釘住它，不需網路。
+
+**7.5 新增工具。**
+
+| 檔案 | 作用 |
+|---|---|
+| `scripts/connect-endpoint.sh` | 接上一個 runtime：**先驗證、後接線、再回讀**。探針未通過就拒絕變更 |
+| `scripts/runtime_state.py` | 讀寫 runtime 設定。**讀值走應用程式自己的 `Config.get_many`**，不讀自己剛寫的資料列 |
+| `scripts/test_runtime_state.py` | 離線測試（金鑰不外洩、拒接清單、讀值路徑） |
+| `docs/ENDPOINT.md` + `.zh-TW.md` | Kaggle + Endpoint 的完整接線指南 |
+
+`runtime_state.py` 有一個刻意的防呆：**拒絕接上 `api.openai.com`**。
+本專案的目標是「資料由公司自己控制」，接上它與該目標直接衝突，所以它必須是
+明示的例外，而不是一個不小心就會滑進去的預設值。
+
+**7.6 新發現的架構張力：Quick Tunnel 沒有 Access。**
+
+`endpoint` 用 cloudflared **Quick Tunnel**（`*.trycloudflare.com`）暴露引擎，
+**沒有 Cloudflare Access 政策**，保護只有 API 金鑰。這與本專案自己的規則
+（D-012：對外要走 Tunnel **+ Access**）直接衝突；Ollama 是刻意不暴露的
+（D-003），而 GPU runtime 剛好相反 —— 它**就是**公開的。
+
+這個張力沒有在這一輪解決，只是被記錄下來。它會在上傳第一份公司文件時
+變成必須解決的問題。
+
+**7.7 尚未驗證（新增）。**
+
+- **`GET /v1/apikey` 是否能在無權杖下存取。** endpoint 的文件提到這條路由。
+  若它不需認證，那麼光是 tunnel 網址就足以取得金鑰。**本專案未驗證。**
+- 誘餌實驗證明的是「設定被讀到」，**不是「模型抓到了」**。後者需要登入，
+  只有使用者開一次 UI 才算數。
+- Kaggle 的實際額度與硬體**未量測**（且不應寫死 —— 政策會變，P100 已於
+  2026-09-15 退役）。

@@ -14,6 +14,7 @@
 """
 
 import contextlib
+import json
 import io
 import os
 import sys
@@ -92,6 +93,71 @@ buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     p.main(["--base-url", "http://127.0.0.1:1/v1", "--timeout", "2"])
 assert "未提供" in buf.getvalue()
+
+# ── 「端點有回應」不等於「無法判定」─────────────────────────
+#
+# 這是一條**迴歸測試**，對應 2026-09-19 在 probe_openai.py 自己身上發現的
+# 缺陷：一個回 404 的端點是**明確回答**「我沒有這個路徑」，探針卻把它標成
+# aborted，於是印出「✗ 未通過 HTTP 404」之後總結說「無法判定 —— 端點拒絕」
+# 並回傳 2。connect-endpoint.sh 因此叫使用者去查網路，而網路根本沒問題。
+#
+# 那是假失敗，也正是 D-016 的同一形狀：「無法判定」與「未通過」被併在一起。
+# 差別只在這次發生在探針自己身上。
+#
+# 判準：只有**連不上**（status is None）才是無法判定。端點有回應就是有結論。
+_orig_request = p._request
+
+
+def _fake_request_factory(handler):
+    def _fake(url, payload=None, api_key=None, timeout=120, accept=None,
+              stream=False):
+        return handler(url, payload)
+    return _fake
+
+
+# 404：端點活著，但沒有這個路徑 → 未通過，不是無法判定。
+p._request = _fake_request_factory(lambda url, payload: (404, "Not Found"))
+try:
+    probe, _mid, aborted = p.probe("http://x:1/v1", "", "", 5)
+    assert probe.failed(), "404 應判為未通過"
+    assert aborted is None, \
+        "404 是端點明確的回應，不該被當成無法判定（那會叫人去查一個沒問題的網路）"
+finally:
+    p._request = _orig_request
+
+# 200 但回應不是 OpenAI 格式 → 同樣是未通過，不是無法判定。
+p._request = _fake_request_factory(lambda url, payload: (200, "<html>hi</html>"))
+try:
+    probe, _mid, aborted = p.probe("http://x:1/v1", "", "", 5)
+    assert probe.failed(), "非 OpenAI 格式應判為未通過"
+    assert aborted is None, "格式不符是明確的結論，不是無法判定"
+finally:
+    p._request = _orig_request
+
+# 連不上 → 這才是無法判定。
+p._request = _fake_request_factory(
+    lambda url, payload: (None, "URLError: connection refused"))
+try:
+    probe, _mid, aborted = p.probe("http://x:1/v1", "", "", 5)
+    assert not probe.failed(), "連不上不該被記成未通過"
+    assert aborted is not None, "連不上才是無法判定"
+finally:
+    p._request = _orig_request
+
+# 模型清單 OK，但 chat completion 失敗 → 未通過（上層會踩到的洞）。
+def _chat_fails(url, payload):
+    if url.endswith("/models"):
+        return (200, json.dumps({"data": [{"id": "m1"}]}))
+    return (500, "boom")
+
+
+p._request = _fake_request_factory(_chat_fails)
+try:
+    probe, _mid, aborted = p.probe("http://x:1/v1", "", "", 5)
+    assert probe.failed(), "chat completion 失敗應判為未通過"
+    assert aborted is None
+finally:
+    p._request = _orig_request
 
 # ── 探針只說 OpenAI 協定，不得依賴任何廠商 SDK ──────────────
 # 若它用了廠商 SDK，驗到的就是那個 SDK 的相容性，而不是協定的相容性 ——

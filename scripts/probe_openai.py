@@ -165,16 +165,26 @@ def probe(base, api_key, model, timeout):
     if status is None:
         p.add("GET /v1/models", UNKNOWN, _short(body, 120))
         return p, model_id, "連不上"
+    # ⚠ HTTP 回應碼**不是**「無法判定」。
+    #
+    # 一個回 404 的端點是**明確地回答**「我沒有這個路徑」，不是「我測不出來」。
+    # 第一版把這裡也標成 aborted，於是探針印出「✗ 未通過 HTTP 404」之後，
+    # 總結卻說「無法判定 —— 端點拒絕」並回傳 2 —— 呼叫端因此叫使用者去查
+    # 網路，而網路根本沒問題。那是**假失敗**，也正是 D-016 的同一形狀：
+    # 「無法判定」與「未通過」被併在一起。差別只在這次發生在探針自己身上。
+    #
+    # 判準：只有**連不上**（status is None）才叫無法判定。端點有回應就是
+    # 有結論 —— 回非 200 就是未通過。
     if status != 200:
         p.add("GET /v1/models", FAIL, f"HTTP {status} {_short(body, 120)}")
-        return p, model_id, "端點拒絕"
+        return p, model_id, None
 
     try:
         models = [m.get("id") for m in (json.loads(body).get("data") or [])]
         models = [m for m in models if m]
     except Exception as exc:  # noqa: BLE001 - 回應不是預期的 JSON 形狀
         p.add("GET /v1/models", FAIL, f"回應不是 OpenAI 格式：{exc}")
-        return p, model_id, "格式不符"
+        return p, model_id, None
 
     p.add("GET /v1/models", PASS, f"{len(models)} 個模型")
 

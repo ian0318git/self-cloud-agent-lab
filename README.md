@@ -228,6 +228,13 @@ Open <http://localhost:3000>.
 | `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
 | `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
 | `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
+| `bash scripts/connect-endpoint.sh --url URL --check` | Verify a GPU runtime **before** wiring it in. Changes nothing |
+| `bash scripts/connect-endpoint.sh --url URL` | Attach an OpenAI-compatible runtime (verify → wire → read back) |
+| `bash scripts/connect-endpoint.sh --status` | Which runtime is wired right now |
+| `bash scripts/connect-endpoint.sh --disconnect` | Back to Ollama only |
+
+Attaching a GPU runtime (Kaggle + Endpoint, or a VPS + vLLM) has its own guide:
+[`docs/ENDPOINT.md`](docs/ENDPOINT.md) · [`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md).
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 
@@ -383,9 +390,10 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 
 This project **does** have automated tests — `scripts/test_rag_probe.py` (57
 checks), `scripts/test_verify_api.py`, `scripts/test_ask_probe.py`,
-`scripts/test_egress_probe.py` and `scripts/test_probe_openai.py` (offline
-unit tests for the four probes), and `scripts/verify.sh` (5 tests against the
-live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
+`scripts/test_egress_probe.py`, `scripts/test_probe_openai.py` and
+`scripts/test_runtime_state.py` — offline unit tests, five for the probes and
+one for the runtime-config reader — and `scripts/verify.sh` (5 tests against
+the live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
 never been exercised, and its **first** live run exposed a false failure in it.
 An earlier version of this section claimed the opposite, and that claim is kept
 here as a record of what it caused: once *"inference quality is inherently a
