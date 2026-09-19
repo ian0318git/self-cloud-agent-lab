@@ -71,6 +71,45 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
 
+      # ── OpenAI-compatible runtime（可替換的 LLM Runtime）──────
+      # 這是「上層不需要知道底下是哪一個 runtime」的接點：Open WebUI 用
+      # OpenAI 協定接上任何相容的推論服務（自架的 vLLM、Kaggle + Endpoint、
+      # 或 Ollama 自己的 /v1 端點）。搬家時換的是這裡的網址，不是程式碼。
+      #
+      # ⚠ 為什麼 ENABLE_OPENAI_API 的預設值是 false —— 這不是保守，是修錯：
+      #
+      #   Open WebUI 的原始碼（backend/open_webui/config.py）裡，
+      #   OPENAI_API_BASE_URLS 的預設值是空字串，而空字串**不是「關閉」**，
+      #   是 fallback —— 空清單會被填成 ['https://api.openai.com/v1']：
+      #
+      #       OPENAI_API_BASE_URLS = os.getenv('OPENAI_API_BASE_URLS', '')
+      #       OPENAI_API_BASE_URLS = (OPENAI_API_BASE_URLS
+      #                               if OPENAI_API_BASE_URLS != ''
+      #                               else OPENAI_API_BASE_URL)   # 預設也是空
+      #       OPENAI_API_BASE_URLS = [u.strip() if u != ''
+      #                               else 'https://api.openai.com/v1'
+      #                               for u in OPENAI_API_BASE_URLS.split(';')]
+      #
+      #   而 ENABLE_OPENAI_API 的預設是 **True**。兩者相加的結果是：
+      #   一個「資料不出公司」的堆疊，預設就連上了 OpenAI 官方 API，
+      #   而且模型會出現在使用者的選單裡。更麻煩的是 OPENAI_API_KEY 是
+      #   很多開發機上**全域匯出**的環境變數 —— 一旦有，gpt-4o 就能被
+      #   選中，公司資料在**沒有任何人在這個專案裡設定過**的情況下送出去。
+      #
+      #   這與 ENABLE_MCP（不存在的變數）、ENABLE_SIGNUP（只第一次開機
+      #   有效）是同一類：看起來是關的，其實不是。所以這裡把**真正的開關**
+      #   明寫出來，預設關閉。
+      #
+      # 要接上自架 runtime 時，在 .env 設定：
+      #     ENABLE_OPENAI_API=true
+      #     OPENAI_API_BASE_URLS=http://your-runtime:8000/v1   ← 非空才會
+      #                                                           涵蓋掉上面的預設
+      #     OPENAI_API_KEYS=...                                ← 沒有就留空
+      # 然後用 bash scripts/probe-openai.sh <url> 驗證相容性。
+      - ENABLE_OPENAI_API=${ENABLE_OPENAI_API:-false}
+      - OPENAI_API_BASE_URLS=${OPENAI_API_BASE_URLS:-}
+      - OPENAI_API_KEYS=${OPENAI_API_KEYS:-}
+
       # 必填。Open WebUI 用它加密儲存 MCP 的 OAuth token；
       # 未設定時每次容器重建都會出現 "Error decrypting tokens"，
       # 導致 MCP 工具連線失效。由 scripts/up.sh 自動產生。

@@ -218,6 +218,9 @@ bash scripts/up.sh
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | 模型的答案**事實是否正確**，外加速度。每道事實題都附一道對照題（每題約 1–2 分鐘） |
+| `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
+| `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |
+| `bash scripts/probe-openai.sh [URL]` | 任何 OpenAI-compatible runtime 的相容性探針。預設指向 Ollama 的 `/v1` |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 
@@ -237,7 +240,35 @@ bash scripts/up.sh
 
 ## 對外連線的安全性
 
-**第一階段沒有私有資料，所以這一節還不重要。會改變這件事的是 RAG** ——
+### 先看資料會往哪裡**出去**
+
+安全性有兩個方向，而本專案原本只寫了其中一個。「誰能連進來」是埠與
+Cloudflare Access 的問題（見下方）；「**資料會流向哪裡**」是另一個問題，
+而且在 2026-09-19 實測之前，本專案一直是錯的：
+
+```
+$ bash scripts/check-egress.sh --check
+  ✗ 啟用中  openai.api_base_urls
+       https://api.openai.com/v1
+       開關：openai.enable = True                    EXIT=1
+```
+
+Open WebUI 的 `ENABLE_OPENAI_API` 預設是 `True`，而 `OPENAI_API_BASE_URLS`
+的預設空字串**不是「關閉」而是 fallback**，會被填成 `https://api.openai.com/v1`。
+兩者相加：一個以「資料不出公司」為目標的堆疊，**預設就接上了 OpenAI 官方 API
+而且是開著的**。而 `OPENAI_API_KEY` 是很多開發機上全域匯出的環境變數 ——
+一旦有，`gpt-4o` 就會出現在模型選單裡。
+
+修復：`bash scripts/check-egress.sh --fix`（寫入 → 重啟 → 回讀確認）。
+**注意改 `.env` 對現有部署沒有用** —— 環境變數只是第一次開機的種子，
+之後 Open WebUI 以資料庫為準（與 `ENABLE_SIGNUP` 完全相同的形狀）。
+決策與實測見 [`DECISIONS.md`](DECISIONS.md) D-017。
+
+這支探針回答的是「**設定上允許**資料去哪裡」，不是「資料實際去了哪裡」。
+
+---
+
+**第一階段沒有私有資料，所以下面這一節還不重要。會改變這件事的是 RAG** ——
 一旦你上傳自己的文件，瀏覽器與模型之間的傳輸就成為值得保護的一環。
 請在**上傳任何文件之前**完成。決策記錄見 [`DECISIONS.md`](DECISIONS.md) D-012。
 
@@ -327,8 +358,9 @@ bash scripts/lock-signup.sh
 ## 驗證清單
 
 本專案**有**自動化測試 —— `scripts/test_rag_probe.py`（57 項檢查）、
-`scripts/test_verify_api.py` 與 `scripts/test_ask_probe.py`（兩支探針的離線
-單元測試），以及 `scripts/verify.sh`（5 項對實際 API 的測試）。
+`scripts/test_verify_api.py`、`scripts/test_ask_probe.py`、
+`scripts/test_egress_probe.py` 與 `scripts/test_probe_openai.py`（四支探針的
+離線單元測試），以及 `scripts/verify.sh`（5 項對實際 API 的測試）。
 `test_ask_probe.py` 直到 D-016 才存在：在那之前它的評分邏輯從未被實測過，
 而**第一次**實際跑到就抓到它自己的假失敗。本節原本寫的是相反的句子，
 而把那個句子留在這裡是有意義的：一旦「推論品質本質上需要人工判斷」被寫成前提，

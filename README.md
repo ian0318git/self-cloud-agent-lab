@@ -225,6 +225,9 @@ Open <http://localhost:3000>.
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | Whether the model's answers are **factually correct**, plus speed. Every factual question ships with a control question (~1–2 min per question) |
+| `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
+| `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
+| `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 
@@ -245,10 +248,43 @@ change anything they cover.
 
 ## Securing remote access
 
-**Phase 1 carries no private data, so this section did not matter yet. RAG is what
-changes that** — the moment you upload your own documents, the transport between
-your browser and the model becomes the thing worth protecting. Do this **before**
-you upload anything. See [`DECISIONS.md`](DECISIONS.md) D-012.
+### First, where data flows **out**
+
+Security has two directions, and this project originally only documented one.
+"Who can reach in" is a question about ports and Cloudflare Access (below).
+"**Where does data flow out**" is a different question — and until it was
+measured on 2026-09-19, this project had that one wrong:
+
+```
+$ bash scripts/check-egress.sh --check
+  ✗ 啟用中  openai.api_base_urls
+       https://api.openai.com/v1
+       開關：openai.enable = True                    EXIT=1
+```
+
+Open WebUI's `ENABLE_OPENAI_API` defaults to `True`, and
+`OPENAI_API_BASE_URLS`'s default empty string is **a fallback, not an off
+switch** — it gets filled in as `https://api.openai.com/v1`. The two together
+mean a stack whose stated goal is "data stays in the company" ships with
+**OpenAI's public API connected and enabled**. And `OPENAI_API_KEY` is a
+globally exported environment variable on many dev machines — if it is present,
+`gpt-4o` appears in the model picker.
+
+Fix: `bash scripts/check-egress.sh --fix` (write → restart → read back to
+confirm). **Editing `.env` does nothing on an existing deployment** —
+environment variables are only the seed for first boot, after which Open WebUI
+treats the database as authoritative (exactly the `ENABLE_SIGNUP` shape).
+See [`DECISIONS.md`](DECISIONS.md) D-017.
+
+This probe answers "where the *configuration permits* data to go", not "where
+data actually went".
+
+---
+
+**Phase 1 carries no private data, so the rest of this section did not matter
+yet. RAG is what changes that** — the moment you upload your own documents, the
+transport between your browser and the model becomes the thing worth protecting.
+Do this **before** you upload anything. See [`DECISIONS.md`](DECISIONS.md) D-012.
 
 An unauthenticated Open WebUI is not just a chat window. Whoever reaches it can
 read every conversation already stored, use your model, and — if `ENABLE_SIGNUP`
@@ -346,8 +382,9 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 ## Verification checklist
 
 This project **does** have automated tests — `scripts/test_rag_probe.py` (57
-checks), `scripts/test_verify_api.py` and `scripts/test_ask_probe.py` (offline
-unit tests for the two probes), and `scripts/verify.sh` (5 tests against the
+checks), `scripts/test_verify_api.py`, `scripts/test_ask_probe.py`,
+`scripts/test_egress_probe.py` and `scripts/test_probe_openai.py` (offline
+unit tests for the four probes), and `scripts/verify.sh` (5 tests against the
 live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
 never been exercised, and its **first** live run exposed a false failure in it.
 An earlier version of this section claimed the opposite, and that claim is kept

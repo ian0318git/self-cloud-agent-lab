@@ -1203,3 +1203,155 @@ POC 環境上的假設，會在搬家的那一刻同時失效，而那正是最�
 
 - 本次修正**沒有改變** D-014 的核心結論（MCP 知識不存在 → RAG 是前提）。
   它改變的是**取得那個結論的方式**：從人眼讀輸出，變成機械判定。
+
+---
+
+## D-017：OpenAI-compatible API 是 Runtime 的替換點，但接上它之前必須先關掉它的預設值
+
+**日期：** 2026-09-19
+**狀態：** 已實作並實測
+
+### 一、背景
+
+長期目標是「可自架、資料由公司自己控制」的平台，且 LLM Runtime 必須可替換
+（Ollama / Endpoint / vLLM），上層的 Open WebUI / RAG / MCP / Agent 不得
+知道底下是哪一個。
+
+這個架構的**全部價值**建立在一句話上：「上層只說 OpenAI 協定，不知道底下是誰。」
+而本專案已經吃過太多次「文件寫了、沒有人驗」的虧（D-014、D-016），所以這次
+先做的是：把那句話變成一支可以跑的探針，再去接第二個 runtime。
+
+### 二、發現：一個「資料不出公司」的堆疊，預設接上了 OpenAI 官方 API
+
+在動手改 `docker-compose.yml` 之前先查證 Open WebUI 實際怎麼決定端點，結果
+在**本專案自己的資料庫**裡量到：
+
+```
+openai.enable         = true
+openai.api_base_urls  = ["https://api.openai.com/v1"]
+openai.api_keys       = [""]
+```
+
+成因是兩個預設值相加（`backend/open_webui/config.py`）：
+
+| 設定 | 預設 | 效果 |
+|---|---|---|
+| `ENABLE_OPENAI_API` | `'True'` | OpenAI 連線**開著** |
+| `OPENAI_API_BASE_URLS` | `''` | 空字串是 **fallback 不是關閉**，被填成 `['https://api.openai.com/v1']` |
+
+兩者相加：**模型選單裡會出現 OpenAI 的模型。** 而 `OPENAI_API_KEY` 是很多
+開發機上**全域匯出**的環境變數 —— 一旦有，任何人就能選中 `gpt-4o`，公司資料
+在**沒有任何人在這個專案裡設定過**的情況下送出去。
+
+這與 `ENABLE_MCP`（不存在的變數，D-012）、`ENABLE_SIGNUP`（只第一次開機有效，
+D-012）是同一類：**看起來是關的，其實不是。**
+
+### 三、發現二：改 `.env` 對現有部署沒有用
+
+原本的修法是「在 compose 把 `ENABLE_OPENAI_API` 預設成 false」。查證後發現
+那**只對未來的全新資料庫有效**：
+
+```
+# backend/open_webui/models/config.py
+def seed_defaults(defaults: dict) -> None:
+    """Insert keys that don't yet exist in the DB.
+    ...
+    Existing DB values take precedence over defaults.     ← 關鍵
+    """
+```
+
+函式叫 `seed_`、docstring 明寫「Existing DB values take precedence」。
+
+**這是 `lock-signup.sh` 舊版踩過的坑的完全相同的形狀** —— 那次是「讀 `.env`
+判斷，於是回報了一個假成功」。差別只在這次我是在**寫** `.env` 而不是讀它，
+但結果一樣：一個看起來像修好了、實際上沒有作用的動作。
+
+因此最後的做法是：**compose 的預設值只負責「下一次」，真正的修復以資料庫為準，
+而且改完要重啟、回讀、再確認。**
+
+### 四、決策
+
+1. **`ENABLE_OPENAI_API` 在 compose 的預設值改為 `false`。** 這不是保守，
+   是修錯。要接自架 runtime 的人必須明寫 `ENABLE_OPENAI_API=true` 與非空的
+   `OPENAI_API_BASE_URLS` —— 兩個都要，少了後者就會落回 `api.openai.com`。
+2. **新增 `scripts/check-egress.sh` + `scripts/egress_probe.py`：「資料可能流向
+   哪些外部服務」必須是機械可查的。** 不寫死清單，而是掃描「值是指向**公開**
+   位址的 URL」的設定項 —— 這樣 Open WebUI 將來新增第三方服務時它仍然有效。
+   指向 localhost / 私有網段 / docker service name 的一律不列（那些沒有離開
+   這台機器；報出來只會製造噪音，而被噪音淹沒的檢查等於沒有檢查）。
+3. **`--fix` 必須回讀確認。** 寫入 → 重啟（記憶體快取不會自動更新）→ 重新掃描。
+   少任何一步都會變成假成功。
+4. **新增 `scripts/probe-openai.sh` + `scripts/probe_openai.py`：只說 OpenAI 協定。**
+   不使用任何廠商 SDK、不碰任何 Ollama 專屬端點。判準因此很簡單：**任何能通過
+   它的 runtime 都能接手這個平台；任何需要為它改上層程式碼的 runtime 都不能。**
+   附帶一條測試斷言：原始碼裡不得出現 `import openai` / `import ollama` /
+   `requests.` —— 用了廠商 SDK，驗到的就是那個 SDK 的相容性，不是協定的相容性。
+
+### 五、實測
+
+**統一介面（優先驗證項 1–3）：** 因為 Ollama 本身也提供 OpenAI-compatible API，
+不需要 Kaggle 帳號就能先把介面這一層釘死。
+
+```
+$ bash scripts/probe-openai.sh                      # 指向 http://ollama:11434/v1
+  ✓ GET /v1/models               通過  4 個模型
+  ✓ POST /v1/chat/completions    通過  18.3s，回應 好
+  ✓ 串流（SSE）                   通過  3 個 chunk，收到 [DONE]
+  · 未帶金鑰應被拒絕               未執行  未提供金鑰
+  · POST /v1/embeddings（資訊）    未執行  HTTP 501（不提供嵌入）
+  結論：通過 —— 只換 --base-url，不改任何上層程式碼。   EXIT=0
+```
+
+`/v1/embeddings` 回 501 是**正確的判定而非缺陷**：`qwen2.5:3b` 是聊天模型，
+本來就不提供嵌入。探針把它列為「資訊」而不計入失敗 —— 因為本專案的嵌入引擎
+本來就可以與聊天引擎是不同的 runtime（D-013）。
+
+**外部端點（優先驗證項 5）：**
+
+```
+$ bash scripts/check-egress.sh --check
+  ✗ 啟用中  openai.api_base_urls
+       https://api.openai.com/v1
+       開關：openai.enable = True                    EXIT=1
+
+$ bash scripts/check-egress.sh --fix
+  寫入資料庫：openai.enable = false
+    openai.enable: true → false
+  重啟 open-webui 讓設定生效...
+  ✓ 已確認：沒有啟用中的外部端點。                     EXIT=0
+```
+
+`--fix` 之後複查：`/health` 回 200、`ollama.enable=true` 完好、
+`probe-openai.sh` 仍通過 —— **只關掉了 OpenAI 那條路，沒有連帶弄壞 Ollama。**
+掃描另外列出 11 個「已設定但關著」的外部端點（mistral OCR、firecrawl、bing、
+perplexity、image generation 等），它們現在不是風險，但只要有人打開開關或
+填入金鑰就會變成風險。
+
+**離線測試：** 新增 `test_egress_probe.py`、`test_probe_openai.py`，
+連同既有三套共五套全部通過。
+
+寫測試的過程當場抓到一個真實缺陷：`_is_key_name` 只比對 `api_key`，
+認不出複數的 `openai.api_keys` —— **而那是它最該認出來的一個**。已修。
+
+第二個缺陷是在讀真實輸出時發現的：`_gate_for` 取「前兩段」當前綴，於是
+`audio.stt.openai.api_base_url` 的閘門被報成 `audio.stt.deepgram.api_key`
+—— 把 openai 的端點說成由 deepgram 的金鑰管制。修法是從欄位名砍掉結尾
+還原子系統。**一支叫人「自己覆核」的探針報錯閘門，比不報還糟。**
+
+### 六、未解的問題
+
+- **優先驗證項 4 完全未驗證：Kaggle + Endpoint 能否實際跑較大的 GGUF 模型。**
+  這需要使用者自己的 Kaggle 帳號與 `kgat_` 權杖，在本次執行環境中無法進行。
+  介面相容（已驗）**不等於跑得動** —— 速度、可用 VRAM、模型能否載入、T4×2 的
+  16GB×2 在 tensor split 下實際能承載多大的 GGUF，全部還是未知。
+  **這是目前最大的一塊空白，而它正是「小模型 → 大型本地 LLM」這條路徑的關鍵。**
+- `check-egress.sh` 的界線：它讀的是**資料庫裡的值**。Open WebUI 沒有未認證的
+  端點會揭露 `openai.enable`（實測 `/api/config` 只回 features/oauth/status 等），
+  所以「服務實際載入的值」在沒有管理員帳號的情況下讀不到。容器健康 + 資料庫值
+  正確是它做得到的全部 —— 這一點寫在腳本輸出裡，不讓它假裝更多。
+- 它回答的是「設定上允許資料去哪裡」，**不是「資料實際去了哪裡」**。要看實際
+  流向需要網路層的觀察（`docker compose logs` 只看得到請求，看不到被拒絕的）。
+- `--fix` 只關 `openai.enable`，**沒有清掉 `openai.api_base_urls` 裡那個
+  `api.openai.com`**。這是刻意的（保留設定、只關閘門），但意味著若有人日後把
+  `openai.enable` 打開，它會若無其事地接回 OpenAI。
+- 尚未實作（承 D-016）：`response` 為空時改判 `thinking` 欄位。
