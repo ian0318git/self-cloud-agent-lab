@@ -526,8 +526,9 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 
 ### Phase 2: MCP
 
-- [ ] Add an MCP server under **Admin Settings → External Tools**
-      (Type must be **MCP (Streamable HTTP)** — not OpenAPI)
+- [ ] Add an MCP server under **Admin Panel → Settings → Integrations**, in the
+      **Tools** section — the **+** next to *External Tool Servers*
+      (Type must be **MCP Streamable HTTP** — not OpenAPI)
 - [ ] Confirm the tool appears in the conversation's tool list with a
       `server:mcp:` prefix
 - [ ] Trigger a tool call and confirm the model **decides on its own** to use
@@ -539,8 +540,8 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 > starts a Streamable HTTP MCP server that lives only on the internal `ai-net`
 > network (no published port — D-003), exposing two tools: `echo` (the simplest
 > possible tool call) and `roll_die` ("roll two dice and add them" is a
-> ready-made multi-turn test). In Admin → External Tools, use URL
-> `http://mcp-test-server:8000/mcp` with no auth. Run
+> ready-made multi-turn test). Use URL
+> `http://mcp-test-server:8000/mcp` with Auth set to *None*. Run
 > `bash scripts/verify-mcp-server.sh` first — it performs the full handshake
 > from the open-webui container's point of view. Once Phase 2 verification is
 > done, delete the `mcp-test-server` service and the `mcp-server/` directory.
@@ -622,10 +623,19 @@ There is **no `ENABLE_MCP` environment variable** — it does not exist in Open 
 make you think MCP was on. MCP is enabled by adding a connection, which is stored in
 the database:
 
-1. **Admin Settings → External Tools** → **+**
-2. Set Type to **MCP (Streamable HTTP)**
-3. Enter the server URL and authentication
-4. Save
+1. **Admin Panel → Settings → Integrations**
+2. Scroll to the **Tools** section and click the **+** next to *External Tool
+   Servers*
+3. **Click the word `OpenAPI` on the Type row** — it is a **toggle button**, not
+   a read-only label; it switches to `MCP Streamable HTTP`
+4. Enter the server URL and authentication (the test server in this repo uses
+   *None*)
+5. Save
+
+> The path above is verified against **Open WebUI v0.11.3**, the version this
+> stack runs. Older docs say "Admin Settings → External Tools", which does not
+> exist in this version — the tab is **Integrations**. The Type toggle is where
+> people get stuck, because it looks like a static label.
 
 Only administrators can add MCP servers, and only the **Streamable HTTP** transport is
 supported natively — for stdio/SSE servers, front them with

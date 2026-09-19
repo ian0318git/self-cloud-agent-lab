@@ -484,8 +484,9 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 
 ### 第二階段：MCP
 
-- [ ] 在 **Admin Settings → External Tools** 新增 MCP server
-      （Type 必須選 **MCP (Streamable HTTP)**，不是 OpenAPI）
+- [ ] 在 **管理員控制台 → 設定 → 外掛功能**（英文介面是 Integrations）的
+      「工具」區塊新增 MCP server：`External Tool Servers` 右側的 **＋**
+      （**類型必須是 MCP Streamable HTTP**，不是 OpenAPI）
 - [ ] 確認工具出現在對話的 tools 清單中，且帶有 `server:mcp:` 前綴
 - [ ] 觸發一次工具呼叫，確認模型**自行決定**使用工具（而非被明確指示）
 - [ ] **多輪測試**：需要連續呼叫兩次以上工具的任務，
@@ -494,8 +495,8 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 > **現成的測試 server**：`docker compose up -d --build mcp-test-server` 會起一個
 > 只活在 ai-net 內網的 Streamable HTTP MCP server（不發布埠，D-003），提供
 > `echo` 與 `roll_die` 兩個工具——前者驗證最基本的工具呼叫，後者讓
-> 「擲兩次骰子並加總」成為現成的多輪測試題。在 Admin → External Tools 新增
-> 時 URL 填 `http://mcp-test-server:8000/mcp`、無認證。加之前可先跑
+> 「擲兩次骰子並加總」成為現成的多輪測試題。新增時 URL 填
+> `http://mcp-test-server:8000/mcp`、驗證選「無」。加之前可先跑
 > `bash scripts/verify-mcp-server.sh`——它從 open-webui 容器的視角打完整
 > handshake，機械確認這條路全通。驗證完第二階段後，刪掉 compose 裡的
 > `mcp-test-server` 服務與 `mcp-server/` 目錄即可。
@@ -574,10 +575,18 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在正被�
 後端原始碼），設了只會讓你以為 MCP 已經開啟。MCP 的啟用方式是新增一條連線，
 設定會存進資料庫：
 
-1. **Admin Settings → External Tools** → **+**
-2. Type 選 **MCP (Streamable HTTP)**
-3. 填入 Server URL 與認證方式
-4. 儲存
+1. **管理員控制台 → 設定 → 外掛功能**（英文介面是 Integrations）
+2. 捲到「工具」區塊，在 `External Tool Servers` 右側按 **＋**
+3. **類型那格的 `OpenAPI` 要點它** —— 它是**切換鈕**，不是唯讀標籤；
+   點一下會變成 `MCP Streamable HTTP`
+4. 填入 URL 與驗證方式（本 repo 的測試 server 選「無」）
+5. 儲存
+
+> 這一節的路徑以**本堆疊實測的 Open WebUI v0.11.3** 為準。舊版文件寫的
+> 「Admin Settings → External Tools」在這個版本不存在 —— 分頁本身叫
+> Integrations，繁中翻譯成「外掛功能」；`External Tool Servers` 這個標題
+> 的繁中翻譯是空的，所以它會以英文顯示。而「類型」那一格長得像唯讀標籤，
+> 是整條路徑最容易卡住的地方。
 
 只有管理員能新增 MCP server，且原生只支援 **Streamable HTTP** 傳輸 ——
 stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉接。
