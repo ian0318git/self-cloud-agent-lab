@@ -22,11 +22,18 @@ services:
     #   - "127.0.0.1:11434:11434"
 
     environment:
+      # 以下三個值都是為「2-core / 8GB codespace」調的，因此全部走 .env，
+      # 不寫死。搬到大機器時這三個數字就是第一個該放大的地方 ——
+      # 寫死會讓「換 VPS 只要改 .env」這件事變成「換 VPS 要改 compose」，
+      # 而後者會讓改動散進版控、變得難以回溯。
+      #
       # 同時只載入一個模型，避免在 8GB 機器上把記憶體吃光
-      - OLLAMA_MAX_LOADED_MODELS=1
-      # 單一平行請求，降低 KV cache 佔用的記憶體
-      - OLLAMA_NUM_PARALLEL=1
-      # 模型閒置多久後卸載；額度有限時縮短可釋放記憶體
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+      # 單一平行請求，降低 KV cache 佔用的記憶體。
+      # 有餘裕的機器放大這個值可顯著提升吞吐（多個請求共用一次載入）。
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      # 模型閒置多久後卸載；額度有限時縮短可釋放記憶體。
+      # 機器夠大時設 -1 可讓模型常駐，省下每次對話的重載時間。
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
 
     volumes:
@@ -47,8 +54,19 @@ services:
     container_name: open-webui
     restart: unless-stopped
 
+    # 綁定位址刻意做成可設定的，因為**這個值的正確答案取決於機器在哪**：
+    #
+    #   Codespaces：0.0.0.0 是安全的。那裡的埠預設為私有，要通過 GitHub
+    #               認證才連得到，不會直接暴露到 Internet。
+    #   自己的 VPS：0.0.0.0 **不安全**。VPS 若有公開 IP 且沒有防火牆，
+    #               3000 埠就是對全世界開放 —— 而且它會**繞過**你另外架設的
+    #               Cloudflare Access（Access 保護的是經過 tunnel 的那條路，
+    #               不是這個埠）。掃到 3000 的人不需要經過 Access。
+    #
+    # 搬到 VPS 時請在 .env 設 WEBUI_BIND_ADDR=127.0.0.1，只留 tunnel 那條路。
+    # 用 scripts/check-exposure.sh 可以隨時機械檢查目前實際綁在哪裡。
     ports:
-      - "3000:8080"
+      - "${WEBUI_BIND_ADDR:-0.0.0.0}:3000:8080"
 
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434

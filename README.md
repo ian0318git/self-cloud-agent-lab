@@ -13,6 +13,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 ## Table of contents
 
 - [Why this is not a persistent service](#why-this-is-not-a-persistent-service)
+- [Moving to a VPS](#moving-to-a-vps)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Securing remote access](#securing-remote-access)
@@ -53,6 +54,99 @@ storage meter. Only **deleting the entire codespace** does.
 **Conclusion:** this project is for answering *"does the architecture work, and is
 the model smart enough?"* — then delete it. A genuinely persistent deployment needs
 a different host; see [Phase 2](#phase-2).
+
+---
+
+## Moving to a VPS
+
+Codespaces is the *test bench*, not the destination. The goal is a portable private
+AI platform: when a VPS with enough CPU/RAM/GPU shows up, move this stack there,
+swap in a larger local model, and use it the way you use ChatGPT — with your own
+data, RAG, MCP, agents, memory, and workflows under your control.
+
+This section records what that move actually involves, so the POC stays a POC
+without quietly becoming a trap. **The architecture was checked against this goal
+on 2026-09-19;** the findings are below, marked by whether they carry over cleanly.
+
+### What carries over unchanged
+
+| Thing | Why it survives |
+|---|---|
+| `docker-compose.yml` | Two containers and a bridge network. Nothing Codespaces-specific. |
+| Open WebUI state | Chats, Knowledge, MCP connections, users, settings all live in the `open_webui_storage` volume. Copy the volume, keep the data. |
+| Model choice | `OLLAMA_MODEL` in `.env` is the **only** place a model is named. Scripts and compose read that variable. Swapping to a larger model is a one-line change. |
+| MCP / RAG / Memory / Agents | All Open WebUI features configured in its database, not in this repo. They move with the volume. |
+| Cloudflare Tunnel | `cloudflared` runs behind a compose profile and dials **out**. No inbound port needed — which is exactly why it is the right answer for a VPS too. |
+
+### Step 1 (mandatory): close the port
+
+**Do this before anything else.** `ports: "3000:8080"` binds to `0.0.0.0` — on
+Codespaces that is harmless (ports are private and need GitHub auth), but on a VPS
+with a public IP it puts Open WebUI on the open internet. What makes it dangerous
+rather than merely untidy is that **it bypasses Cloudflare Access**: Access guards
+the tunnel path, not this port. Anyone who scans 3000 never touches Access.
+
+```bash
+# in .env
+WEBUI_BIND_ADDR=127.0.0.1
+```
+
+Then recreate the containers and verify mechanically — not by reading the config:
+
+```bash
+bash scripts/down.sh && bash scripts/up.sh
+bash scripts/check-exposure.sh
+```
+
+`check-exposure.sh` reads the **running containers' actual bindings** via
+`docker port`, not what the compose file claims, and it tells the difference
+between "exposed to the internet" and "reachable on your LAN only" by looking for
+public addresses on this host. Note that the LAN-only case is **held back by your
+router, not by this stack** — the same config becomes a real exposure the moment it
+lands on a public IP.
+
+Also keep 11434 unpublished (D-003). Ollama has no authentication at all; the
+script checks this too.
+
+### Step 2: enlarge the model and the limits
+
+Three values in `.env` were tuned for 2 cores and 8GB. They are the first things to
+raise, and all three are already configurable — no compose edits needed:
+
+```bash
+OLLAMA_MODEL=qwen3:70b          # or whatever the VPS can hold
+OLLAMA_MAX_LOADED_MODELS=3
+OLLAMA_NUM_PARALLEL=4           # big throughput win; shares one model load
+OLLAMA_KEEP_ALIVE=-1            # keep resident; reloading costs tens of seconds
+```
+
+### What genuinely does not carry over
+
+These are real migration costs. They are listed so they are not discovered
+mid-move, which is the same reason D-014 exists.
+
+1. **Changing the embedding model forces a re-embed of every document.** Already
+   noted in Phase 2 above and D-013, but it becomes load-bearing at move time:
+   pick the embedding model *before* you upload the corpus you care about.
+
+2. **The verification tooling speaks Ollama's native API, not OpenAI's.**
+   `verify_api.py` and `ask_probe.py` call `/api/generate` and read fields that
+   only Ollama has — `thinking`, `done_reason`, `eval_count`, `load_duration`.
+   vLLM serves `/v1/chat/completions` and has no equivalents. **Switching the
+   runtime to vLLM means rewriting those two scripts**, not just changing a URL.
+
+3. **Switching runtime is a config change in Open WebUI, not in this repo.**
+   Open WebUI talks to Ollama over `OLLAMA_BASE_URL`, but it reaches vLLM through
+   an **OpenAI-compatible connection** (Admin → Settings → Connections). The two
+   can coexist, so this migration can be incremental — run both, compare, then
+   drop the one you don't want. Nothing in the repo needs to change for this.
+
+4. **The 8GB memory budget in D-001 stops being the constraint.** That is the
+   point of moving, but it also means the reasoning behind several decisions
+   (one model loaded, one parallel request, `thinking` left on because nothing
+   else worked) was about *this* machine. Re-check them rather than inheriting
+   them — D-011's "keep thinking on" in particular deserves a fresh look when a
+   GPU makes 264–293 s per answer irrelevant.
 
 ---
 
@@ -126,6 +220,7 @@ Open <http://localhost:3000>.
 | `bash scripts/down.sh --purge` | Stop containers and **delete** all volumes |
 | `bash scripts/pull-model.sh` | Retry the model download on its own |
 | `bash scripts/status.sh` | Container status, model list, memory usage |
+| `bash scripts/check-exposure.sh` | Which ports are actually reachable from outside, from the running containers' real bindings |
 | `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, factual correctness (with a control question), Chinese output (~15 min) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |

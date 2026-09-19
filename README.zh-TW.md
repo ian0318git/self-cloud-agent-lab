@@ -13,6 +13,7 @@
 ## 目錄
 
 - [為什麼不是常駐服務](#為什麼不是常駐服務)
+- [搬到 VPS](#搬到-vps)
 - [架構](#架構)
 - [快速開始](#快速開始)
 - [對外連線的安全性](#對外連線的安全性)
@@ -51,6 +52,94 @@ GB-month = (佔用 GB × 存在小時) ÷ 730
 
 **結論**：本專案用來回答「這套架構能不能跑、模型夠不夠聰明」，
 驗證完就刪除。真正常駐的部署需要不同的宿主，見[第二階段](#第二階段)。
+
+---
+
+## 搬到 VPS
+
+Codespaces 是**測試台**，不是終點。目標是一套可搬移的私有 AI 平台：
+等到有足夠 CPU/RAM/GPU 的 VPS，就把這套堆疊搬過去、換上更大的本地模型，
+像使用 ChatGPT 一樣使用它 —— 而資料、RAG、MCP、Agent、Memory 與工作流程
+都掌握在自己手上。
+
+本節記錄那次搬遷實際上涉及什麼，讓 POC 保持是 POC，而不會悄悄變成陷阱。
+**2026-09-19 已依這個目標檢查過架構**，結果如下，並標明哪些能原樣帶走。
+
+### 可以原樣帶走的部分
+
+| 項目 | 為什麼能存活 |
+|---|---|
+| `docker-compose.yml` | 兩個容器加一個 bridge 網路，沒有任何 Codespaces 專屬的東西。 |
+| Open WebUI 的狀態 | 對話、Knowledge、MCP 連線、使用者、設定全都存在 `open_webui_storage` volume 裡。複製 volume，資料就過去了。 |
+| 模型選擇 | `.env` 的 `OLLAMA_MODEL` 是**唯一**提到模型名稱的地方，腳本與 compose 都讀這個變數。換更大的模型是一行的事。 |
+| MCP / RAG / Memory / Agent | 全都是 Open WebUI 在資料庫裡的設定，不在本專案裡。跟著 volume 走。 |
+| Cloudflare Tunnel | `cloudflared` 走 compose profile，而且是**對外**撥接。不需要任何 inbound 埠 —— 這正是它在 VPS 上同樣正確的原因。 |
+
+### 第 1 步（必須）：關掉那個埠
+
+**這件事要先做。** `ports: "3000:8080"` 綁的是 `0.0.0.0` —— 在 Codespaces 上
+無害（埠預設私有、需 GitHub 認證），但在有公開 IP 的 VPS 上，這會把
+Open WebUI 放到整個 Internet 上。它之所以是危險而不只是不整齊，是因為
+**它會繞過 Cloudflare Access**：Access 守的是 tunnel 那條路，不是這個埠。
+掃到 3000 的人根本不會碰到 Access。
+
+```bash
+# 在 .env 裡
+WEBUI_BIND_ADDR=127.0.0.1
+```
+
+然後重建容器，並且**機械驗證** —— 不是讀設定檔：
+
+```bash
+bash scripts/down.sh && bash scripts/up.sh
+bash scripts/check-exposure.sh
+```
+
+`check-exposure.sh` 讀的是**執行中容器的實際綁定**（`docker port`），
+不是 compose 檔的宣告；它也會看這台機器有沒有公開位址，來區分
+「對 Internet 開放」與「只有區網可達」。注意後者是**靠你的路由器擋住的，
+不是靠這套堆疊** —— 同一個設定一落到公開 IP 上，就會變成真的暴露。
+
+同時要維持 11434 不發布（D-003）。Ollama 完全沒有認證機制，
+這支腳本也會一併檢查。
+
+### 第 2 步：放大模型與資源限制
+
+`.env` 裡有三個值是為 2 核心、8GB 調的。它們是第一個該調大的地方，
+而且三個都已經是可設定的 —— 不需要改 compose：
+
+```bash
+OLLAMA_MODEL=qwen3:70b          # 或這台 VPS 裝得下的任何模型
+OLLAMA_MAX_LOADED_MODELS=3
+OLLAMA_NUM_PARALLEL=4           # 吞吐提升明顯；多個請求共用一次模型載入
+OLLAMA_KEEP_ALIVE=-1            # 常駐；重載一次要數十秒
+```
+
+### 真正帶不走的部分
+
+這些是真的搬遷成本。列出來是為了不要在搬的過程中才發現 ——
+與 D-014 存在的理由相同。
+
+1. **換嵌入模型就必須重新嵌入所有文件。** 上方第二階段與 D-013 已提過，
+   但搬遷時它會變成關鍵路徑：**在你上傳真正在意的語料之前**先決定嵌入模型。
+
+2. **驗證工具說的是 Ollama 的原生 API，不是 OpenAI 的。**
+   `verify_api.py` 與 `ask_probe.py` 呼叫 `/api/generate`，並讀取只有 Ollama
+   才有的欄位 —— `thinking`、`done_reason`、`eval_count`、`load_duration`。
+   vLLM 提供的是 `/v1/chat/completions`，沒有對應欄位。
+   **把 runtime 換成 vLLM，意味著要重寫這兩支腳本**，不只是改一個 URL。
+
+3. **換 runtime 是 Open WebUI 的設定變更，不是本專案的。**
+   Open WebUI 透過 `OLLAMA_BASE_URL` 跟 Ollama 講話，但它是透過
+   **OpenAI 相容連線**（Admin → Settings → Connections）連到 vLLM。
+   兩者可以並存，所以這次搬遷可以是漸進的 —— 兩邊都跑、比較、再移除不要的。
+   本專案不需要為此改任何東西。
+
+4. **D-001 的 8GB 記憶體預算不再是限制。** 那正是搬遷的目的，但這也意味著
+   好幾個決策背後的理由（只載入一顆模型、單一平行請求、因為其他方式都失效
+   所以維持 thinking 開啟）是針對**這台機器**的。要重新檢查，而不是繼承 ——
+   特別是 D-011 的「維持 thinking 開啟」，當 GPU 讓「每題 264–293 秒」
+   變得無關緊要時，值得重新看一次。
 
 ---
 
@@ -124,6 +213,7 @@ bash scripts/up.sh
 | `bash scripts/down.sh --purge` | 停止容器並**刪除**所有 volume |
 | `bash scripts/pull-model.sh` | 單獨重試模型下載 |
 | `bash scripts/status.sh` | 容器狀態、模型清單、記憶體用量 |
+| `bash scripts/check-exposure.sh` | 哪些埠真的能從外面連到 —— 讀執行中容器的實際綁定，不是讀設定檔 |
 | `bash scripts/verify.sh` | 第二階段前置驗證：生成速度、tool calling、thinking、事實正確性（含對照題）、繁中輸出（約 15 分鐘） |
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
