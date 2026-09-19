@@ -62,11 +62,15 @@ echo
 
 # 暫時關閉 errexit，才能取得測試的結束碼再自行判斷
 set +e
+# -u：關掉 Python 的輸出緩衝。少了它，管線裡的 stdout 是 block-buffered，
+# 十幾分鐘的實驗期間只會看到少數幾行（有 flush=True 的那些），
+# 其餘全部積到最後才吐出 —— 看起來與「卡住」完全一樣，
+# 而「看起來卡住」會讓人去中斷一個正常的工作。理由同 ask_probe.sh。
 $COMPOSE exec -T \
   -e "OLLAMA_MODEL=$MODEL" \
   -e "OLLAMA_BASE_URL=http://ollama:11434" \
   -e "VERIFY_ONLY=$VERIFY_ONLY" \
-  open-webui python3 "$REMOTE"
+  open-webui python3 -u "$REMOTE"
 STATUS=$?
 set -e
 
@@ -78,11 +82,17 @@ echo "── 執行後記憶體 ────────────────
 free -h | awk 'NR==1 || /^Mem:/'
 echo
 
-# 部分執行時不可宣稱「關鍵項目全數通過」—— 沒跑的項目不代表通過。
-# 這個假通過是 2026-09-18 加上 VERIFY_ONLY 時自己製造出來的。
+# 結束碼約定（由 verify_api.py 決定）：
+#   0 = 關鍵項目全數通過
+#   1 = 有關鍵項目未通過 —— 模型可靠度問題，該換模型
+#   2 = 無法判定 —— **這不是失敗，是測不出來**，處置與 1 相反
+# 1 與 2 併成同一句話會給出相反的建議：該查測法的情況被講成該換模型。
+# tri() 的註解記過同一課，這裡是它管不到的層。
 if [[ -n "$VERIFY_ONLY" ]]; then
   if [[ $STATUS -eq 0 ]]; then
     ok "部分測試執行完畢（測試 $VERIFY_ONLY）—— 未做整體結論"
+  elif [[ $STATUS -eq 2 ]]; then
+    warn "部分測試無法判定（測試 $VERIFY_ONLY）—— 未做整體結論"
   else
     fail "部分測試有項目失敗（結束碼 $STATUS）"
   fi
@@ -100,6 +110,15 @@ if [[ $STATUS -eq 0 ]]; then
       換同世代模型也不會改善，這正是第二階段需要 RAG 的理由。
       對照題（HTTP）不正確才是「該換模型」的訊號。
   • 請將上方完整輸出保留，作為更新 DECISIONS.md 的依據
+EOF
+elif [[ $STATUS -eq 2 ]]; then
+  warn "驗證結束，但有項目**無法判定** —— 這不是失敗，是測不出來。"
+  cat <<'EOF'
+
+  先看上方是哪一種形狀，兩者的處置不同：
+    • 出現「response 為空」→ thinking 吃光了 num_predict 額度。
+      這是模型的輸出長度問題，不是知識判定，**先別急著換模型**。
+    • 其他形狀 → 請保留完整輸出人工複核。
 EOF
 else
   fail "驗證結束，但有項目未通過（結束碼 $STATUS）"

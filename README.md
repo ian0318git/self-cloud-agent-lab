@@ -221,7 +221,7 @@ Open <http://localhost:3000>.
 | `bash scripts/pull-model.sh` | Retry the model download on its own |
 | `bash scripts/status.sh` | Container status, model list, memory usage |
 | `bash scripts/check-exposure.sh` | Which ports are actually reachable from outside, from the running containers' real bindings |
-| `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, factual correctness (with a control question), Chinese output (~15 min) |
+| `bash scripts/verify.sh` | Phase-2 prerequisite check: speed, tool calling, thinking, factual correctness (with a control question), Chinese output (~15 min). Exit codes: `0` all critical items passed, `1` a critical item failed, `2` **could not be determined** — that is not a failure (D-016) |
 | `bash scripts/verify.sh 2` | Same, but only test 2 (disable thinking, ~1 min) |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | Run selected tests with a specific model (model comparison; the model must be an argument — an env var gets overwritten by `.env`) |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | Whether the model's answers are **factually correct**, plus speed. Every factual question ships with a control question (~1–2 min per question) |
@@ -346,14 +346,17 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 ## Verification checklist
 
 This project **does** have automated tests — `scripts/test_rag_probe.py` (57
-checks) and `scripts/verify.sh` (5 tests against the live API). An earlier
-version of this section claimed the opposite, and that claim is kept here as a
-record of what it caused: once *"inference quality is inherently a human
-judgement call"* was written down as a premise, nothing ever checked whether an
-answer was **true**. `verify_api.py` test 5 asks the model about MCP and graded
-only its **form** — response non-empty, no prompt leakage, not truncated. When
-the model replied *"MCP is a model provided by Alibaba Cloud"*, every check
-passed. See `DECISIONS.md` D-014.
+checks), `scripts/test_verify_api.py` and `scripts/test_ask_probe.py` (offline
+unit tests for the two probes), and `scripts/verify.sh` (5 tests against the
+live API). `test_ask_probe.py` did not exist until D-016: its grading logic had
+never been exercised, and its **first** live run exposed a false failure in it.
+An earlier version of this section claimed the opposite, and that claim is kept
+here as a record of what it caused: once *"inference quality is inherently a
+human judgement call"* was written down as a premise, nothing ever checked
+whether an answer was **true**. `verify_api.py` test 5 asks the model about MCP
+and graded only its **form** — response non-empty, no prompt leakage, not
+truncated. When the model replied *"MCP is a model provided by Alibaba Cloud"*,
+every check passed. See `DECISIONS.md` D-014.
 
 The steps below are still performed by hand. What must **not** be by hand is
 factual correctness — that is what `scripts/ask_probe.sh` is for.
@@ -368,10 +371,18 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
       `qwen3:4b` answers that one confidently and **wrongly**, so
       "a sensible answer arrived" passes while being false (D-014)
 - [ ] **Facts are mechanically checked, not eyeballed** —
-      `bash scripts/ask_probe.sh qwen3:4b` passes **both** the `mcp` question
-      and its `http` control question. The control question is the whole point:
-      without it you cannot tell *"this model is unreliable"* from *"this model
-      never saw MCP"*, and those have opposite fixes (D-014)
+      `bash scripts/ask_probe.sh qwen3:4b` runs **both** the `mcp` question
+      and its `http` control question to completion. The control question is the
+      whole point: without it you cannot tell *"this model is unreliable"* from
+      *"this model never saw MCP"*, and those have opposite fixes (D-014).
+      The `mcp` question is **expected to fail** — that is the finding, not a
+      defect; don't tune settings to turn it green
+- [ ] **The grading itself has been exercised** — a check that has only ever run
+      against a model returning empty answers has never been tested. The grading
+      in `verify_api.py` first actually ran against `qwen2.5:3b`, and **that first
+      run caught a false failure in the check itself**: the `http` control question
+      answered correctly but was marked wrong for not spelling out the acronym
+      (D-016). **A test that has never produced a verdict is not a tested test**
 - [ ] **Speed is measured, not assumed** — expect roughly **30–110 s** per
       answer, and **264–293 s** for `qwen3:4b` with thinking on. The
       "10–30 seconds" previously written here matched no measurement; it

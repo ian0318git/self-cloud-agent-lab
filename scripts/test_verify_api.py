@@ -9,6 +9,10 @@
   • 空輸出必須明講「（空）」→ _show
   • 多輪被 num_predict 截斷 → 由呼叫端的額度調整處理，此處僅鎖住解析行為
 
+另有一組是 2026-09-19 補上的 D-016 迴歸測試。那次出錯的不是模型，是**檢查
+自己**：對照題答對了卻被判成答錯，工具據此印出「模型整體不可靠，這才是換
+模型的訊號」。鎖住的是「問句必須與評分對齊」與「無法判定不得併入未通過」。
+
 執行：python3 scripts/test_verify_api.py
 """
 
@@ -124,6 +128,80 @@ assert v._answer_compliant("", "2") is False
 assert v._answer_compliant(None, "2") is False
 assert v._answer_compliant("3", "2") is False
 assert v._answer_compliant("2" * 20, "2") is False
+
+# ── D-016：問句必須與評分對齊 ────────────────────────────
+# 2026-09-19 實測抓到這套檢查自己的假失敗。對照題「用一句話說明什麼是
+# HTTP」得到的回答是「HTTP 是一組 rules 和約定，用於網際網路傳輸超連結
+# 檔案。」—— 完全正確，卻只因沒拼出縮寫全名而被判錯，工具於是印出
+# 「模型整體不可靠，這才是換模型的訊號」：**根據一個假失敗叫人換模型。**
+#
+# 修法是讓問句與評分對齊（直接問全名）。以下斷言把這個對齊鎖住：
+# 「用一句話說明 X 是什麼」是開放題，答對不必出現全名，與 expect_all
+# 天生不相容 —— 改回去就會踩到同一個坑，而且症狀會一模一樣。
+for _q in v.FACTUAL_QUESTIONS:
+    assert "英文全名" in _q["prompt"], f"問句未與評分對齊：{_q['id']}"
+    assert "用一句話說明" not in _q["prompt"], f"開放題與 expect_all 不相容：{_q['id']}"
+
+# 目標題與對照題必須**同一個形狀**。問法一旦不對稱，隔離「模型不可靠」
+# 與「知識不存在」的能力就沒了 —— 而那是整組對照題唯一的用途。
+_prompts = [q["prompt"] for q in v.FACTUAL_QUESTIONS]
+assert len(set(_prompts)) == len(_prompts), "問句不可重複"
+assert len({p.replace("MCP", "X").replace("HTTP", "X") for p in _prompts}) == 1, \
+    "目標題與對照題的問法必須同一個形狀"
+
+# 對照題必須恰好一題：control_ok 取的是 controls[0]，多一題會安靜地
+# 只檢查第一題，第二題形同裝飾。
+_controls = [q for q in v.FACTUAL_QUESTIONS if q["control"]]
+assert len(_controls) == 1, f"對照題必須恰好一題，目前 {len(_controls)} 題"
+assert len(v.FACTUAL_QUESTIONS) >= 2, "至少要有目標題與對照題各一"
+
+# ── _missing_slots：每個槽位是「任一替代字串出現即可」 ────
+# 這是假失敗的防線：模型用中文答對時，不該因為沒寫英文全名而被判錯。
+_slots = (("model context protocol", "模型上下文協定"),)
+assert v._missing_slots("The answer is Model Context Protocol.", _slots) == []
+assert v._missing_slots("答案是模型上下文協定。", _slots) == []
+assert v._missing_slots("MODEL CONTEXT PROTOCOL", _slots) == []  # 大小寫不敏感
+assert v._missing_slots("MCP 是 Master Control Panel。", _slots) == list(_slots)
+# 空輸出與 None 不可被誤判為通過
+assert v._missing_slots("", _slots) == list(_slots)
+assert v._missing_slots(None, _slots) == list(_slots)
+
+# 真實案例：修正後的問句下，qwen2.5:3b 的正確答案必須通過
+_http_slot = next(q["expect_all"] for q in v.FACTUAL_QUESTIONS if q["id"] == "http")
+assert v._missing_slots("HTTP 的英文全名是 HyperText Transfer Protocol。",
+                        _http_slot) == []
+# 而它的真實錯誤答案必須被擋下（真陽性不可因為放寬而被吃掉）
+_mcp_slot = next(q["expect_all"] for q in v.FACTUAL_QUESTIONS if q["id"] == "mcp")
+for _wrong in ("MCP 的英文全名是 Master Control Panel。",
+               "MCP是指微控制器平台（Microcontroller Platform）。"):
+    assert v._missing_slots(_wrong, _mcp_slot) == list(_mcp_slot), _wrong
+
+
+# ── _factual_verdict：四種組合的判讀必須分得開 ─────────────
+def _f(target, control):
+    return {
+        "by_id": {
+            "mcp": {"factual": target, "control": False},
+            "http": {"factual": control, "control": True},
+        },
+        "control_ok": control,
+    }
+
+
+# 對照題正確而目標題錯誤 → 知識不存在，這是 D-014 的預期結果，不是缺陷
+assert "知識不存在" in v._factual_verdict(_f(False, True))
+# 兩題皆錯 → 模型整體不可靠，這才是「該換模型」的訊號
+assert "模型整體不可靠" in v._factual_verdict(_f(False, False))
+# 兩題皆對 → 通過
+assert "通過" in v._factual_verdict(_f(True, True))
+# 對照題錯而目標題對 → 少見，必須要求人工複核而非自行判定
+assert "人工複核" in v._factual_verdict(_f(True, False))
+# 「無法判定」不可與任一者混為一談 —— D-016 的另一半
+assert "無法判定" in v._factual_verdict(_f(None, None))
+assert "無法判定" in v._factual_verdict(_f(None, True))
+assert "無法判定" in v._factual_verdict(_f(True, None))
+# 目標題無法判定時，即使對照題通過也不可宣稱「通過」
+assert "通過" not in v._factual_verdict(_f(None, True))
 
 # ── _suppress_chat / _suppress_generate：沿用機制 ────────
 # 這兩個函式決定「測試 2 找到的關閉方式，如何套用到後續測試」。

@@ -48,20 +48,38 @@ import urllib.request
 BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
 
 # ── 題庫 ────────────────────────────────────────────────
-# expect_all 是小寫比對：模型寫 "Model Context Protocol"、"MODEL CONTEXT
-# PROTOCOL" 都算過。清單是「全部都要出現」，不是「出現任一即可」。
+# expect_all 的每一項是一「組」替代字串：**其中任一個出現即可**。槽位之間
+# 才是「全部都要滿足」。比對一律轉小寫，是以 "MODEL CONTEXT PROTOCOL"
+# 與 "Model Context Protocol" 等價。
+#
+# 為什麼要分組（2026-09-19，D-016）：本工具原本每題只收一個英文字串，於是
+# 「答對但寫中文全名」的模型會被判成答錯 —— 那是**假失敗**。同一課早就寫在
+# verify_api.py 的 expect_all 註解裡，卻沒有套用到這裡；教訓記下來了，
+# 沒有變成判準，正是 D-014 自己指出的失效形狀。假失敗比漏報更糟：
+# 它會讓人開始懷疑一個其實沒問題的設定。
+#
+# 另一件同一課的事：**問句必須與評分對齊**。原本問「用三句話解釋 X 是什麼」，
+# 這是開放題 —— 答對不必出現全名，與 expect_all 天生不相容。實測時對照題
+# 答對了卻被判錯，工具於是印出「這才是換模型的訊號」。兩題必須維持同一個
+# 形狀，否則隔離「模型不可靠」與「知識不存在」的能力就沒了。
 QUESTIONS = [
     {
         "id": "mcp",
-        "prompt": "用三句話解釋 MCP 是什麼。",
-        "expect_all": ["model context protocol"],
+        "prompt": "MCP 的英文全名是什麼？",
+        "expect_all": (
+            ("model context protocol", "模型上下文協定", "模型上下文协议",
+             "模型情境協定"),
+        ),
         "why": "Phase 2 的主軸。MCP 由 Anthropic 於 2024 年 11 月發布 —— "
                "這個日期是判讀結果的關鍵：早於此的訓練資料不可能包含它。",
     },
     {
         "id": "http",
-        "prompt": "用三句話解釋 HTTP 是什麼。",
-        "expect_all": ["hypertext transfer protocol"],
+        "prompt": "HTTP 的英文全名是什麼？",
+        "expect_all": (
+            ("hypertext transfer protocol", "超文本傳輸協定",
+             "超文本传输协议", "超文本傳送協定"),
+        ),
         "why": "對照題。HTTP 早於所有候選模型的訓練截止，任何堪用的模型都該答對。"
                "它答對而 MCP 答錯，就把「模型整體不可靠」與「訓練資料早於 MCP」分開。",
     },
@@ -136,9 +154,14 @@ def simplified_hits(text):
 
 
 def grade(resp, q):
-    """回傳 (是否通過, 說明了什麼)。"""
+    """回傳 (是否通過, 缺少的槽位)。
+
+    每個槽位是「任一替代字串出現即可」，回傳的是把該組接起來的說明字串，
+    方便直接印給人看。空輸出會讓所有槽位都算缺少 —— 不會被誤判為通過。
+    """
     body = (resp.get("response") or "").lower()
-    missing = [s for s in q["expect_all"] if s not in body]
+    missing = ["／".join(alts) for alts in q["expect_all"]
+               if not any(a.lower() in body for a in alts)]
     return (not missing), missing
 
 
