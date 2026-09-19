@@ -218,8 +218,8 @@ bash scripts/up.sh
 | `bash scripts/verify.sh 2` | 同上，但只跑第 2 項（關閉 thinking，約 1 分鐘） |
 | `bash scripts/verify.sh 3,4 qwen3:1.7b` | 用指定模型跑指定項目（模型比較用；模型只能走參數，環境變數會被 `.env` 覆蓋） |
 | `bash scripts/ask_probe.sh qwen3:4b qwen2.5:3b` | 模型的答案**事實是否正確**，外加速度。每道事實題都附一道對照題（每題約 1–2 分鐘） |
-| `bash scripts/rag-verify.sh` | **第二階段 RAG 的機械驗證**：檢索有沒有挑對段落、模型有沒有真的用它、文件沒寫的東西它會不會照樣發明。走應用程式自己的檢索函式（CPU 上約 2–5 分鐘；三次生成各 41–94 秒，四輪實測見 D-018）。結束碼同上，另加 `3` = 探針自己壞掉（D-018） |
-| `bash scripts/rag-verify.sh --model qwen2.5:3b` | 同上，指定模型（模型必須是參數——`.env` 會覆蓋環境變數）。**請用非思考型模型**：`qwen3:4b` 在 CPU 上三次生成全部撞到預設的 300 秒上限（D-018） |
+| `bash scripts/rag-verify.sh` | **第二階段 RAG 的機械驗證**：檢索有沒有挑對段落、模型有沒有真的用它、文件沒寫的東西它會不會照樣發明。走應用程式自己的檢索函式。模型取自 `.env` 的 `OLLAMA_MODEL`，而**範例檔的預設是 `qwen3:4b`（思考型）—— 照這一行原樣跑，三次生成會全部撞到 300 秒上限，至少 15 分鐘之後得到「無法判定」**（2026-09-19 實測）。想要會亮綠燈的跑法請看下一行。結束碼同上，另加 `3` = 探針自己壞掉（D-018） |
+| `bash scripts/rag-verify.sh --model qwen2.5:3b` | 同上，指定模型。**建議的跑法**：非思考型模型，三次生成各 41–94 秒，整輪約 2–5 分鐘（四輪 12 個樣本實測，D-018）。模型必須是參數——`.env` 會覆蓋環境變數 |
 | `bash scripts/rag-verify.sh --timeout 900` | 拉長單題時限，給思考型模型用。「太慢」與「連不上」會分開講 —— 兩者要修的東西不同 |
 | `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
 | `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |

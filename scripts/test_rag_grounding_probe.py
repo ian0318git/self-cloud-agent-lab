@@ -345,4 +345,72 @@ assert "--timeout" in SRC, "逾時必須可以由命令列調整"
 # 那一行 —— 那會印出「HTTP bad-response」這種沒有意義的訊息。
 assert "status == BAD_RESPONSE" in SRC, "BAD_RESPONSE 必須在 probe_one 裡明講"
 
+# ── 清理：不可以把「無法判定」翻成「未通過」─────────────────
+# 這是提交之後才讀出來的缺陷，形狀與前面六次假失敗完全相同：**沒有去查，
+# 而是假設**。
+#
+# 集合從未建立時（例如嵌入階段就失敗，`return p` 發生在 insert 之前），
+# 原本直接呼叫 delete_collection。而 Chroma 對不存在的集合丟
+# NotFoundError —— 這是**實測**（2026-09-19，在容器內對一個隨機不存在的
+# 名字呼叫，得到 `NotFoundError: Collection [...] does not exist`），
+# 不是推測。那個例外被 except 接住，於是印出「請手動刪除 <name>」，並且
+# 讓結束碼由 2（無法判定）翻成 1（未通過）—— 用清理這段，把 D-016 花一
+# 整輪分開的兩種狀態從後門重新合併起來。
+#
+# 而觸發它的是**最常見的失敗路徑**：嵌入模型沒下載、或 ollama 連不上。
+
+
+class _FakeVector:
+    """假的向量庫客戶端。行為照真實的 Chroma 重現，不照我們希望的樣子。"""
+
+    def __init__(self, existed=True, delete_raises=None,
+                 readback_still=False, probe_raises=None):
+        self._existed = existed
+        self._delete_raises = delete_raises
+        self._readback_still = readback_still
+        self._probe_raises = probe_raises
+
+    def has_collection(self, name):
+        if self._probe_raises:
+            raise self._probe_raises
+        return self._existed
+
+    def delete_collection(self, name):
+        if self._delete_raises:
+            raise self._delete_raises
+        self._existed = self._readback_still
+
+
+# (1) 集合從未建立 —— 本次修掉的假失敗。必須是 PASS，而且訊息不可以叫
+#     使用者去刪一個不存在的東西。
+state, msg = r.cleanup_collection(_FakeVector(existed=False), "probe-rag-x")
+assert state == r.PASS, f"沒有東西要清不是失敗，得到 {state}"
+assert "手動刪除" not in msg, f"不得叫人刪不存在的集合：{msg}"
+
+# (2) 正常刪除 —— 必須回讀確認，不是「沒拋例外就當作刪掉了」
+state, msg = r.cleanup_collection(_FakeVector(existed=True), "probe-rag-x")
+assert state == r.PASS and "回讀" in msg, f"刪除後須回讀確認，得到 {state}/{msg}"
+
+# (3) 刪了還在 —— 這才是真的失敗
+state, msg = r.cleanup_collection(
+    _FakeVector(existed=True, readback_still=True), "probe-rag-x")
+assert state == r.FAIL and "仍存在" in msg, f"刪不掉須判失敗，得到 {state}/{msg}"
+
+# (4) 集合存在但刪除拋例外 —— 這時「請手動刪除」是**對**的指示。
+#     (1) 與 (4) 的差別就只有「有沒有先查」，而它們的訊息必須不同。
+state, msg = r.cleanup_collection(
+    _FakeVector(existed=True, delete_raises=RuntimeError("boom")), "probe-rag-x")
+assert state == r.FAIL and "手動刪除" in msg, f"得到 {state}/{msg}"
+
+# (5) --keep：跳過，且不得算失敗
+state, _ = r.cleanup_collection(
+    _FakeVector(existed=True), "probe-rag-x", keep=True)
+assert state == r.SKIP, f"--keep 應為 SKIP，得到 {state}"
+
+# (6) 連問都問不到 —— 是「無法判定」，不是「未通過」。
+#     這是本次缺陷的另一半：狀態碼不該由清理決定。
+state, msg = r.cleanup_collection(
+    _FakeVector(probe_raises=RuntimeError("連不上")), "probe-rag-x")
+assert state == r.UNKNOWN, f"問不到狀態應為無法判定，得到 {state}"
+
 print("test_rag_grounding_probe.py：全部通過")

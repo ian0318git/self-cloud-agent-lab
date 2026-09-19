@@ -509,6 +509,51 @@ def ollama_chat(base_url, model, messages, timeout=DEFAULT_TIMEOUT):
     return 200, content
 
 
+# ── 清理 ────────────────────────────────────────────────
+
+def cleanup_collection(vector, collection, keep=False):
+    """刪掉測試集合，回傳 (狀態, 訊息)。**只判斷與組織訊息，不印東西。**
+
+    抽成函式是為了讓這段的**訊息**能離線迴歸測試 —— 訊息會直接印給使用者，
+    而它原本是錯的：
+
+    集合從來沒被建立時（例如嵌入階段就失敗，`return p` 在 insert 之前），
+    原本直接呼叫 `delete_collection`，而 Chroma 對不存在的集合丟
+    `NotFoundError`（2026-09-19 實測，不是推測）。那個例外被 except 接住，
+    於是印出「請手動刪除 <name>」，並且 —— 這才是重點 —— 讓結束碼由
+    **2（無法判定）翻成 1（未通過）**。等於用清理這段把 D-016 花一整輪
+    分開的兩種狀態，從後門重新合併起來。而觸發它的是最常見的失敗路徑。
+
+    修法和前面六次假失敗一樣：**不要假設，去查**。先問集合在不在。
+    """
+    if keep:
+        return SKIP, f"--keep：保留 {collection}（請自行刪除）"
+
+    try:
+        existed = vector.has_collection(collection)
+    except Exception as exc:                               # noqa: BLE001
+        # 連問都問不到。不能宣稱刪掉了，也不能宣稱沒東西可刪。
+        return UNKNOWN, (f"無法確認集合狀態：{_short(str(exc), 50)}"
+                         f" —— 請自行確認 {collection}")
+    if not existed:
+        # 沒有東西要清。這是**通過**，不是失敗。
+        return PASS, "沒有需要清理的集合（從未建立）"
+
+    try:
+        vector.delete_collection(collection)
+    except Exception as exc:                               # noqa: BLE001
+        return FAIL, f"刪除失敗：{_short(str(exc), 60)} —— 請手動刪除 {collection}"
+
+    # 回讀確認。這個專案量過太多次「呼叫沒拋例外」與「狀態真的改了」是
+    # 兩件事（lock-signup.sh、connect-endpoint.sh 都踩過），刪除也不例外。
+    try:
+        still = vector.has_collection(collection)
+    except Exception as exc:                               # noqa: BLE001
+        return UNKNOWN, (f"刪除後無法回讀確認：{_short(str(exc), 50)}"
+                         f" —— 請自行確認 {collection}")
+    return (FAIL, f"刪除後仍存在：{collection}") if still else (PASS, "已刪除（回讀確認）")
+
+
 # ── 主流程 ──────────────────────────────────────────────
 
 async def run(model, keep=False, timeout=DEFAULT_TIMEOUT):
@@ -587,19 +632,13 @@ async def run(model, keep=False, timeout=DEFAULT_TIMEOUT):
         #  2. 記成一列之後，清理**失敗**才會讓 failed() 成立。原本清理失敗
         #     只印一行訊息、結束碼照樣 0 —— 那等於在說「全部通過」，卻把
         #     一個刪不掉的集合留在使用者的向量庫裡。
-        if keep:
-            p.add("清理測試集合", SKIP, f"--keep：保留 {collection}（請自行刪除）")
-        else:
-            try:
-                vector.delete_collection(collection)
-                still = vector.has_collection(collection)
-                p.add("清理測試集合",
-                      FAIL if still else PASS,
-                      f"刪除後仍存在：{collection}" if still
-                      else "已刪除（回讀確認）")
-            except Exception as exc:                       # noqa: BLE001
-                p.add("清理測試集合", FAIL,
-                      f"失敗：{_short(str(exc), 60)} —— 請手動刪除 {collection}")
+        #  2. 記成一列之後，清理**失敗**才會讓 failed() 成立。原本清理失敗
+        #     只印一行訊息、結束碼照樣 0 —— 那等於在說「全部通過」，卻把
+        #     一個刪不掉的集合留在使用者的向量庫裡。
+        #
+        # 判斷本身在 cleanup_collection()，那裡說明為什麼不能假設集合存在。
+        state, detail = cleanup_collection(vector, collection, keep)
+        p.add("清理測試集合", state, detail)
 
 
 async def probe_one(app, vector, collection, embedding_fn, k, model,
