@@ -228,6 +228,7 @@ Open <http://localhost:3000>.
 | `bash scripts/rag-verify.sh` | **Phase-2 RAG, mechanically**: does retrieval pick the right chunk, does the model actually *use* it, and does it refuse to invent what the document doesn't say. Uses the app's own retrieval functions. The model comes from `OLLAMA_MODEL` in `.env`, and **the example default is `qwen3:4b` (a thinking model) — run this line as-is and all three answers hit the 300 s ceiling, taking at least 15 min to report "inconclusive"** (measured 2026-09-19). For a run that can actually go green, see the next line. Exit codes `0`/`1`/`2` as above, plus `3` = the probe itself broke (D-018) |
 | `bash scripts/rag-verify.sh --model qwen2.5:3b` | Same, against a specific model. **The recommended invocation**: a non-thinking model takes 41–94 s per answer, ~2–5 min for the whole run (four runs, 12 samples — D-018). The model must be an argument — `.env` overwrites env vars |
 | `bash scripts/rag-verify.sh --timeout 900` | Raise the per-answer limit, for thinking models. "Too slow" and "unreachable" are reported separately — they send you to different fixes |
+| `bash scripts/rag-http-verify.sh` | **The same four RAG items over the real HTTP path** — create a knowledge base, upload a document, ask about it, ask about what it doesn't say — through `/api/v1/files` and `/api/chat/completions` rather than the app's functions. Needs an API key in `.env` as `WEBUI_API_KEY` (which needs **Admin Panel → Settings → Authentication → API Keys** switched on first). Argues with `rag-verify.sh`'s blind spot, and has its own: it cannot see *which* chunks were retrieved. Exit codes `0`/`1`/`2`/`3` (D-019) |
 | `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
 | `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
 | `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
@@ -394,8 +395,9 @@ config API and reads the value back to confirm. Existing accounts are unaffected
 This project **does** have automated tests — `scripts/test_rag_probe.py` (57
 checks), `scripts/test_verify_api.py`, `scripts/test_ask_probe.py`,
 `scripts/test_egress_probe.py`, `scripts/test_probe_openai.py`,
-`scripts/test_runtime_state.py` and `scripts/test_rag_grounding_probe.py` —
-offline unit tests: five for the probes, one for the runtime-config reader,
+`scripts/test_runtime_state.py`, `scripts/test_rag_grounding_probe.py` and
+`scripts/test_rag_http_probe.py` —
+offline unit tests: six for the probes, one for the runtime-config reader,
 and one for the RAG grader, whose judgement was wrong four times in a row on
 2026-09-19 (all four were **false failures**; the regression cases are the
 model's actual replies, kept verbatim). Its tests also pin down the difference
@@ -488,6 +490,22 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 > currently has **zero users**: sign-up is locked (D-012), so creating the first
 > admin is a step only you can take. Do the four boxes above in the UI once you
 > have an account; use the script to know what to expect beforehand.
+>
+> **That gap has a companion script now:** `bash scripts/rag-http-verify.sh` runs
+> the same four items through `/api/v1/knowledge/create`, `/api/v1/files/` and
+> `/api/chat/completions` — the path the UI itself takes — using an API key from
+> `.env`. It also argues with the *other* blind spot: it cannot see which chunks
+> were retrieved, so "the right chunk was never found" and "it was found and
+> ignored" are indistinguishable there. Run both; neither alone is the whole
+> answer (D-019).
+>
+> **API keys are off by default in this stack.** Checked in the database on
+> 2026-09-20: `auth.enable_api_keys = false` and zero rows in `api_key`, so the
+> account page's "Create" either isn't there or returns `403
+> API_KEY_CREATION_NOT_ALLOWED`. Switch it on under **Admin Panel → Settings →
+> Authentication → API Keys** (`http://localhost:3000/?settings=admin:authentication`)
+> first. Like every other Open WebUI setting, that one lives in the database —
+> **editing `.env` will not do it** (D-013).
 >
 > Nor does it stress the context window. The probe's document is 478 characters
 > (~765 tokens); this stack loads models with **`num_ctx` 4096**, and Open WebUI

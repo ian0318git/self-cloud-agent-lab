@@ -221,6 +221,7 @@ bash scripts/up.sh
 | `bash scripts/rag-verify.sh` | **第二階段 RAG 的機械驗證**：檢索有沒有挑對段落、模型有沒有真的用它、文件沒寫的東西它會不會照樣發明。走應用程式自己的檢索函式。模型取自 `.env` 的 `OLLAMA_MODEL`，而**範例檔的預設是 `qwen3:4b`（思考型）—— 照這一行原樣跑，三次生成會全部撞到 300 秒上限，至少 15 分鐘之後得到「無法判定」**（2026-09-19 實測）。想要會亮綠燈的跑法請看下一行。結束碼同上，另加 `3` = 探針自己壞掉（D-018） |
 | `bash scripts/rag-verify.sh --model qwen2.5:3b` | 同上，指定模型。**建議的跑法**：非思考型模型，三次生成各 41–94 秒，整輪約 2–5 分鐘（四輪 12 個樣本實測，D-018）。模型必須是參數——`.env` 會覆蓋環境變數 |
 | `bash scripts/rag-verify.sh --timeout 900` | 拉長單題時限，給思考型模型用。「太慢」與「連不上」會分開講 —— 兩者要修的東西不同 |
+| `bash scripts/rag-http-verify.sh` | **同樣四項 RAG，改走真正的 HTTP 路徑** —— 建立知識庫、上傳文件、問文件裡的事、問文件裡沒有的事 —— 走 `/api/v1/files` 與 `/api/chat/completions`，而不是應用程式的函式。需要 `.env` 裡有一組 `WEBUI_API_KEY`（而那又需要先打開 **管理員控制台 → 設定 → 驗證 → API 金鑰**）。它補上 `rag-verify.sh` 的盲點，也有自己的盲點：看不到撈回了哪些 chunk。結束碼 `0`/`1`/`2`/`3`（D-019） |
 | `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
 | `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |
 | `bash scripts/probe-openai.sh [URL]` | 任何 OpenAI-compatible runtime 的相容性探針。預設指向 Ollama 的 `/v1` |
@@ -370,8 +371,9 @@ bash scripts/lock-signup.sh
 本專案**有**自動化測試 —— `scripts/test_rag_probe.py`（57 項檢查）、
 `scripts/test_verify_api.py`、`scripts/test_ask_probe.py`、
 `scripts/test_egress_probe.py`、`scripts/test_probe_openai.py`、
-`scripts/test_runtime_state.py` 與 `scripts/test_rag_grounding_probe.py` ——
-離線單元測試：五支給探針、一支給 runtime 設定讀寫、一支給 RAG 評分，
+`scripts/test_runtime_state.py`、`scripts/test_rag_grounding_probe.py` 與
+`scripts/test_rag_http_probe.py` ——
+離線單元測試：六支給探針、一支給 runtime 設定讀寫、一支給 RAG 評分，
 而那個評分在 2026-09-19 **連續錯了四次**（四次全是**假失敗**；迴歸測資
 用的是模型實際的回應原文，一字未改）。它的測試也釘住「模型太慢」與
 「模型連不上」的分別 —— 這一項探針自己也弄錯過一次，把慢的模型報成
@@ -451,6 +453,20 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 > 已登入的使用者，而本資料庫目前有**零個使用者**：註冊是鎖住的（D-012），
 > 所以建立第一個管理員只有你能做。有了帳號之後，上面四項請在 UI 裡實際做
 > 一次；這支腳本是讓你在做之前就知道該預期什麼。
+>
+> **這個缺口現在有對應的腳本了：** `bash scripts/rag-http-verify.sh` 用
+> `/api/v1/knowledge/create`、`/api/v1/files/` 與 `/api/chat/completions`
+> 跑完同樣四項 —— 也就是 UI 自己走的那條路 —— 金鑰從 `.env` 讀。
+> 它同時補上另一支的盲點，也有自己的盲點：**它看不到撈回了哪些 chunk**，
+> 所以在它眼裡「對的段落沒被撈到」與「撈到了卻被忽略」分不開。
+> 兩支都跑；單獨一支都不是完整答案（D-019）。
+>
+> **本堆疊的 API 金鑰預設是關閉的。** 2026-09-20 查資料庫：
+> `auth.enable_api_keys = false` 且 `api_key` 表 0 筆，所以帳號頁的
+> 「建立」不是不存在，就是回應 `403 API_KEY_CREATION_NOT_ALLOWED`。
+> 請先到 **管理員控制台 → 設定 → 驗證 → API 金鑰** 打開
+> （`http://localhost:3000/?settings=admin:authentication`）。
+> 它和其他 Open WebUI 設定一樣住在資料庫裡 —— **改 `.env` 不會生效**（D-013）。
 >
 > **它也沒有壓到 context 上限。** 探針的文件只有 478 字元（約 765 token），
 > 而本堆疊載入模型時是 **`num_ctx` 4096** —— Open WebUI 從來不設這個值。
