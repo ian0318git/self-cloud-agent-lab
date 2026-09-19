@@ -137,7 +137,7 @@ mid-move, which is the same reason D-014 exists.
 
 3. **Switching runtime is a config change in Open WebUI, not in this repo.**
    Open WebUI talks to Ollama over `OLLAMA_BASE_URL`, but it reaches vLLM through
-   an **OpenAI-compatible connection** (Admin → Settings → Connections). The two
+   an **OpenAI-compatible connection** (Admin Panel → Settings → Connections). The two
    can coexist, so this migration can be incremental — run both, compare, then
    drop the one you don't want. Nothing in the repo needs to change for this.
 
@@ -507,7 +507,7 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 > table on first boot and existing database values win from then on, so changing
 > `RAG_EMBEDDING_ENGINE` in `.env` and recreating the container does nothing
 > (verified in the source, not inferred — D-013). Use
-> **Admin → Settings → Documents → Embedding**.
+> **Admin Panel → Settings → Documents → Embedding**.
 >
 > Two scripts serve that decision: `bash scripts/set-embedding.sh` reads or
 > writes the setting with a read-back confirmation (the Admin UI route needs an

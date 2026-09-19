@@ -131,7 +131,7 @@ OLLAMA_KEEP_ALIVE=-1            # 常駐；重載一次要數十秒
 
 3. **換 runtime 是 Open WebUI 的設定變更，不是本專案的。**
    Open WebUI 透過 `OLLAMA_BASE_URL` 跟 Ollama 講話，但它是透過
-   **OpenAI 相容連線**（Admin → Settings → Connections）連到 vLLM。
+   **OpenAI 相容連線**（管理員控制台 → 設定 → 連線）連到 vLLM。
    兩者可以並存，所以這次搬遷可以是漸進的 —— 兩邊都跑、比較、再移除不要的。
    本專案不需要為此改任何東西。
 
@@ -468,7 +468,7 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 > 把設定寫進 config 表，之後資料庫的既有值一律優先，所以改 `.env` 的
 > `RAG_EMBEDDING_ENGINE` 再重建容器完全不會生效（這是從原始碼確認的，
 > 不是推論 —— 見 D-013）。請用
-> **Admin → Settings → Documents → Embedding**。
+> **管理員控制台 → 設定 → 文件 → 嵌入**（英文介面是 Documents → Embedding）。
 >
 > 這個決定有兩支腳本配合：`bash scripts/set-embedding.sh` 讀取／設定該項
 > 設定，而且**送出後會回讀確認**（走 Admin UI 需要帳號，這支不用）；
