@@ -554,6 +554,22 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 - [ ] **Multi-turn test:** a task requiring two or more sequential tool calls —
       confirm the 4B model can hold the flow together
 
+> **Status (2026-09-20): both of the last two items are now verified — see
+> D-023.** With the four feature switches off (37 tools → 16,
+> `bash scripts/toggle-builtin-tools.sh --off`), the model called `roll_die` on
+> its own from the bare prompt "roll a die for me" — no tool name mentioned, no
+> instruction to use one. A two-turn task then produced **three sequential tool
+> calls in a single response** (two `roll_die` plus one `echo`), and the final
+> answer added the two real results correctly: 5 + 6 = 11.
+>
+> The evidence is mechanical rather than a judgement of the wording. Every
+> `function_call` the model emits carries a `call_id`, and the result comes back
+> as a `function_call_output` bearing the **same** `call_id`. That chain is
+> stored in the chat record and in the MCP server's `CallToolRequest` log, so it
+> survives the removal of any temporary instrumentation — and it is the only way
+> to tell a real tool call from a plausible-looking number. D-023 §6 documents a
+> turn where the model answered "6" with no `function_call` at all.
+>
 > **A ready-made test server:** `docker compose up -d --build mcp-test-server`
 > starts a Streamable HTTP MCP server that lives only on the internal `ai-net`
 > network (no published port — D-003), exposing two tools: `echo` (the simplest
