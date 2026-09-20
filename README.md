@@ -20,7 +20,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 - [Verification checklist](#verification-checklist)
 - [Quota management](#quota-management)
 - [Phase 2](#phase-2)
-- [Phase 3 and 4 — planned, not yet measured](#phase-3-and-4--planned-not-yet-measured)
+- [Phase 3 and 4 — planned; the first three items are measured](#phase-3-and-4--planned-the-first-three-items-are-measured)
 - [Codespaces gotchas](#codespaces-gotchas)
 - [Troubleshooting](#troubleshooting)
 
@@ -256,6 +256,11 @@ change anything they cover.
 | `bash scripts/verify-first-admin.sh` | That `ENABLE_SIGNUP=false` does not lock you out of creating your first admin |
 | `bash scripts/verify-langgraph-tools.sh` | That tool calling survives the code-path change to LangGraph, graded on the `call_id` chain rather than on the answer reading correctly |
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | That the grader above is actually exercised — 11 mutations of its own criteria, every one must be caught |
+| `bash scripts/verify-chroma-dims.sh` | That mem0 reuses a pre-created ChromaDB collection instead of fighting it, and which metadata key is authoritative for embedding dimensions (D-026) |
+| `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
+| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027) |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 46 mutations of its own criteria, every one must be caught |
+| `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences |
 
 ---
 
@@ -651,7 +656,7 @@ tools already cover most of the original plan:
 **LangGraph is not introduced for Phase 2** — D-005 deferred it until *"a need
 appears for custom multi-step workflows or an explicit state machine."* That
 condition is now being invoked deliberately for Phase 3, which is a state
-machine by definition; see [Phase 3 and 4](#phase-3-and-4--planned-not-yet-measured)
+machine by definition; see [Phase 3 and 4](#phase-3-and-4--planned-the-first-three-items-are-measured)
 below and [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 
 > **Licensing warning, verified:** the `langgraph-server` / `langgraph-api`
@@ -720,7 +725,7 @@ tokens".
 
 ---
 
-## Phase 3 and 4 — planned, not yet measured
+## Phase 3 and 4 — planned; the first three items are measured
 
 > **Status: mostly a plan.** The section exists so the design is written down
 > *before* it is built, and so the assumptions it rests on are visible enough to
@@ -728,11 +733,12 @@ tokens".
 > docs/source on 2026-09-19, or measured since) or **[open]** (measured by
 > nothing yet).
 >
-> **As of 2026-09-20, item 1 has been measured and passed** (D-024) — tool
-> calling does survive the change of code path. Everything after it is still
-> unmeasured: the six items are ordered deliberately, and item 1 passing only
-> means it is no longer wasted effort to try item 2. It does not mean Phase 3
-> works.
+> **As of 2026-09-20, items 1–3 have been measured and passed** (D-024, D-026,
+> D-027) — tool calling does survive the change of code path, mem0 does reuse a
+> pre-created ChromaDB collection, and mem0's extraction call does pay for a
+> prompt it cannot fully deliver. Everything after is still unmeasured: the six
+> items are ordered deliberately, and each one passing only means it is no
+> longer wasted effort to try the next. It does not mean Phase 3 works.
 
 This revisits **D-005**, which deferred LangGraph until *"a need appears for
 custom multi-step workflows or an explicit state machine."* That condition is
@@ -751,7 +757,7 @@ used.
 | Model binding | `langchain-ollama` | binds `qwen3:4b` / `qwen2.5:3b` once Phase 1 benchmarking settles the choice |
 | Tool bridge | `langchain.mcp` → `MCPAdapter` | **[verified]** — see the correction below |
 | Loop guard | `recursion_limit=5` | see **[open]** item 4 |
-| Memory | `mem0` + ChromaDB | **[verified]** item 2 · **[open]** item 3 |
+| Memory | `mem0` + ChromaDB | **[verified]** items 2 and 3 |
 | Scheduler | `APScheduler`, in-process | **[open]** item 6 |
 | Multi-step | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
 | Multi-agent | LangGraph Supervisor (tool-based) | `langgraph-supervisor-py` optional, not introduced up front |
@@ -771,9 +777,10 @@ and the API may still change, so pin the version once chosen.
 
 Each of these was, at the time of writing, a measurement this project had not
 made. They are listed in the order they should be settled, because later ones
-are wasted effort if an earlier one fails. Items 1 and 2 are now measured;
-**the rest are still unmeasured, and two of them (3 and 5) have had their
-premises changed by the 2026-09-20 VM resize** — read those before acting.
+are wasted effort if an earlier one fails. Items 1–3 are now measured;
+**the rest (4–6) are still unmeasured, and item 5 has had its premise changed
+by the 2026-09-20 VM resize** — read it before acting. Item 3's own rates are
+recorded in D-027; they do **not** re-baseline throughput, which is still open.
 
 1. **[verified] Does tool calling survive the change of code path?** — **Yes.**
    Measured 2026-09-20 (D-024) via
@@ -848,19 +855,72 @@ premises changed by the 2026-09-20 VM resize** — read those before acting.
    extract facts before storing, which is item 3. This probe drives the vector
    store and the embedder directly, so it needs no API key and no LLM.
 
-3. **[open] mem0 costs one extra LLM call per conversation.** mem0's write path
-   runs an LLM to extract facts before storing them. That call is *in addition
-   to* generating the answer. At the rates measured so far (3.8–6.9 tok/s,
-   D-011/D-014) this may be the single largest cost in Phase 4 — large enough
-   that it should be timed on its own before memory is designed in, not
-   discovered after.
+3. **[verified] mem0 does cost one extra LLM call — and at the default
+   `num_ctx` that call never sees its own instructions.** Measured 2026-09-20
+   (D-027) via `bash scripts/verify-mem0-add-cost.sh`. The claim above was
+   structurally right, and measurably worse than it sounds:
 
-   **Every token rate currently on record is from the old VM.** The VM was
-   resized on 2026-09-20 from 2 vCPU / 3.8 GB to 4 vCPU / 16 GB, *after* D-024
-   was written (D-024's commit is 18:02, the reboot 18:15). D-024's `~14 tok/s`
-   and `7.4 s` between tool calls — and D-011/D-014's 3.8–6.9 tok/s — were all
-   measured with 2,044 MB available and paging. **Re-baseline throughput on this
-   item's own run; do not carry the old numbers into it.**
+   - **One call — confirmed by intercepting it, not by reading the source.**
+     The probe wraps `llm.client.chat`, so it captures the *same dict* mem0
+     sends: same messages, same options, including the
+     `Please respond with valid JSON only.` that `format=json` appends. One
+     `add()` → one chat call. Phase 5's hash dedup runs **after** Phase 2's
+     extraction, so writing the same content twice still pays twice.
+   - **The extraction prompt is 33,653 characters of fixed overhead** —
+     `ADDITIVE_EXTRACTION_PROMPT`, `configs/prompts.py:468` — and mem0's
+     `OllamaLLM` **never sends `num_ctx`** (`llms/ollama.py:129-134` sends only
+     temperature / num_predict / top_p). So it takes ollama's default of 4096.
+   - **At that default, 5,997 of the prompt's 8,047 tokens never reach the
+     model** — and what is dropped is the **beginning**, i.e. the model's own
+     instructions. Confirmed with equal-length canaries at the head and tail of
+     the system prompt: the tail is visible, the head is not — and with the two
+     canaries **swapped**, the same end is still the visible one, which rules
+     out the model simply echoing the marker names it was asked about.
+     *(This bullet was written before it was measured, and the first
+     measurement came back empty — the model's answer was cut off at
+     `num_predict` and the probe reported that as "neither end visible". The
+     instrument was wrong, not the claim; the line above is the re-measurement
+     after fixing it, D-027 §10.)*
+   - **To stop truncating, `num_ctx` must exceed the prompt's own token count.**
+     The rule is `num_ctx >= prompt tokens + 1`. It is a *threshold*, not an
+     extrapolation — measured by bracketing it to within one token using a small
+     prompt: at `num_ctx = P` the prompt is cut to `truncated_length(P)`, at
+     `num_ctx = P + 1` it passes through untouched. The same bracket falsifies
+     both alternative rules (threshold = `num_ctx/2`, threshold = `num_ctx - c`),
+     which are indistinguishable from the real one at the single point the old
+     reading rested on. **Do not carry `8048` around as "the number for mem0"**:
+     it is that rule applied to the prompt *this probe reconstructs* (8,047
+     tokens). ollama's own log reports `prompt=8052` and `prompt=8100` for the
+     two real `add()` calls in the same run, so a real `add()` needs `>= 8101`.
+   - **The server's log confirms the shape of the cut, independently of the
+     probe.** Every truncation line in `docker logs ollama` reads
+     `limit=2050 prompt=... keep=4 new=2050`, and the slot line that follows
+     says `n_keep = 4` — i.e. the first `numKeep = 4` tokens are kept, the tail
+     is kept, the middle is dropped. That is the same rule the source and the
+     bracket give, reported by the server about real requests.
+   - **thinking is billed and then thrown away.** `_parse_response()`
+     (`llms/ollama.py:43-90`) returns only `message.content` — `eval_count`,
+     `prompt_eval_count` and qwen3's `thinking` are all discarded, so mem0's own
+     interface cannot tell you what it spent. That is why this had to be
+     measured by wrapping the client from outside.
+
+   **Correction to an earlier draft of this item.** The truncation rule was
+   already on record: **D-023 §5** has `num_ctx - max((num_ctx - numKeep)/2, 1)`
+   when the token count exceeds `num_ctx - 1`, with `numKeep = 4` — read from
+   the same source and cross-checked against the same `limit=2050` log line.
+   D-023 §5 also named the measurement it was missing ("I have not actually set
+   a second `num_ctx`"), which is exactly the bracket above; re-measuring it is
+   what closes that gap. A draft in between used a different formula
+   (`num_ctx - num_predict - 46`) that happened to match the one log line it
+   was checked against, and "verified" it with an experiment in which both
+   formulas predict the same number. See D-027 §4.
+
+   **Every token rate previously on record is still from the old VM.** The VM
+   was resized on 2026-09-20 from 2 vCPU / 3.8 GB to 4 vCPU / 16 GB, *after*
+   D-024 was written (D-024's commit is 18:02, the reboot 18:15). This run does
+   not replace those numbers: `num_predict` caps generation before the model
+   stops on its own, so the wall-clock time here is a property of `num_predict`,
+   not of the machine. **Re-baselining throughput is still open.**
 
 4. **[open] `recursion_limit=5` is likely too tight for Plan-and-Execute.**
    The limit counts graph super-steps, and Plan → Execute → Check → Retry can
