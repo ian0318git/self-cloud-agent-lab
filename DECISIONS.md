@@ -2372,3 +2372,183 @@ role === "admin" || (role === "user" && permissions.features.direct_tool_servers
 問的不是「它叫什麼」，而是「**哪個行程會去連它**」—— 容器連得到、
 瀏覽器連不到，這一條就足以分辨。
 
+---
+
+## D-022：加大機器不等於加大 context —— 截斷的來源是 `num_ctx`，不是 RAM
+
+**日期**：2026-09-20
+**狀態**：已決定（並更正 D-020 調查期間我對「第二次呼叫為何暴增」的錯誤假設）
+
+### 一、起因
+
+使用者在 UI 送出的每一句話，助手都回空白：`content = '""'`、`done = 1`、
+`error = null`。**系統認為自己「成功完成」了。** 而同一個 chat、同一句話，
+我用 HTTP + WebSocket 重現卻完全正常（8.1 秒、工具被呼叫、答案正確）。
+
+既然同一條程式路徑一邊過一邊不過，差別只可能在**送出的內容**。
+
+### 二、量到的數字
+
+暫時在 `utils/payload.py:convert_payload_openai_to_ollama` 與
+`utils/middleware.py:execute_tool_call` 插入探針（先備份、`ast.parse`
+驗證語法後才重啟），量到：
+
+| | 使用者的 UI | 我的重現 |
+|---|---|---|
+| 送出的工具數 | **37** | 2 |
+| 工具定義大小 | **24,307 字元** | 493 字元 |
+| ollama 收到的 prompt | **4,937 token** | 219 / 257 token |
+| ollama 的截斷紀錄 | **`limit=2050 prompt=4937 keep=4 new=2050`** | 無 |
+| 第二次呼叫的 `n_tokens` | 2,050（被砍到上限） | 257 |
+| 最終答案 | 空白 | 「你丟了一顆六面骰子，結果是 4。」 |
+
+多出來的 35 個工具來自 `config` 表四個全開的開關：`memories.enable`、
+`notes.enable`、`automations.enable`、`calendar.enable`（再加上知識庫、
+聊天、核心工具）。名稱可在探針輸出中逐一核對。
+
+### 三、根因：工具是 prompt 的一部分，不是額外欄位
+
+`ollama show qwen2.5:3b --modelfile` 的對話模板開頭就是：
+
+```
+{{- if .Tools }}
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+```
+
+**工具定義會被渲染進 system prompt。** 這解釋了算術：24,307 字元 ÷ 4,937
+token ≈ **4.9 字元/token**，正是 JSON schema 的密度。那 4,937 個 token
+絕大多數就是這 37 個工具的定義。
+
+而 `num_ctx` 是 4096 —— `ollama show qwen2.5:3b --modelfile` 顯示該模型
+**沒有任何 `PARAMETER` 行**（`grep -c '^PARAMETER'` = 0），所以走 ollama
+的預設值。塞不進去時 ollama 只保留**前 4 個 token + 最後 2,050 個**，中間
+全丟 —— 而中間裝的是工具定義與對話。**模型在第二次呼叫時根本沒看到問題**，
+所以吐出空字串、而且 `error = null`（它沒有失敗，它只是沒東西可答）。
+
+### 四、為什麼「只加大 VM」不會過
+
+`num_ctx` 與機器大小**完全無關**。把 VM 從 3.8GB 加到 32GB，`num_ctx`
+還是 4096，截斷上限還是 2,050，4,937 個 token 照樣被砍掉中間。
+
+**RAM 的角色是「讓你能把 `num_ctx` 開大」，不是「自動讓 context 變大」。**
+兩件事要一起做，只做後者等於沒做。
+
+| `num_ctx` | 截斷上限 | 4,937 塞得進去嗎 |
+|---|---|---|
+| 4096（目前預設） | 2,050 | ❌ |
+| 8192 | 4,096 或 6,146 | ⚠️ 取決於截斷規則，可能不夠 |
+| **16384** | **8,192 或 14,338** | ✅ 兩種規則都夠 |
+
+**建議 16384 而非 8192**：本堆疊只觀察到一個數據點（`n_ctx=4096` →
+`limit=2050`），無法確定 ollama 是「砍一半」還是「扣掉輸出保留額」。
+16384 在兩種規則下都安全，不需要先確定是哪一種。
+
+模型本身支援到 32768（`ollama show` 的 `context length`），瓶頸不是模型。
+
+### 五、`num_ctx` 的三條設定路徑（逐字驗證過）
+
+1. **Open WebUI 進階參數**（單一模型、最省事）
+   模型選單 → 該模型 → 進階參數 → `num_ctx` = `16384`。
+   已驗證前端確實有此欄位：`grep -roE '"?num_ctx"?' /app/build/_app/immutable/`
+   在 `chunks/0uv-gfwg.js` 與 `nodes/2.DY2zKRtP.js` 都有命中。
+   這個值會經 `payload.py` 的 `options` 原樣傳給 ollama。
+
+2. **環境變數 `OLLAMA_CONTEXT_LENGTH`**（整個 ollama 的預設）
+   已驗證本堆疊的 ollama 0.34.2 binary 認得這個名字：
+   `grep -a -o -E "OLLAMA_[A-Z_]{3,}" /usr/bin/ollama` 有 `OLLAMA_CONTEXT_LENGTH`。
+   加進 `docker-compose.yml` 的 ollama 服務後重啟。
+
+3. **Modelfile `PARAMETER num_ctx 16384`**（模型層級、最持久）
+   由於 qwen2.5:3b 目前沒有任何 `PARAMETER` 行，加一行不會與既有值衝突。
+   以 `ollama create` 產生新模型後，在 Open WebUI 指向它。
+
+**KV cache 的代價**（**估算值，本堆疊未實測**）：層數與 KV head 數取自
+Qwen2.5-3B 的架構（36 層、2 個 KV head、head_dim 128、f16），
+每 token ≈ 2 × 36 × 2 × 128 × 2 B ≈ **36 KiB**。
+
+| `num_ctx` | KV cache（估） | 加權重 1.9GB 後（估） |
+|---|---|---|
+| 4096 | ~151 MB | ~2.1 GB |
+| 16384 | **~604 MB** | **~2.5 GB** |
+
+8GB 機器：模型 2.5GB + Open WebUI ~1GB + OS/docker ~1GB ≈ 4.5GB，放得下。
+本堆疊的 3.8GB（`available` 只剩 286MB）放不下 —— 這與「現在跑不動」
+的觀察一致。
+
+記憶體仍然吃緊時，binary 裡另有一個槓桿：`OLLAMA_KV_CACHE_TYPE`
+（量化 KV cache）。**本堆疊尚未實測其效果與品質影響**，僅記錄它存在。
+
+### 六、三個坑
+
+1. **`num_ctx` 才是開關，不是 RAM。** 加大機器而沒改 `num_ctx`，行為
+   一模一樣 —— 這正是本條目要記下來的東西。
+2. **不要順手把 `OLLAMA_NUM_PARALLEL` 拉高。** 日誌顯示
+   `n_ctx_slot = 4096`（在 `NUM_PARALLEL=1` 下等於 `num_ctx`），所以
+   `num_ctx` 是**每個 slot** 的量。拉到 4 的話 KV cache 是**乘 4**
+   （16k × 4 ≈ 2.4GB），不是把 context 分掉。這是「機器變大反而更容易
+   OOM」的常見走法。
+3. **速度仍是瓶頸。** 量到 `prompt processing, n_tokens = 512,
+   progress = 0.25, 23 tokens/秒` —— 2,050 個 token 要 89 秒，而且
+   `OLLAMA_KEEP_ALIVE=5m` 讓模型反覆卸載重載（日誌可見
+   `llama-server started in 6.38 seconds`）。加大機器會快幾倍，但純 CPU
+   跑 3B 模型、每次處理 5,000 token，一來一回仍以「分鐘」計。
+
+### 七、兩條路，以及為什麼先走免費的那條
+
+| | 做法 | 成本 | 結果 |
+|---|---|---|---|
+| **A** | 關掉記憶／筆記／自動化／日曆 → 工具 37 → 2 | 免費 | prompt 4,937 → ~250 token，**現在的機器就能過** |
+| **B** | 加大 VM **且** 設 `num_ctx=16384` | 機器錢 | 4,937 塞得進去，37 個工具全留 |
+
+**建議先走 A**，理由不只是省錢：
+
+- README 第二階段要驗的是「模型會不會**自主**呼叫 MCP 工具」與「多輪
+  加總是否正確」。掛 35 個用不到的工具不會讓這個驗證更有說服力，
+  只會讓它跑不動。
+- 就算換了大機器，每一則訊息都送 5,000 個 token 的無用工具定義，
+  仍然白白拖慢每一次回應。
+- **先驗過 MCP 再決定要不要為那四個功能付機器錢。** 順序反過來的話，
+  失敗時會分不清是 MCP 的問題還是 context 的問題。
+
+### 八、診斷方法上會誤導人的兩個地方（我實際踩了）
+
+1. **`POST /api/chat/completions` 回 `null` 是正常的，不是錯誤。**
+   Open WebUI 把事件走 WebSocket 送，HTTP 就回 4 個位元組的 `null`。
+   我一度把 `body=b'null'` 判成「請求失敗」，據此往下追了很久的錯誤方向。
+   `main.py:1690` 的註解只在「沒有 chat_id/message_id」時才會改成
+   丟 `HTTPException`；有 chat_id 時走的是這條靜默路。
+   **要診斷就得聽 WebSocket，不能只看 HTTP。**
+2. **「日誌裡沒有瀏覽器的 WebSocket 連線」不能推論它沒連上。**
+   `socket/main.py:406` 的 `connect` 處理器**沒有任何 log 語句**。
+   對照組：我自己那條成功的連線也沒留下任何紀錄。**沒有日誌 ≠ 沒有連線。**
+
+還有一個純量測的教訓：探針要印**訊息組成**（`role:長度`）與**工具大小**，
+不要只印總量。我最初只追「第二次呼叫為什麼多 4,666 個 token」，
+一路假設是巨型工具結果、巨型錯誤訊息、ExceptionGroup —— 全部錯。
+探針印出 `toolchars=24307` 的那一行才是答案。
+
+### 九、推翻了什麼
+
+- 推翻了「**加大 VM 就能跑得動**」這個直覺。加大 VM 只解除記憶體限制，
+  不解除 `num_ctx` 限制。
+- 推翻了我在 D-020 調查期間的假設：「第二次呼叫暴增是因為工具回傳了
+  約 18,000 字元的錯誤訊息／`ExceptionGroup`」。**探針明確顯示沒有任何
+  訊息超過 1,500 字元**；增加的是工具定義，不是訊息。
+- 推翻了「`body=b'null'` 代表請求失敗」。那是 WebSocket 路徑的正常形狀。
+
+### 十、教訓
+
+**問「這台機器夠不夠大」之前，先問「這個數字是被什麼決定的」。**
+`num_ctx` 是設定值，不是硬體值 —— 硬體只決定你能把它設到多大。
+把「跑不動」直接翻譯成「機器太小」，會讓人花錢買到一個**完全沒有改變
+行為**的升級。
+
