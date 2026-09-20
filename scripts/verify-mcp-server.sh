@@ -126,7 +126,7 @@ except Exception as e:  # noqa: BLE001 —— 探針的任何意外都是「自�
 PY
 
 case $rc in
-  0) ok "MCP handshake 四步全過 —— Admin → External Tools 可以填 $URL 了" ;;
+  0) ok "MCP handshake 四步全過 —— 管理員控制台 → 設定 → 外掛功能 → 工具 → External Tool Servers 可以填 $URL 了" ;;
   1) fail "MCP handshake 未通過（見上方輸出）"; exit 1 ;;
   2) fail "無法判定（見上方輸出）"; exit 2 ;;
   3) fail "探針自己壞掉（見上方輸出）—— 這不是 server 的問題，是這支腳本該修"; exit 3 ;;
