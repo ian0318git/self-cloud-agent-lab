@@ -2137,3 +2137,133 @@ config 表，改 `.env` 沒有用**。與 D-013 不同的部分是：它每次�
    清理的東西」而**不是**「請手動刪除某個 id」—— D-018 的
    `cleanup_collection` 就是因為把 `NotFoundError` 當成失敗，從後門把
    「無法判定」翻成了「未通過」。
+
+---
+
+## D-020：Open WebUI 的後端日誌預設是靜音的，而且缺 `message_id` 會靜默跳過工具執行
+
+**日期**：2026-09-20
+**狀態**：已決定（並更正一條我先前的錯誤結論）
+
+### 一、起因
+
+README 的 Phase 2 MCP 清單有兩項待驗：模型**自主**呼叫工具、以及**多輪**
+工具呼叫。使用者從 UI 送出測試句後回報「過了 10 分鐘沒反應」。
+
+### 二、第一個發現：`open_webui.utils.middleware` 的 `log.*` 到不了日誌
+
+追查過程中我在 `utils/middleware.py` 的 `process_chat_payload()` 開頭插入
+一個 `log.error()` —— 那個函式**一定**會被呼叫（整個對話流程都經過它）。
+**它完全沒有出現在日誌裡。**
+
+原因：
+
+```python
+log = logging.getLogger(__name__)   # open_webui.utils.middleware
+```
+
+日誌 handler 只掛在 uvicorn / httpx 這些第三方 logger 上，`open_webui.*`
+的記錄會往 root logger 傳遞，而 root 沒有掛 handler，於是**整串消失**。
+這解釋了為什麼日誌裡只看得到 `uvicorn.protocols...` 與 `httpx._client...`
+的訊息，以及為什麼這套堆疊「看起來從來沒有錯誤」。
+
+**為什麼這條比 MCP 本身更值得記**：它讓「日誌裡沒有錯誤」這個觀察**失去
+證據力**。本專案的核心原則是「不允許靜默失敗」，而這裡的靜默失敗發生在
+**工具鏈**層級 —— 不是某段程式碼忘了檢查錯誤，而是**錯誤根本沒有出口**。
+
+**推翻了什麼**：我在同一次調查中，先後兩次根據「日誌裡沒有例外」推論
+「所以不是例外造成的」。那兩個推論**都不成立**。第一次我以為例外被
+`log.debug` 吞掉（等級太低），於是把那一行改成 `log.error` —— 改成
+`log.error` 之後仍然什麼都看不到，我才發現問題不在等級，而在 handler。
+
+**落實方式**：本次調查全部改用 `print(..., flush=True)` 才取得進展。
+日後凡是需要在 Open WebUI 後端插探針，**一律用 `print`，不要用 `log`**；
+若要看它自己的日誌，必須先確認 logger 有掛 handler。
+
+### 三、第二個發現：缺 `message_id` 會靜默跳過所有工具執行
+
+```python
+async def get_event_emitter_and_caller(metadata):
+    event_emitter = None
+    if metadata.get('chat_id') and metadata.get('message_id'):
+        event_emitter = await get_event_emitter(metadata)
+```
+
+而 `streaming_chat_response_handler` 的結構是：
+
+```python
+if event_emitter:
+    ...            # 完整處理：工具執行迴圈、事件推播、狀態
+else:
+    # Fallback to the original response
+    async for data in original_generator:
+        yield data          # 原樣轉發
+```
+
+**沒有 `event_emitter` 時，模型回應被原封不動轉發給客戶端** ——
+包含 `finish_reason: tool_calls`。工具**從來沒有被執行**，而且：
+
+- HTTP 200
+- 不報錯
+- 不留任何日誌
+- 模型也正常回答了
+
+**`chat_id` 與 `message_id` 兩者缺一不可**，少一個就整條工具路徑消失。
+
+### 四、我犯的錯，以及它為什麼是這一條的核心
+
+我一開始用純 HTTP 打 `/api/chat/completions` 做重現，**只送了 `chat_id`，
+沒送 `message_id`**。於是我觀察到「模型產生正確的工具呼叫、open-webui
+不執行」，並據此**向外下了「這是 Open WebUI 的 bug」的結論**，還查了
+上游 PR（#24106，CLOSED 未合併）來佐證。
+
+補上 `message_id` 之後，MCP server 立刻收到 `CallToolRequest`：
+
+```
+Processing request of type ListToolsRequest
+Processing request of type CallToolRequest     ← 執行了
+```
+
+**我把「我的重現少送一個欄位」誤判成「程式的缺陷」。** 而且我還拿著
+一個真實存在、但**與此無關**的上游 PR 當佐證 —— 這讓錯誤的結論看起來
+更有根據，比單純的猜測更危險。
+
+**教訓**：重現失敗時，**先懷疑重現，再懷疑被測物**。判準是「我的重現
+與真實路徑差在哪」，而不是「哪個上游 PR 支持我的推論」。
+
+### 五、MCP 工具呼叫本身：已驗證會動
+
+用**應用程式自己的認證路徑**（`open_webui.utils.auth.create_token` ＋
+`/api/chat/completions`，帶齊 `chat_id` + `message_id`）實測：
+
+| 環節 | 結果 |
+|---|---|
+| MCP 連線（initialize／initialized） | 通過 |
+| 工具探索（`tools/list`） | 通過，回傳 `echo`、`roll_die` |
+| 模型自主產生工具呼叫 | 通過（`mcp-test_roll_die` args=`{"sides": 20}`、`mcp-test_echo` args=`{"text": "hello"}`） |
+| 工具實際執行 | **通過**，server 收到 `CallToolRequest` |
+| 最終答案文字 | **未驗證** |
+
+最後一列要說清楚：有 `event_emitter` 時，輸出是走 **socket.io 推播**給
+使用者房間，**不走 HTTP 串流**。所以我的 HTTP 客戶端收到的是空的 ——
+這不是失敗，是走錯介面。要把最終答案讀出來，得開一個真正的 socket 連線，
+或讓對話存進資料庫再回讀（本次嘗試的兩筆對話因為 chat 資料列不存在而
+沒有落地）。
+
+**所以 README 的兩項清單在本次調查後仍然是 `[open]`** —— 工具鏈已驗證，
+但「模型算出的加總是否正確」還沒有證據。
+
+### 六、附帶量到的效能數字
+
+同一台機器（2 核、qwen2.5:3b）：
+
+| 項目 | 實測值 |
+|---|---|
+| 產出速率 | **2.9 tok/s** |
+| 提示處理 | **~15 tok/s**（邊際） |
+| KV cache 重用 | **有效** —— 相同前綴第二次重算 0.1 秒（首次 37.7 秒） |
+| 兩句測試的牆鐘時間 | 6.6 秒 / 53.3 秒（模型已暖） |
+
+另外，使用者第一次嘗試的日誌顯示**兩個併發的 ollama 請求**（對話 +
+標題生成），而 `OLLAMA_NUM_PARALLEL=1` 會讓它們**序列化**：第二個請求
+的 2m29s **大部分是排隊等待，不是推論**。這與「卡住」的體感直接相關。
