@@ -688,7 +688,7 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在是被**
 | 模型對接 | `langchain-ollama` | 綁定 `qwen3:4b` / `qwen2.5:3b`，待第一階段 benchmark 定案後決定 |
 | 工具橋接 | `langchain.mcp` → `MCPAdapter` | **[已查證]** —— 見下方更正 |
 | 迴圈防護 | `recursion_limit=5` | 見 **[未驗證]** 第 4 項 |
-| 記憶層 | `mem0` + ChromaDB | **[未驗證]** 第 2、3 項 |
+| 記憶層 | `mem0` + ChromaDB | **[已驗證]** 第 2 項 · **[未驗證]** 第 3 項 |
 | 排程器 | `APScheduler`，單一 process 內 | **[未驗證]** 第 6 項 |
 | 多步流程 | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
 | 多代理 | LangGraph Supervisor（tool-based） | `langgraph-supervisor-py` 列為可選，不一開始引入 |
@@ -705,8 +705,10 @@ API 仍可能變動，因此選定後應固定版本。
 
 ### 決定這套能不能成立的未驗證項
 
-以下每一項都是本專案尚未做過的量測。排序即為應該解決的順序 ——
-因為若前一項失敗，後面的都是白做工。
+以下每一項在撰寫時都是本專案尚未做過的量測。排序即為應該解決的順序 ——
+因為若前一項失敗，後面的都是白做工。第 1、2 項現在已經量過了；
+**其餘仍未量測，而且其中兩項（第 3、5 項）的前提已被 2026-09-20 的
+VM 加大改變** —— 動手前先讀過。
 
 1. **[已驗證] tool calling 換了程式路徑之後還成立嗎？** —— **成立。**
    2026-09-20 實測（D-024），指令為
@@ -737,18 +739,55 @@ API 仍可能變動，因此選定後應固定版本。
    `num_ctx=4096`。一旦接上 mem0、更多工具與更長的歷史，prompt 就會長回去
    （D-014）。而且 n=1。
 
-2. **[未驗證] Chroma 預設會拒收本專案的嵌入向量。** mem0 的 Chroma 後端
-   預設為 **1536 維**（OpenAI 的尺寸）。本專案的嵌入模型是
-   `qwen3-embedding:0.6b`，實測為 **1024 維**（D-013）。維持預設值會在
-   寫入時以 shape mismatch 失敗。`embedding_dims` 與 collection 的維度
-   都必須固定為 1024 —— 而且日後不能更換嵌入模型而不重新嵌入，
-   理由與上方第二階段所述相同。
+2. **[已驗證] Chroma 不會拒收本專案的嵌入向量 —— 但換模型是無聲的。**
+   2026-09-20 實測（D-026），指令為 `bash scripts/verify-chroma-dims.sh`。
+   **原本的預測是錯的，而量下去之後發現了更糟的事。** 三處更正：
 
-3. **[未驗證] mem0 每輪對話要多付一次 LLM 呼叫，而這裡只有 2 vCPU。**
+   - **這條路徑上根本沒有 1536。** `ChromaDbConfig` 的欄位是
+     `collection_name / client / path / host / port / api_key / tenant` ——
+     **沒有任何維度欄位**。1536 是 mem0 的 *OpenAI* embedder、以及其他向量庫
+     （pgvector、Milvus、Redis…）的預設，不是 Chroma 的。所以
+     「把 `embedding_dims` 釘住」在這條路徑上**無處可釘**。
+   - **mem0 的 ollama embedder 宣告 512，而那個值是死的。**
+     `OllamaEmbedding.__init__` 寫 `embedding_dims = … or 512`，但 `embed()`
+     把 ollama 回的向量原樣傳出去。實測：宣告 512、回傳 1024。
+   - **維度是第一次寫入鎖定的，不是預設值決定的。** 新集合報不出維度、
+     `metadata` 是 `None`；第一次 insert 之後才定下來。之後寫入不同長度
+     **確實會被大聲擋下**：`InvalidArgumentError: Collection expecting
+     embedding with dimension of 1024, got 512` —— 但那正是維度檢查本來
+     就抓得到的情況。
+
+   **真正危險的是預測的反面。** 這台機器上的兩個嵌入模型 ——
+   `qwen3-embedding:0.6b` 與 `bge-m3:latest` —— **都是 1024 維**。
+   所以維度檢查對「模型被換掉」**完全沒有防禦力**，而 Chroma 不會有任何
+   抱怨：檢索只是回錯文件。實測：同一句話在兩個模型下的 cosine 是
+   **0.0074**；同一個模型下兩句不相干的話是 **0.3308**。跨模型的「同一句話」
+   比同模型內的「兩句不相干的話」還要遠 —— 這兩個空間不在同一個座標系裡，
+   而整條堆疊沒有一處會說出來。
+
+   **該改成這樣做：** 建立集合時把嵌入模型名寫進 collection 的 `metadata`，
+   開集合時比對。實測可行 —— 這筆記錄**活得過** mem0 的 `create_col()`
+   （它只傳 name 與 `embedding_function`）、mem0 的 `ChromaDB` 會沿用我們
+   預先建立的集合，而且對既有集合用不同 metadata 再
+   `get_or_create_collection` **既不丟例外也不覆蓋** —— 這讓它成為權威來源。
+   探針裡的 `guard_verdict()` 是參考實作。
+
+   **沒有量到：** mem0 `add()` 路徑的任何事。那條路會先跑一次 LLM 抽取事實
+   再存，屬於第 3 項。這支探針直接驅動向量庫與 embedder，因此不需要
+   API 金鑰、也不需要 LLM。
+
+3. **[未驗證] mem0 每輪對話要多付一次 LLM 呼叫。**
    mem0 的寫入路徑會先跑一次 LLM 抽取事實，再存進向量庫。那次呼叫是
-   **額外於**生成答案的。以本專案實測的速率（3.8–6.9 tok/s，D-011／D-014）
+   **額外於**生成答案的。以目前實測的速率（3.8–6.9 tok/s，D-011／D-014）
    來看，這可能是第四階段最大的一筆成本 —— 大到應該在設計記憶層**之前**
    單獨計時，而不是設計完才發現。
+
+   **目前記錄上所有的 token 速率都來自舊 VM。** 這台 VM 於 2026-09-20
+   從 2 vCPU / 3.8 GB 加大為 4 vCPU / 16 GB，時點在 D-024 **寫完之後**
+   （D-024 的 commit 是 18:02，重開機是 18:15）。D-024 的 `~14 tok/s`、
+   兩次工具呼叫相隔 `7.4 秒`，以及 D-011／D-014 的 3.8–6.9 tok/s，
+   全都是在可用記憶體 2,044 MB、會大量換頁的情況下量的。
+   **這一項要重新打基準線，不要把舊數字帶進來。**
 
 4. **[未驗證] `recursion_limit=5` 對 Plan-and-Execute 很可能太緊。**
    這個上限算的是 graph 的 super-step，而 Plan → Execute → Check → Retry
@@ -756,9 +795,13 @@ API 仍可能變動，因此選定後應固定版本。
    而不是沿用一個全域數字 —— 一個在正常運作時就會觸發的上限，
    最後只會被調高到失去意義。
 
-5. **[未驗證] 8GB 上的第二套向量庫。** Open WebUI 本身已為 Knowledge
+5. **[未驗證] 第二套向量庫。** Open WebUI 本身已為 Knowledge
    維護一套儲存；ChromaDB 會是第二套。D-001 的 8GB 預算
-   （OS 1.0 + Open WebUI 1.0 + 模型 3.0 ≈ 5.0GB）從未把它算進去。
+   （OS 1.0 + Open WebUI 1.0 + 模型 3.0 ≈ 5.0GB）從未把它算進去 ——
+   但這台 VM 已於 2026-09-20 加大到 16 GB，所以這一項的**記憶體**那一半
+   在還沒被量到之前就已經消失了。剩下的是維運那一半：兩套儲存要備份、
+   要遷移、要保持一致。**現在吃緊的資源是磁碟，不是記憶體** ——
+   97 GB 用了 81%，而光是 mem0/chromadb 這顆探針映像就 850 MB。
 
 6. **[未驗證] `APScheduler` 在 process 內，重啟就丟掉排程。**
    放在 process 內是為了省掉一個 Redis 容器 —— 那正是它的目的 ——

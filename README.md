@@ -751,7 +751,7 @@ used.
 | Model binding | `langchain-ollama` | binds `qwen3:4b` / `qwen2.5:3b` once Phase 1 benchmarking settles the choice |
 | Tool bridge | `langchain.mcp` → `MCPAdapter` | **[verified]** — see the correction below |
 | Loop guard | `recursion_limit=5` | see **[open]** item 4 |
-| Memory | `mem0` + ChromaDB | **[open]** items 2 and 3 |
+| Memory | `mem0` + ChromaDB | **[verified]** item 2 · **[open]** item 3 |
 | Scheduler | `APScheduler`, in-process | **[open]** item 6 |
 | Multi-step | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
 | Multi-agent | LangGraph Supervisor (tool-based) | `langgraph-supervisor-py` optional, not introduced up front |
@@ -769,9 +769,11 @@ and the API may still change, so pin the version once chosen.
 
 ### Open items that decide whether this works
 
-Each of these is a measurement this project has not made. They are listed in
-the order they should be settled, because later ones are wasted effort if an
-earlier one fails.
+Each of these was, at the time of writing, a measurement this project had not
+made. They are listed in the order they should be settled, because later ones
+are wasted effort if an earlier one fails. Items 1 and 2 are now measured;
+**the rest are still unmeasured, and two of them (3 and 5) have had their
+premises changed by the 2026-09-20 VM resize** — read those before acting.
 
 1. **[verified] Does tool calling survive the change of code path?** — **Yes.**
    Measured 2026-09-20 (D-024) via
@@ -804,20 +806,61 @@ earlier one fails.
    **not** show that Phase 3 can keep `num_ctx=4096`. Once mem0, more tools and
    longer histories are attached, prompts grow back (D-014). Also n=1.
 
-2. **[open] Chroma will reject this project's embeddings by default.** mem0's
-   Chroma backend defaults to **1536 dimensions** (OpenAI-sized). This project's
-   embedding model is `qwen3-embedding:0.6b`, measured at **1024 dimensions**
-   (D-013). Left at defaults this fails at write time with a shape mismatch.
-   `embedding_dims` and the collection's dimensions must both be pinned to 1024
-   — and the embedding model must not be changed later without re-embedding,
-   for the same reason noted in Phase 2 above.
+2. **[verified] Chroma does not reject this project's embeddings — but a model
+   swap is silent.** Measured 2026-09-20 (D-026) via
+   `bash scripts/verify-chroma-dims.sh`. **The prediction above was wrong, and
+   measuring it found something worse.** Three corrections:
 
-3. **[open] mem0 costs one extra LLM call per conversation, on 2 vCPU.**
-   mem0's write path runs an LLM to extract facts before storing them. That call
-   is *in addition to* generating the answer. At the rates measured here
-   (3.8–6.9 tok/s, D-011/D-014) this may be the single largest cost in Phase 4 —
-   large enough that it should be timed on its own before memory is designed in,
-   not discovered after.
+   - **There is no 1536 anywhere in this path.** `ChromaDbConfig`'s fields are
+     `collection_name / client / path / host / port / api_key / tenant` — no
+     dimension field at all. 1536 is the default of mem0's *OpenAI* embedder and
+     of other vector stores (pgvector, Milvus, Redis, …), not of Chroma. So
+     "pin `embedding_dims`" has nowhere to be pinned.
+   - **mem0's ollama embedder declares 512, and that value is inert.**
+     `OllamaEmbedding.__init__` sets `embedding_dims = … or 512`, but `embed()`
+     passes ollama's vector through untouched. Measured: declares 512, returns
+     1024.
+   - **The dimension is fixed by the first write, not by a default.** A fresh
+     collection reports no dimension and `metadata` is `None`; the first insert
+     locks it. A later insert of a different length *is* rejected loudly:
+     `InvalidArgumentError: Collection expecting embedding with dimension of
+     1024, got 512` — but that is the case a dimension check already catches.
+
+   **The real hazard is the opposite of the one predicted.** Both embedding
+   models on this machine — `qwen3-embedding:0.6b` and `bge-m3:latest` — are
+   **1024-dimensional**. A dimension check therefore has *no* power to detect a
+   model swap, and Chroma raises nothing: retrieval simply returns the wrong
+   document. Measured on one sentence under both models, cosine **0.0074**; two
+   unrelated sentences under one model, cosine **0.3308**. The same sentence
+   across models sits *further apart* than two unrelated sentences within one —
+   the two spaces are not in the same coordinate system, and nothing in the
+   stack says so.
+
+   **What to do instead:** write the embedding model name into the collection's
+   `metadata` at creation, and compare it when opening. Measured to work — the
+   record survives mem0's `create_col()` (which passes only a name and an
+   `embedding_function`), mem0's `ChromaDB` adopts a pre-created collection, and
+   re-issuing `get_or_create_collection` with different metadata neither raises
+   nor overwrites, which makes the record authoritative. `guard_verdict()` in
+   the probe is the reference implementation.
+
+   **Not measured:** anything on mem0's `add()` path. That runs an LLM to
+   extract facts before storing, which is item 3. This probe drives the vector
+   store and the embedder directly, so it needs no API key and no LLM.
+
+3. **[open] mem0 costs one extra LLM call per conversation.** mem0's write path
+   runs an LLM to extract facts before storing them. That call is *in addition
+   to* generating the answer. At the rates measured so far (3.8–6.9 tok/s,
+   D-011/D-014) this may be the single largest cost in Phase 4 — large enough
+   that it should be timed on its own before memory is designed in, not
+   discovered after.
+
+   **Every token rate currently on record is from the old VM.** The VM was
+   resized on 2026-09-20 from 2 vCPU / 3.8 GB to 4 vCPU / 16 GB, *after* D-024
+   was written (D-024's commit is 18:02, the reboot 18:15). D-024's `~14 tok/s`
+   and `7.4 s` between tool calls — and D-011/D-014's 3.8–6.9 tok/s — were all
+   measured with 2,044 MB available and paging. **Re-baseline throughput on this
+   item's own run; do not carry the old numbers into it.**
 
 4. **[open] `recursion_limit=5` is likely too tight for Plan-and-Execute.**
    The limit counts graph super-steps, and Plan → Execute → Check → Retry can
@@ -825,9 +868,14 @@ earlier one fails.
    graph rather than inheriting one global value; a limit that trips during
    normal operation gets raised until it stops meaning anything.
 
-5. **[open] A second vector store on 8GB.** Open WebUI already maintains its own
-   store for Knowledge; ChromaDB would be a second. The 8GB budget in D-001
-   (OS 1.0 + Open WebUI 1.0 + model 3.0 ≈ 5.0GB) never included it.
+5. **[open] A second vector store.** Open WebUI already maintains its own store
+   for Knowledge; ChromaDB would be a second. The 8GB budget in D-001
+   (OS 1.0 + Open WebUI 1.0 + model 3.0 ≈ 5.0GB) never included it — but the VM
+   was resized to 16 GB on 2026-09-20, so the *memory* half of this concern is
+   gone before it was ever measured. What is left is the operational half:
+   two stores to back up, migrate and keep consistent. **Disk is now the tight
+   resource, not RAM** — 81% of 97 GB, and the mem0/chromadb probe image alone
+   is 850 MB.
 
 6. **[open] `APScheduler` in-process loses its jobs on restart.** In-process
    avoids a Redis container, which is the point — but without a persistent job

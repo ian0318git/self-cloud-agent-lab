@@ -1,0 +1,16 @@
+# 第三階段 item 2 探針的相依套件。**全部鎖死版本。**
+#
+# 為什麼一定要鎖（與 requirements-langgraph.txt 同一個理由，但這裡更嚴重）：
+# item 2 量的是「維度不符會怎樣」。維度從哪裡來、預設值是多少，**是版本相依
+# 的行為** —— mem0 的 ollama embedder 在 2.1.0 宣告 `embedding_dims = 512`，
+# 而上游隨時可能改成別的數字或改成真的拿去截斷向量。不鎖版本的話，
+# D-026 記下的每一條事實都會在下一次 `docker build` 時**安靜地過期**。
+#
+# 這三個版本是 2026-09-20 在 python:3.12-slim 上實測可安裝、
+# 且下列行為已逐條量過的組合（見 DECISIONS.md D-026）。
+#
+# `ollama` 不是選配：mem0 的 OllamaEmbedding 把它當 optional dep，
+# 少了它會在 import 時才丟 ImportError（已實測），而不是在安裝時就擋下來。
+mem0ai==2.1.0
+chromadb==1.5.9
+ollama==0.6.2
