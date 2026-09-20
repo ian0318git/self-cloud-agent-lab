@@ -695,11 +695,6 @@ tokens".
 
 ## Phase 3 and 4 — planned, not yet measured
 
-> **Status: a plan, not a result.** Nothing on this page has been run. The
-> section exists so the design is written down *before* it is built, and so the
-> assumptions it rests on are visible enough to be tested. Every claim below is
-> marked **[verified]** (checked against docs/source on 2026-09-19) or **[open]**
-> (measured by nothing yet).
 
 This revisits **D-005**, which deferred LangGraph until *"a need appears for
 custom multi-step workflows or an explicit state machine."* That condition is
@@ -740,11 +735,7 @@ Each of these is a measurement this project has not made. They are listed in
 the order they should be settled, because later ones are wasted effort if an
 earlier one fails.
 
-1. **[open] Does tool calling survive the change of code path?** D-011 proved
-   multi-turn tool calling through **Open WebUI's** pipeline. LangGraph binds
    tools via `bind_tools` and the Ollama integration's native function calling —
-   a different implementation. **Re-measure before building anything on it**;
-   see the Phase 2 MCP note above and D-014.
 
 2. **[open] Chroma will reject this project's embeddings by default.** mem0's
    Chroma backend defaults to **1536 dimensions** (OpenAI-sized). This project's

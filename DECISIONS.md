@@ -2267,3 +2267,108 @@ Processing request of type CallToolRequest     ← 執行了
 另外，使用者第一次嘗試的日誌顯示**兩個併發的 ollama 請求**（對話 +
 標題生成），而 `OLLAMA_NUM_PARALLEL=1` 會讓它們**序列化**：第二個請求
 的 2m29s **大部分是排隊等待，不是推論**。這與「卡住」的體感直接相關。
+
+---
+
+## D-021：同一個標題、兩套工具伺服器 —— 一套在伺服器端，一套在瀏覽器端
+
+**日期**：2026-09-20
+**狀態**：已決定（並更正 D-020 期間我對那條 toast 字串的錯誤假設）
+
+### 一、起因
+
+使用者回報網頁跳出：「無法連線至 http://mcp-test-server:8000/mcp
+OpenAPI 工具伺服器」。而同一時間，MCP server 是健康的，從 open-webui
+容器連它也完全正常（`initialize` 成功、`tools/list` 回 `echo`、`roll_die`）。
+**server 沒問題，是有一筆設定在打一個永遠打不到的地方。**
+
+### 二、這裡有兩套長得幾乎一樣的東西
+
+| | 管理員控制台 → 設定 → 外掛功能 → 工具 | 個人 頭像 → 設定 → 工具 |
+|---|---|---|
+| 標題 | `External Tool Servers` | **`External Tool Servers`（同一個字）** |
+| 支援型別 | OpenAPI **與 MCP (Streamable HTTP)** | **只有 OpenAPI** |
+| 存在哪 | `config` 表 `tool_server.connections` | `user` 表 `settings.ui.toolServers` |
+| **誰去連** | **open-webui 容器** | **使用者的瀏覽器** |
+| 寫入端點 | `/api/v1/configs/tool_servers` | `/api/v1/users/user/settings/update` |
+
+前端兩處的識別方式：管理員那支呼叫
+`saveSettings({TOOL_SERVER_CONNECTIONS})`；個人那支呼叫
+`saveSettings({toolServers, terminalServers})`，且唯讀 `$settings.toolServers`。
+兩支的**標題字串完全相同**，只有說明文字不同 —— 個人那支寫的是
+"Connect to your own **OpenAPI** compatible external tool servers." 與
+"CORS must be properly configured by the provider to allow requests from
+Open WebUI."（CORS 云云正是「由瀏覽器發起」的線索）。
+
+### 三、為什麼那筆永遠連不上（三重原因，任一都足以致命）
+
+本堆疊實測（使用者 `ian`，role=admin）：
+
+1. 瀏覽器所在的主機**解析不到** `mcp-test-server` ——
+   `getent hosts mcp-test-server` 無回應，`curl` 回
+   `Could not resolve host`。那是 compose 網路內的服務名。
+2. 該埠**沒有對外發布**（`docker compose port mcp-test-server 8000` →
+   `invalid IP:0`）—— 這是 D-003 刻意的。
+3. 就算前兩項都通了也還是不會動：那筆的 `type` 是 **`openapi`**，
+   它會去抓 `<url>/openapi.json`，而 `/mcp` 是 MCP 端點，
+   不提供 OpenAPI spec。
+
+### 四、更正：那條 toast 的「OpenAPI」不是通用字串
+
+追查之初我假設 i18n 字串 `Failed to connect to {{URL}} OpenAPI tool server`
+是無條件套用的通用字串，所以「OpenAPI」三個字沒有意義。**這個假設是錯的。**
+它在打包檔裡只有兩個呼叫點，兩處都只讀 `$settings.toolServers` ——
+也就是**只屬於個人直接連線**那條路。字面上的 OpenAPI 就是那筆的 `type`。
+
+### 五、它不會擋住 MCP，因為是兩個不同的 store
+
+打包檔實測：`setTools()`（管理員工具）設的是 `Lh`，`setToolServers()`
+（個人直接連線）設的是 `bf`。**不同 store。** 所以那筆壞掉的只會把
+`$toolServers` 清成空陣列，`$tools` 不受影響 —— MCP 的 `echo`／`roll_die`
+照樣進得了對話的工具選單。
+
+`MessageInput.svelte` 的可見度條件正是把兩者分開算的：
+`showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0`。
+
+### 六、為什麼管理員特別容易踩到
+
+`+layout` 設定分頁的可見度條件是：
+
+```
+role === "admin" || (role === "user" && permissions.features.direct_tool_servers)
+```
+
+而後端 `routers/users.py` 對 `ui.toolServers` 的處置是
+「**非** admin 且沒有 `features.direct_tool_servers` 權限才 pop 掉」。
+本堆疊的 `user.permissions.features.direct_tool_servers = false`、
+`direct.enable = false`。也就是說：
+
+- **非管理員**使用者：看不到那個分頁，就算硬送也會被後端刪掉。
+- **管理員**：分頁看得見、後端不刪、於是留存。
+
+**一個功能被關掉了，但關它的機制只對非管理員生效。**
+
+### 七、處置
+
+在 個人 設定 → 工具 移除那筆 `mcp-test-server`（type: openapi）即可。
+**管理員控制台那筆 MCP 連線要留著** —— 那才是實際在用的那條路。
+
+**已於 2026-09-20 執行完畢**，走的是 UI 存檔的同一條路
+（`POST /api/v1/users/user/settings/update`，帶完整的 `ui` 物件）：
+
+- 備份：`/tmp/webui-backup/user-settings-20260920-120038.json`
+- `ui.toolServers`：1 筆 → `[]`
+- 併存確認：`ui.params.tool_approval_mode`（`"full"`）、`ui.version`、
+  `ui.terminalServers` 均未受影響 —— 這一點必須檢查，因為
+  `models/users.py:732` 是 `user_settings.update(updated)` 的**淺合併**，
+  只送 `{"ui": {"toolServers": []}}` 會把整個 `ui` 蓋掉。
+- 管理員那筆 MCP 連線未動，事後重測 `tools/list` 仍回 `echo`、`roll_die`。
+
+瀏覽器端要**重新載入**才會生效（`$settings` 是上次載入時抓進記憶體的）。
+
+### 八、教訓
+
+**同名的兩個 UI，不代表同一個東西。** 判斷「這個設定是誰在用」的時候，
+問的不是「它叫什麼」，而是「**哪個行程會去連它**」—— 容器連得到、
+瀏覽器連不到，這一條就足以分辨。
+
