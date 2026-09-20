@@ -246,6 +246,8 @@ bash scripts/up.sh
 | `python3 scripts/signup_control_probe.py URL` | 真正控制註冊的是哪條路徑，並以實際打端點驗證 |
 | `python3 scripts/verify_lock_signup_script.py URL .` | `lock-signup.sh` 真的關得掉、可重複執行、且失敗時會吵 |
 | `bash scripts/verify-first-admin.sh` | `ENABLE_SIGNUP=false` 不會擋住你建立第一位管理員 |
+| `bash scripts/verify-langgraph-tools.sh` | 工具呼叫跨得過換到 LangGraph 的 code path，且判準是 `call_id` 鏈而不是「答案讀起來對」 |
+| `bash scripts/test_langgraph_tools_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 11 道判準做突變，每一個都必須被抓到 |
 
 ---
 
@@ -524,6 +526,13 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 > D-023 第六節就記錄了一輪模型在**完全沒有 `function_call`** 的情況下
 > 回答「6」。
 >
+> **收尾刻意還沒做。** 第三階段必須**透過 LangGraph 的程式路徑**重新量測
+> 工具呼叫（D-011 的結果不會跨越那條界線轉移），而這個 server 就是現成的
+> 測試對象。那次量測現在已經做完並通過了（2026-09-20，D-024），
+> 所以**原本的理由已經消滅**。**測試對象仍然保留**，但理由換了一個：
+> 它是第三階段 agent 唯一能呼叫的工具，item 2–6 每一項都會用到它。
+> 管理介面那筆連線則隨時可以移除 —— LangGraph 這條路徑完全不經過 Open WebUI。
+
 > **現成的測試 server**：`docker compose up -d --build mcp-test-server` 會起一個
 > 只活在 ai-net 內網的 Streamable HTTP MCP server（不發布埠，D-003），提供
 > `echo` 與 `roll_die` 兩個工具——前者驗證最基本的工具呼叫，後者讓
@@ -654,6 +663,15 @@ stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉�
 
 ## 第三與第四階段 —— 計畫中，尚未量測
 
+> **狀態：大部分仍是計畫。** 本節存在的目的是在動手**之前**把設計寫下來，
+> 並讓它所依賴的假設明顯到可以被測試。以下每一項都標記為 **[已查證]**
+> （2026-09-19 對文件／原始碼查證，或之後實測）或 **[未驗證]**
+> （尚無任何量測支持）。
+>
+> **2026-09-20 起，item 1 已量測並通過**（D-024）—— 工具呼叫確實跨得過
+> code path 的改變。它之後的每一項都還是未量測的：這六項刻意照順序排，
+> item 1 通過只代表「現在去做 item 2 不再是白費力氣」，
+> **不代表第三階段可行**。
 
 本節是對 **D-005** 的複核。D-005 把 LangGraph 延後到「出現需要自訂多步驟
 workflow 或明確狀態機的需求時」才評估。那個條件現在是被**刻意援引**的，
@@ -690,7 +708,34 @@ API 仍可能變動，因此選定後應固定版本。
 以下每一項都是本專案尚未做過的量測。排序即為應該解決的順序 ——
 因為若前一項失敗，後面的都是白做工。
 
+1. **[已驗證] tool calling 換了程式路徑之後還成立嗎？** —— **成立。**
+   2026-09-20 實測（D-024），指令為
+   `bash scripts/verify-langgraph-tools.sh --model qwen2.5:3b`。D-011 證明的是
+   **Open WebUI 流程**下的多輪 tool calling；LangGraph 透過 `bind_tools`
    與 Ollama 整合的原生 function calling 綁定工具 —— 那是不同的實作。
+   這次重新量測時，**除了 code path 以外的東西全部固定住**（同一個模型、
+   同樣 2 顆工具、同樣的 `num_ctx`、同樣的兩道題），所以結果可以歸因於
+   code path 本身：
+
+   - 模型**自己**決定呼叫 `roll_die` —— 問句從頭到尾沒有提任何工具名稱。
+   - 第二輪發出兩次 `roll_die`，並根據兩筆真實回傳的 **2** 回答 **4**。
+     因為兩顆骰子回傳同一個值，那個 `4` 不可能是覆述任何一顆 ——
+     它只能來自相加。
+   - 三層互相獨立的證據一致：`call_id` 鏈（3 次呼叫、3 筆對應回傳、
+     沒有孤兒）、對真實回傳的加總比對、以及 MCP server 日誌
+     （探針容器發出 `CallToolRequest` × 3 —— 這層完全不經過模型）。
+
+   **一個要帶進後續設計的差異：這條路徑上一次只發一個工具呼叫，不是一批。**
+   Open WebUI 那三次呼叫相隔約 10 ms（同一次回應）；LangGraph 的兩次
+   相隔 **7.4 秒** —— 三次獨立的 LLM 往返。以這裡實測的約 14 tok/s 來看，
+   在 LangGraph 上「多一步」的代價是**多一次 LLM 往返**，不是多一個 token。
+   這與 item 3、item 4 直接相關。這目前只有一次觀測 ——
+   還不能歸因於是 LangGraph、langchain 或取樣的哪一個造成。
+
+   **沒有量到、不要放大解讀：** 這次的 prompt 只有 213–364 tokens，離 D-022
+   定出的 4,095 截斷觸發線極遠 —— 所以這次**不能**證明第三階段可以繼續用
+   `num_ctx=4096`。一旦接上 mem0、更多工具與更長的歷史，prompt 就會長回去
+   （D-014）。而且 n=1。
 
 2. **[未驗證] Chroma 預設會拒收本專案的嵌入向量。** mem0 的 Chroma 後端
    預設為 **1536 維**（OpenAI 的尺寸）。本專案的嵌入模型是

@@ -254,6 +254,8 @@ change anything they cover.
 | `python3 scripts/signup_control_probe.py URL` | Which mechanism *does* control signup, confirmed by hitting the real endpoint |
 | `python3 scripts/verify_lock_signup_script.py URL .` | That `lock-signup.sh` locks, is idempotent, and fails loudly |
 | `bash scripts/verify-first-admin.sh` | That `ENABLE_SIGNUP=false` does not lock you out of creating your first admin |
+| `bash scripts/verify-langgraph-tools.sh` | That tool calling survives the code-path change to LangGraph, graded on the `call_id` chain rather than on the answer reading correctly |
+| `bash scripts/test_langgraph_tools_probe_mutants.sh` | That the grader above is actually exercised — 11 mutations of its own criteria, every one must be caught |
 
 ---
 
@@ -570,6 +572,15 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 > to tell a real tool call from a plausible-looking number. D-023 §6 documents a
 > turn where the model answered "6" with no `function_call` at all.
 >
+> **Teardown is deliberately not done yet.** Phase 3 had to re-measure tool
+> calling *through LangGraph's code path* — D-011's result does not transfer
+> across that boundary — and this server is the ready-made fixture for it. That
+> measurement is now done and passed (2026-09-20, D-024), so the original reason
+> has expired. **The fixture is still kept**, for a different reason: it is the
+> only tool the Phase 3 agent has to call, and items 2–6 will each want it. The
+> admin-panel connection can be removed whenever the fixture is no longer wanted
+> in Open WebUI — nothing in the LangGraph path goes through it.
+
 > **A ready-made test server:** `docker compose up -d --build mcp-test-server`
 > starts a Streamable HTTP MCP server that lives only on the internal `ai-net`
 > network (no published port — D-003), exposing two tools: `echo` (the simplest
@@ -711,6 +722,17 @@ tokens".
 
 ## Phase 3 and 4 — planned, not yet measured
 
+> **Status: mostly a plan.** The section exists so the design is written down
+> *before* it is built, and so the assumptions it rests on are visible enough to
+> be tested. Every claim below is marked **[verified]** (checked against
+> docs/source on 2026-09-19, or measured since) or **[open]** (measured by
+> nothing yet).
+>
+> **As of 2026-09-20, item 1 has been measured and passed** (D-024) — tool
+> calling does survive the change of code path. Everything after it is still
+> unmeasured: the six items are ordered deliberately, and item 1 passing only
+> means it is no longer wasted effort to try item 2. It does not mean Phase 3
+> works.
 
 This revisits **D-005**, which deferred LangGraph until *"a need appears for
 custom multi-step workflows or an explicit state machine."* That condition is
@@ -751,7 +773,36 @@ Each of these is a measurement this project has not made. They are listed in
 the order they should be settled, because later ones are wasted effort if an
 earlier one fails.
 
+1. **[verified] Does tool calling survive the change of code path?** — **Yes.**
+   Measured 2026-09-20 (D-024) via
+   `bash scripts/verify-langgraph-tools.sh --model qwen2.5:3b`. D-011 proved
+   multi-turn tool calling through **Open WebUI's** pipeline; LangGraph binds
    tools via `bind_tools` and the Ollama integration's native function calling —
+   a different implementation. The re-measurement held everything *except* the
+   code path constant (same model, same 2 tools, same `num_ctx`, same two
+   questions), so the result is attributable to the code path alone:
+
+   - The model called `roll_die` on its own — the prompts never named a tool.
+   - Round 2 issued two `roll_die` calls and answered **4** from two real
+     returns of **2** each. Because both dice returned the same value, the `4`
+     cannot be a restatement of either die — it can only come from adding them.
+   - Three independent layers agree: the `call_id` chain (3 calls, 3 matching
+     returns, no orphans), the arithmetic against real returns, and the MCP
+     server log (`CallToolRequest` × 3 from the probe container — evidence that
+     does not pass through the model at all).
+
+   **One difference worth carrying forward: on this path the model issues tool
+   calls one at a time, not as a batch.** Open WebUI emitted 3 calls ~10 ms
+   apart (one response); LangGraph emitted its 2 calls **7.4 s** apart — three
+   separate LLM round trips. At the ~14 tok/s measured here, "one more step" on
+   LangGraph costs *one more LLM round trip*, not one more token. That bears
+   directly on items 3 and 4. It is a single observation — not yet attributable
+   to LangGraph, langchain, or sampling.
+
+   **Not measured, do not over-read:** the prompts here were 213–364 tokens,
+   nowhere near the 4,095 truncation trigger D-022 found — so this run does
+   **not** show that Phase 3 can keep `num_ctx=4096`. Once mem0, more tools and
+   longer histories are attached, prompts grow back (D-014). Also n=1.
 
 2. **[open] Chroma will reject this project's embeddings by default.** mem0's
    Chroma backend defaults to **1536 dimensions** (OpenAI-sized). This project's
