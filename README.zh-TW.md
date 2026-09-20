@@ -604,6 +604,22 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在正被�
 > 的繁中翻譯是空的，所以它會以英文顯示。而「類型」那一格長得像唯讀標籤，
 > 是整條路徑最容易卡住的地方。
 
+**存檔之後要重新載入整頁（F5）。** 沒按之前，剛剛新增的 MCP 工具不會出現在
+對話的工具選單裡，而且它**不會自己出現** —— 再等也不會。這是前端 store 的
+殘留，不是連線失敗，知道原因才不會往錯的方向除錯：
+
+- `routes/(app)/+layout.svelte:187` 只在 layout 掛載時把工具載進 `$tools`
+  store，**就那麼一次**。
+- `Chat.svelte:990` 只在 **`$tools` 是空的時候**才重抓 —— 而空陣列在
+  JavaScript 裡是 truthy，所以 store 一旦有任何內容，這個條件就對整個
+  session 關上了。
+- 在對話之間切換是前端路由：layout 不會重新掛載，所以上面兩條路徑都不會重跑。
+
+整頁重新載入會重新掛載 layout、重跑 `setTools()`，`server:mcp:<id>` 的項目
+才會出現。**如果重新載入後還是沒有**，那才是連線本身的問題 —— 回管理員控制台
+看，握手失敗的 server 會在清單載入時以 toast 回報。（下面〈驗證 MCP server〉
+可以在完全不開 UI 的情況下直接驗握手。）
+
 只有管理員能新增 MCP server，且原生只支援 **Streamable HTTP** 傳輸 ——
 stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉接。
 `WEBUI_SECRET_KEY` 必須設定（本堆疊會自動產生），否則使用 OAuth 的 MCP 工具

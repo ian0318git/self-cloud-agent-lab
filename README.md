@@ -655,6 +655,26 @@ the database:
 > exist in this version — the tab is **Integrations**. The Type toggle is where
 > people get stuck, because it looks like a static label.
 
+**After saving, reload the page (`F5`).** The new MCP tools will not appear in a
+chat's tool menu until you do, and there is nothing to wait for — they stay
+missing indefinitely. This is client-side store staleness, not a failed
+connection, and it is worth knowing before you go debugging the server:
+
+- `routes/(app)/+layout.svelte:187` loads tools into the `$tools` store **once**,
+  when the layout mounts.
+- `Chat.svelte:990` only re-fetches **if `$tools` is empty** — and an empty array
+  is truthy in JavaScript, so once the store holds anything, that guard is shut
+  for the rest of the session.
+- Navigating between chats is client-side routing: the layout does not re-mount,
+  so neither path re-runs.
+
+A full page load re-mounts the layout, re-runs `setTools()`, and the
+`server:mcp:<id>` entries appear. **If the tools are still missing after a
+reload**, the connection itself is the problem — go back to the admin panel,
+where a server that fails its handshake is reported as a toast when the list
+loads. (See *Verifying the MCP server* below — the handshake can be checked
+directly, without the UI.)
+
 Only administrators can add MCP servers, and only the **Streamable HTTP** transport is
 supported natively — for stdio/SSE servers, front them with
 [mcpo](https://github.com/open-webui/mcpo). Set `WEBUI_SECRET_KEY` (this stack does) or
