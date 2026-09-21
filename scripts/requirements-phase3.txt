@@ -1,0 +1,12 @@
+# 第三階段 item 4／item 6 探針的相依
+#
+# 為什麼獨立一個檔案、而不是併進 requirements-langgraph.txt：
+# 探針映像以**這個檔案的 sha256** 打標籤（見 verify-phase3-runtime.sh），
+# 併檔會讓 item 4 的映像快取跟著 apscheduler 的版本一起失效 —— 反之亦然。
+# 兩個項目互相獨立，快取也該獨立。
+#
+# 版本全部釘死：探針的結論會被寫進 DECISIONS.md，
+# 沒有釘版本的量測等於沒有記錄量測條件。
+langgraph==1.2.11
+apscheduler==3.11.0
+sqlalchemy==2.0.44

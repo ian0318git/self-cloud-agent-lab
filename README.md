@@ -20,7 +20,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 - [Verification checklist](#verification-checklist)
 - [Quota management](#quota-management)
 - [Phase 2](#phase-2)
-- [Phase 3 and 4 — planned; the first three items are measured](#phase-3-and-4--planned-the-first-three-items-are-measured)
+- [Phase 3 and 4 — planned; all six items are measured](#phase-3-and-4--planned-all-six-items-are-measured)
 - [Codespaces gotchas](#codespaces-gotchas)
 - [Troubleshooting](#troubleshooting)
 
@@ -332,6 +332,10 @@ change anything they cover.
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
 | `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 62 mutations across the three bash modules and the smoke probe, every one must be caught |
+| `bash scripts/verify-phase3-runtime.sh` | That `recursion_limit` counts super-steps (+1), that a tight limit aborts only after all the work is done, and that a persistent job store still drops a due job silently under the 1-second default grace (D-030) |
+| `bash scripts/test_phase3_runtime_probe.py` | That the verdicts above have discriminating power offline — no Docker, no langgraph — with every boundary as its own case |
+| `bash scripts/test_phase3_storage_decisions.sh` | That the storage verdicts separate a named volume, a bind mount and a container's temp directory, and that `unknown` is never read as durable |
+| `bash scripts/test_phase3_mutants.sh` | That the three graders above are actually exercised — 23 mutations of their own criteria, every one must be caught |
 | `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
 | `bash scripts/test_profile_lifecycle.sh` | That the stale-container **set difference** is wrong in neither direction — it must report a profile-disabled leftover *and* must not delete a container that is still in service — plus the empty-list guard and the tunnel's four states (D-029) |
 
@@ -740,7 +744,7 @@ tools already cover most of the original plan:
 **LangGraph is not introduced for Phase 2** — D-005 deferred it until *"a need
 appears for custom multi-step workflows or an explicit state machine."* That
 condition is now being invoked deliberately for Phase 3, which is a state
-machine by definition; see [Phase 3 and 4](#phase-3-and-4--planned-the-first-three-items-are-measured)
+machine by definition; see [Phase 3 and 4](#phase-3-and-4--planned-all-six-items-are-measured)
 below and [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 
 > **Licensing warning, verified:** the `langgraph-server` / `langgraph-api`
@@ -809,7 +813,7 @@ tokens".
 
 ---
 
-## Phase 3 and 4 — planned; the first three items are measured
+## Phase 3 and 4 — planned; all six items are measured
 
 > **Status: mostly a plan.** The section exists so the design is written down
 > *before* it is built, and so the assumptions it rests on are visible enough to
@@ -817,11 +821,12 @@ tokens".
 > docs/source on 2026-09-19, or measured since) or **[open]** (measured by
 > nothing yet).
 >
-> **As of 2026-09-20, items 1–3 have been measured and passed** (D-024, D-026,
-> D-027) — tool calling does survive the change of code path, mem0 does reuse a
-> pre-created ChromaDB collection, and mem0's extraction call does pay for a
-> prompt it cannot fully deliver. Everything after is still unmeasured: the six
-> items are ordered deliberately, and each one passing only means it is no
+> **As of 2026-09-21 all six items have been measured** (D-024, D-026, D-027,
+> D-030) — tool calling does survive the change of code path, mem0 does reuse a
+> pre-created ChromaDB collection, mem0's extraction call does pay for a prompt
+> it cannot fully deliver, the recursion guard's rule is measured, and the
+> scheduler's failure mode is measured. **Item 5's premise did not survive
+> measurement** — see item 5 below. Each item passing only ever meant it was no
 > longer wasted effort to try the next. It does not mean Phase 3 works.
 
 This revisits **D-005**, which deferred LangGraph until *"a need appears for
@@ -840,9 +845,9 @@ used.
 | State machine | `langgraph` (library) | MIT — embed in our own service, never the ELv2 server image |
 | Model binding | `langchain-ollama` | binds `qwen3:4b` / `qwen2.5:3b` once Phase 1 benchmarking settles the choice |
 | Tool bridge | `langchain.mcp` → `MCPAdapter` | **[verified]** — see the correction below |
-| Loop guard | `recursion_limit=5` | see **[open]** item 4 |
+| Loop guard | `recursion_limit` **per graph**, not 5 | **[measured]** item 4 — 5 is too tight |
 | Memory | `mem0` + ChromaDB | **[verified]** items 2 and 3 |
-| Scheduler | `APScheduler`, in-process | **[open]** item 6 |
+| Scheduler | `APScheduler`, in-process | **[measured]** item 6 — persistence is a contract, not a swap |
 | Multi-step | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
 | Multi-agent | LangGraph Supervisor (tool-based) | `langgraph-supervisor-py` optional, not introduced up front |
 
@@ -861,10 +866,16 @@ and the API may still change, so pin the version once chosen.
 
 Each of these was, at the time of writing, a measurement this project had not
 made. They are listed in the order they should be settled, because later ones
-are wasted effort if an earlier one fails. Items 1–3 are now measured;
-**the rest (4–6) are still unmeasured, and item 5 has had its premise changed
-by the 2026-09-20 VM resize** — read it before acting. Item 3's own rates are
+are wasted effort if an earlier one fails. **All six are now measured** (item 5's
+premise did not survive — read it before acting). Item 3's own rates are
 recorded in D-027; they do **not** re-baseline throughput, which is still open.
+
+Reproduce items 4–6 with:
+
+```bash
+bash scripts/verify-phase3-runtime.sh          # all three, human-readable
+bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
+```
 
 1. **[verified] Does tool calling survive the change of code path?** — **Yes.**
    Measured 2026-09-20 (D-024) via
@@ -1006,25 +1017,88 @@ recorded in D-027; they do **not** re-baseline throughput, which is still open.
    stops on its own, so the wall-clock time here is a property of `num_predict`,
    not of the machine. **Re-baselining throughput is still open.**
 
-4. **[open] `recursion_limit=5` is likely too tight for Plan-and-Execute.**
-   The limit counts graph super-steps, and Plan → Execute → Check → Retry can
-   exceed five by itself once a retry occurs. Set the guard deliberately per
-   graph rather than inheriting one global value; a limit that trips during
-   normal operation gets raised until it stops meaning anything.
+4. **[measured] `recursion_limit=5` is too tight — and the guess about *why* was
+   right.** Measured 2026-09-21 (D-030) via `bash scripts/verify-phase3-runtime.sh`.
+   The rule is `required limit = super-steps + 1`, confirmed on nine topologies
+   (linear 1/3/5 and fan-out widths 1/2/4 × rounds 1/2), each binary-searched for
+   its minimum working limit. **The limit counts super-steps, not nodes** — a
+   width-4 fan-out has six nodes but three super-steps, and sweeping the width
+   1→6 leaves the minimum limit at `[4, 4, 4, 4, 4]`, unchanged. That is the
+   mechanical evidence; the default is **10007** (read from langgraph's source),
+   so `5` is a deliberate narrowing.
 
-5. **[open] A second vector store.** Open WebUI already maintains its own store
-   for Knowledge; ChromaDB would be a second. The 8GB budget in D-001
-   (OS 1.0 + Open WebUI 1.0 + model 3.0 ≈ 5.0GB) never included it — but the VM
-   was resized to 16 GB on 2026-09-20, so the *memory* half of this concern is
-   gone before it was ever measured. What is left is the operational half:
-   two stores to back up, migrate and keep consistent. **Disk is now the tight
-   resource, not RAM** — 81% of 97 GB, and the mem0/chromadb probe image alone
-   is 850 MB.
+   **The +1 is spent finishing.** At `limit = node count` every node runs, `next`
+   is empty — the graph has nowhere left to go — and it *still* raises
+   `GraphRecursionError`. The guard fires only once all the work is done. That
+   also means the exception cannot distinguish "the plan was fine but the guard
+   was tight" from "the graph really did loop" — and D-024 measured that one more
+   step on this path costs one more LLM round trip (7.4 s there). Whether the
+   interrupted run is recoverable then depends entirely on the checkpointer:
+   with one, the abort lands on a clean node boundary and the same `thread_id`
+   resumes with a larger limit; without one, `get_state` answers
+   `ValueError: No checkpointer set` and the work is gone.
 
-6. **[open] `APScheduler` in-process loses its jobs on restart.** In-process
-   avoids a Redis container, which is the point — but without a persistent job
-   store, every container restart silently drops the schedule. Decide whether
-   the schedules must survive restarts before relying on them.
+   `5` allows four super-steps, so a straight Plan → Execute → Check (3) fits and
+   the first retry does not. **That last sentence is a projection**, not a
+   measurement — the Plan-and-Execute graph does not exist yet, so its step count
+   is derived from a rule that *was* measured. What is measured supports "5 is too
+   tight", not "it runs exactly three steps". So set the guard **per graph** and
+   read back what the graph actually used:
+
+   ```python
+   app.get_state(cfg).metadata["step"]      # langgraph's own counter, not yours
+   ```
+
+   (`metadata["step"]` needs a checkpointer and a `thread_id`. Do not count node
+   executions — on a fan-out that counts a different thing and reads as a failure.)
+
+5. **[refuted] There is no second vector store to operate.** The premise was
+   "two stores to back up, migrate and keep consistent". Measured 2026-09-21
+   (D-030): mem0's ChromaDB lives at `Path(workdir) / "chroma"` where `workdir`
+   defaults to `tempfile.mkdtemp()` (`mem0_add_cost_probe.py:1931,2048`), and the
+   container is `docker run --rm`. **It has never been a volume.** Nothing to back
+   up, nothing to migrate, nothing that can disagree with anything. The question
+   this item poses has therefore changed: not *how do we operate two stores* but
+   **whether to persist it, and where**.
+
+   That distinction is not pedantry. "Two stores to back up" sends the next person
+   to plan backup and consistency work — all of which is wasted on a directory
+   that disappears when the run ends. This is the highest-value entry in the
+   mutation harness for exactly that reason.
+
+   The store that *does* exist is small: Open WebUI's own `vector_db` measures
+   **7 MB** inside a 2.2 GB volume. **Disk is genuinely the tight resource**
+   (81% of 97 GB) — but the pressure is elsewhere: **16.8 GB of reclaimable
+   images**, of which the vector store is 1/2400th. The ordering was backwards,
+   so the verdict has three states rather than two: `ok` / `reclaim-first`
+   (doesn't fit, but more is reclaimable than needs adding → clean, then add) /
+   `blocked`. The middle state is the finding; without it, "81% full" and "full"
+   read the same.
+
+6. **[measured] `APScheduler` in-process loses its jobs on restart — and so does
+   a persistent store, silently, under a default nobody sets.** Measured
+   2026-09-21 (D-030). The README's claim holds: after a real interpreter restart,
+   `MemoryJobStore` holds **0** jobs and `SQLAlchemyJobStore` holds **1**.
+
+   **Persistence is necessary but not sufficient.** A job that comes due during
+   downtime is dropped as a *misfire* once it is later than `misfire_grace_time`,
+   whose default is **1 second**. With lateness fixed at ~2.2 s and only the grace
+   varied: default → dropped, 1 → dropped, 2 → dropped, 3 → ran, 10 → ran. An
+   independent downtime sweep agrees (0.3 s / 0.8 s ran; 1.5 s / 3.0 s dropped).
+   So the boundary is *lateness > grace*, not some fixed duration.
+
+   **What makes it dangerous is that it is indistinguishable from success.** A
+   `date` trigger removes itself after firing, so "ran and was removed" and
+   "dropped as a misfire" look identical in the store. No inspection of the job
+   store can tell them apart — only an external record can.
+
+   Two more costs, both measured. **The swap is not drop-in:** `MemoryJobStore`
+   accepts a lambda, `SQLAlchemyJobStore` raises `ValueError: This Job cannot be
+   serialized since the reference to its callable … could not be determined` — so
+   every scheduled callable must be module-level and picklable, which is a
+   constraint on how the code is organised, decided *before* committing to
+   persistence. And `run_date` must be a `datetime`, not a float timestamp
+   (`TypeError: Unsupported type for run_date: float`).
 
 ---
 

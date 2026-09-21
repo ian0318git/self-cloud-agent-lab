@@ -20,7 +20,7 @@
 - [驗證清單](#驗證清單)
 - [額度管理](#額度管理)
 - [第二階段](#第二階段)
-- [第三與第四階段 —— 計畫中；前三項已量測](#第三與第四階段--計畫中前三項已量測)
+- [第三與第四階段 —— 計畫中；六項已量測](#第三與第四階段--計畫中六項已量測)
 - [Codespaces 的坑](#codespaces-的坑)
 - [疑難排解](#疑難排解)
 
@@ -313,6 +313,10 @@ bash scripts/up.sh
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
 | `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
 | `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 62 道突變，每一個都必須被抓到 |
+| `bash scripts/verify-phase3-runtime.sh` | `recursion_limit` 算的是 super-step（+1）、太緊的 limit 會在工作全部做完之後才中止、以及持久化的 job store 在 1 秒預設寬限下仍會安靜地丟掉到期的 job（D-030） |
+| `bash scripts/test_phase3_runtime_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 langgraph —— 而且每個邊界都是獨立一個案例 |
+| `bash scripts/test_phase3_storage_decisions.sh` | 儲存判定分得出 named volume、bind mount 與容器的暫存目錄，而且 `unknown` 永遠不會被讀成 durable |
+| `bash scripts/test_phase3_mutants.sh` | 上面三個評分器真的有在被執行 —— 對它們自己的 23 道判準做突變，每一個都必須被抓到 |
 | `python3 scripts/test_deploy_smoke_probe.py` | 佈署後煙霧測試的四條斷言各自會咬人，包含它存在的理由本身：被 token 上限切斷的生成讀起來像成功 |
 | `bash scripts/test_profile_lifecycle.sh` | 殘留容器的**差集**兩個方向都不能錯 —— 要回報被停用 profile 留下的那個，**且**不能砍掉還在服務的容器 —— 外加空清單守衛與對外連線的四態（D-029） |
 
@@ -677,7 +681,7 @@ Open WebUI **自 v0.6.31 起原生支援 MCP**，且內建 agentic mode 的工�
 **第二階段因此不引入 LangGraph** —— D-005 把它延後到「出現需要自訂多步驟
 workflow 或明確狀態機的需求時」才評估。那個條件現在正被刻意援引於第三階段，
 因為第三階段按定義就是狀態機；見下方
-[第三與第四階段](#第三與第四階段--計畫中前三項已量測)，完整取捨見
+[第三與第四階段](#第三與第四階段--計畫中六項已量測)，完整取捨見
 [`DECISIONS.md`](DECISIONS.md) 的 D-005。
 
 > **授權警告（已查證）**：`langgraph-server` / `langgraph-api` 生產容器映像檔
@@ -738,18 +742,19 @@ stdio／SSE 的 server 需要用 [mcpo](https://github.com/open-webui/mcpo) 轉�
 
 ---
 
-## 第三與第四階段 —— 計畫中；前三項已量測
+## 第三與第四階段 —— 計畫中；六項已量測
 
 > **狀態：大部分仍是計畫。** 本節存在的目的是在動手**之前**把設計寫下來，
 > 並讓它所依賴的假設明顯到可以被測試。以下每一項都標記為 **[已查證]**
 > （2026-09-19 對文件／原始碼查證，或之後實測）或 **[未驗證]**
 > （尚無任何量測支持）。
 >
-> **2026-09-20 起，item 1~3 已量測並通過**（D-024、D-026、D-027）——
+> **2026-09-21 起，六項全部已量測**（D-024、D-026、D-027、D-030）——
 > 工具呼叫確實跨得過 code path 的改變、mem0 確實會沿用預先建立的 ChromaDB
-> 集合、而 mem0 的抽取呼叫確實為一份它送不完的 prompt 付了錢。它們之後的
-> 每一項都還是未量測的：這六項刻意照順序排，每一項通過只代表「現在去做
-> 下一項不再是白費力氣」，**不代表第三階段可行**。
+> 集合、mem0 的抽取呼叫確實為一份它送不完的 prompt 付了錢、迴圈防護的通則
+> 量到了、排程器的失敗模式也量到了。**第 5 項的前提沒有通過量測** ——
+> 見下方第 5 項。每一項通過只代表「現在去做下一項不再是白費力氣」，
+> **不代表第三階段可行**。
 
 本節是對 **D-005** 的複核。D-005 把 LangGraph 延後到「出現需要自訂多步驟
 workflow 或明確狀態機的需求時」才評估。那個條件現在是被**刻意援引**的，
@@ -765,9 +770,9 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在是被**
 | 狀態機 | `langgraph`（函式庫） | MIT —— 以函式庫形式嵌入自家服務，絕不使用 ELv2 的 server 映像檔 |
 | 模型對接 | `langchain-ollama` | 綁定 `qwen3:4b` / `qwen2.5:3b`，待第一階段 benchmark 定案後決定 |
 | 工具橋接 | `langchain.mcp` → `MCPAdapter` | **[已查證]** —— 見下方更正 |
-| 迴圈防護 | `recursion_limit=5` | 見 **[未驗證]** 第 4 項 |
+| 迴圈防護 | `recursion_limit` **逐圖設定**，不是 5 | **[已量測]** 第 4 項 —— 5 太緊 |
 | 記憶層 | `mem0` + ChromaDB | **[已驗證]** 第 2、3 項 |
-| 排程器 | `APScheduler`，單一 process 內 | **[未驗證]** 第 6 項 |
+| 排程器 | `APScheduler`，單一 process 內 | **[已量測]** 第 6 項 —— 持久化是契約，不是換一個 store |
 | 多步流程 | LangGraph Plan-and-Execute | Plan → Execute → Check → Retry/Summarize |
 | 多代理 | LangGraph Supervisor（tool-based） | `langgraph-supervisor-py` 列為可選，不一開始引入 |
 
@@ -784,10 +789,16 @@ API 仍可能變動，因此選定後應固定版本。
 ### 決定這套能不能成立的未驗證項
 
 以下每一項在撰寫時都是本專案尚未做過的量測。排序即為應該解決的順序 ——
-因為若前一項失敗，後面的都是白做工。第 1~3 項現在已經量過了；
-**其餘（第 4~6 項）仍未量測，而且第 5 項的前提已被 2026-09-20 的
-VM 加大改變** —— 動手前先讀過。第 3 項自己的速率記在 D-027，那些數字
+因為若前一項失敗，後面的都是白做工。**六項現在都量過了**（第 5 項的前提
+沒有通過 —— 動手前先讀過）。第 3 項自己的速率記在 D-027，那些數字
 **並不**等於重打了基準線，重打仍未完成。
+
+第 4~6 項可以用這一行重跑：
+
+```bash
+bash scripts/verify-phase3-runtime.sh          # 三項全跑，人看的
+bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
+```
 
 1. **[已驗證] tool calling 換了程式路徑之後還成立嗎？** —— **成立。**
    2026-09-20 實測（D-024），指令為
@@ -913,24 +924,79 @@ VM 加大改變** —— 動手前先讀過。第 3 項自己的速率記在 D-0
    牆鐘時間是 `num_predict` 的性質，不是機器的性質。
    **重打基準線仍未完成。**
 
-4. **[未驗證] `recursion_limit=5` 對 Plan-and-Execute 很可能太緊。**
-   這個上限算的是 graph 的 super-step，而 Plan → Execute → Check → Retry
-   只要發生一次重試就可能超過 5。應該針對每個 graph 刻意設定防護值，
-   而不是沿用一個全域數字 —— 一個在正常運作時就會觸發的上限，
-   最後只會被調高到失去意義。
+4. **[已量測] `recursion_limit=5` 確實太緊 —— 而且「為什麼」的猜測是對的。**
+   2026-09-21 實測（D-030），指令為 `bash scripts/verify-phase3-runtime.sh`。
+   通則是 `所需 limit = super-step 數 + 1`，在九個拓樸上成立（linear 1/3/5，
+   以及扇出寬度 1/2/4 × 輪數 1/2），每一個都用二分搜尋找「跑得完的最小
+   limit」。**上限算的是 super-step，不是節點數** —— 寬度 4 的扇出有 6 個
+   節點但只有 3 個 super-step，而把寬度從 1 掃到 6，最小 limit 停在
+   `[4, 4, 4, 4, 4]` 不動。這是機械證據。預設值是 **10007**（讀 langgraph
+   原始碼，不是二分搜尋），所以 `5` 是**刻意的窄化**。
 
-5. **[未驗證] 第二套向量庫。** Open WebUI 本身已為 Knowledge
-   維護一套儲存；ChromaDB 會是第二套。D-001 的 8GB 預算
-   （OS 1.0 + Open WebUI 1.0 + 模型 3.0 ≈ 5.0GB）從未把它算進去 ——
-   但這台 VM 已於 2026-09-20 加大到 16 GB，所以這一項的**記憶體**那一半
-   在還沒被量到之前就已經消失了。剩下的是維運那一半：兩套儲存要備份、
-   要遷移、要保持一致。**現在吃緊的資源是磁碟，不是記憶體** ——
-   97 GB 用了 81%，而光是 mem0/chromadb 這顆探針映像就 850 MB。
+   **那個 +1 花在收尾。** 當 `limit = 節點數` 時，每個節點都跑完了、
+   `next` 也空了 —— 圖已經沒有下一步可走 —— 卻仍然拋
+   `GraphRecursionError`。守衛是在工作**全部做完之後**才響的。這也表示
+   那個例外型別**分辨不出**「計畫正常但守衛太緊」與「圖真的失控」——
+   而 D-024 量過，這條路徑上多一步等於多一次 LLM 往返（當時是 7.4 秒）。
+   中斷之後救不救得回來，則完全取決於 checkpointer：有的話，中斷點落在
+   乾淨的節點邊界，同一個 `thread_id` 放大 limit 就能續跑；沒有的話，
+   `get_state` 只會回 `ValueError: No checkpointer set`，成果沒了。
 
-6. **[未驗證] `APScheduler` 在 process 內，重啟就丟掉排程。**
-   放在 process 內是為了省掉一個 Redis 容器 —— 那正是它的目的 ——
-   但沒有持久化的 job store，每次容器重啟都會安靜地丟掉排程。
-   在依賴排程之前，先決定它是否必須挺過重啟。
+   `5` 允許 4 個 super-step，所以直線的 Plan → Execute → Check（3 步）塞得下，
+   而第一次重試塞不下。**但最後這一句是外推，不是量測** —— 那個
+   Plan-and-Execute 圖還沒被建出來，它的步數是從**有量到的**通則推的。
+   量到的東西支持「5 太緊」，不支持「它剛好跑三步」。所以要**逐圖**設守衛，
+   再把它實際跑了幾步讀回來：
+
+   ```python
+   app.get_state(cfg).metadata["step"]      # langgraph 自己的計數器，不是你的
+   ```
+
+   （`metadata["step"]` 需要 checkpointer 與 `thread_id`。**不要**數節點執行
+   次數 —— 在扇出上那數的是另一件事，而且它會讀成判定不成立。）
+
+5. **[已推翻] 沒有第二套向量庫要維運。** 原本的前提是「兩套儲存要備份、
+   遷移、保持一致」。2026-09-21 實測（D-030）：mem0 的 ChromaDB 位於
+   `Path(workdir) / "chroma"`，而 `workdir` 的預設值是 `tempfile.mkdtemp()`
+   （`mem0_add_cost_probe.py:1931,2048`），容器又是 `docker run --rm`。
+   **它從來沒有變成一個 volume。** 沒有東西可以備份、沒有東西可以遷移、
+   沒有任何一對東西可以不一致。這一項要回答的問題因此改變了：不是
+   *怎麼維運兩套*，而是**要不要讓它落地，落地的話放哪**。
+
+   這個區分不是文字遊戲。「兩套儲存要備份」會讓下一個人去規劃備份與一致性
+   的工作 —— 而那些工作在一個每次跑完就消失的目錄上全是白做的。這就是突變台
+   裡這一條價值最高的原因。
+
+   真正存在的那一套很小：Open WebUI 自己的 `vector_db` 量到 **7 MB**，
+   在那個 2.2 GB 的 volume 裡。**磁碟確實是吃緊的資源**（97 GB 用了 81%）——
+   但壓力在別的地方：**16.8 GB 可回收的映像**，向量庫只是它的 1/2400。
+   順序是反的，所以判定寫成三段而不是兩段：`ok` / `reclaim-first`
+   （放不下，但**可回收的量比要新增的量還大** → 先清再放）/ `blocked`。
+   中間那一段才是發現；少了它，「81% 滿」與「滿了」會被讀成同一件事。
+
+6. **[已量測] `APScheduler` 在 process 內會丟排程 —— 而持久化的 store 也會，
+   安靜地，在一個沒人會去設的預設值下。** 2026-09-21 實測（D-030）。
+   README 原本那句話成立：在真的重啟直譯器之後，`MemoryJobStore` 裡剩
+   **0** 個 job、`SQLAlchemyJobStore` 剩 **1** 個。
+
+   **持久化是必要條件，不是充分條件。** 一個在停機期間到期的 job，逾期超過
+   `misfire_grace_time` 就會被當成 misfire 丟掉，而那個預設值是 **1 秒**。
+   把逾期固定在約 2.2 秒、只改寬限：default → dropped、1 → dropped、
+   2 → dropped、3 → ran、10 → ran。另一次獨立的停機掃描結果一致
+   （0.3 / 0.8 秒的跑得起來，1.5 / 3.0 秒的被丟掉）。所以邊界是
+   *逾期 > 寬限*，不是某個固定時長。
+
+   **它危險的地方在於它與成功無法分辨。** `date` 觸發器跑完會自我移除，
+   所以「跑過了、被移除了」與「逾期被丟掉了」在 store 裡**長得一模一樣**。
+   任何對 job store 的檢視都分不出這兩者 —— 只有外部的紀錄可以。
+
+   另外兩個代價也都是量到的。**換 store 不是 drop-in：** `MemoryJobStore`
+   收得下 lambda，`SQLAlchemyJobStore` 直接拋 `ValueError: This Job cannot be
+   serialized since the reference to its callable … could not be determined`
+   —— 所以每一個排程的函式都必須是模組層級、可 pickle 的，而這是對程式碼
+   組織方式的限制，必須在決定持久化**之前**知道。還有 `run_date` 必須是
+   `datetime`，給 float 時間戳會得到
+   `TypeError: Unsupported type for run_date: float`。
 
 ---
 
