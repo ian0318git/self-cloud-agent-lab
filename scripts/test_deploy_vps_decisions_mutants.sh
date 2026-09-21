@@ -40,6 +40,8 @@ MODULE="$SCRIPT_DIR/deploy-vps-decisions.sh"
 TEST="$SCRIPT_DIR/test_deploy_vps_decisions.sh"
 PROBE="$SCRIPT_DIR/deploy_smoke_probe.py"
 PROBE_TEST="$SCRIPT_DIR/test_deploy_smoke_probe.py"
+LIFECYCLE="$SCRIPT_DIR/profile-lifecycle.sh"
+LIFECYCLE_TEST="$SCRIPT_DIR/test_profile_lifecycle.sh"
 LIB="$SCRIPT_DIR/lib.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -52,6 +54,8 @@ cp "$MODULE" "$WORK/deploy-vps-decisions.sh"
 cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
 cp "$PROBE" "$WORK/deploy_smoke_probe.py"
 cp "$PROBE_TEST" "$WORK/test_deploy_smoke_probe.py"
+cp "$LIFECYCLE" "$WORK/profile-lifecycle.sh"
+cp "$LIFECYCLE_TEST" "$WORK/test_profile_lifecycle.sh"
 
 # ── 對照組先跑：不動任何東西，兩份測試都必須通過 ────────
 # 沒有這一步，下面「每個突變都被抓到」可能只是因為測試**永遠失敗**。
@@ -64,7 +68,11 @@ if ! python3 "$WORK/test_deploy_smoke_probe.py" >/dev/null 2>&1; then
   fail "對照組就失敗了 —— test_deploy_smoke_probe.py 本身有問題，先修它"
   exit 1
 fi
-ok "對照組通過（兩份測試都不是永遠失敗）"
+if ! bash "$WORK/test_profile_lifecycle.sh" >/dev/null 2>&1; then
+  fail "對照組就失敗了 —— test_profile_lifecycle.sh 本身有問題，先修它"
+  exit 1
+fi
+ok "對照組通過（三份測試都不是永遠失敗）"
 echo
 
 # 突變清單：label|原字串|取代字串
@@ -72,6 +80,7 @@ echo
 #
 # label 的前綴決定突變哪一份、跑哪一份測試：
 #   `py:` → deploy_smoke_probe.py ／ test_deploy_smoke_probe.py
+#   `pl:` → profile-lifecycle.sh ／ test_profile_lifecycle.sh
 #   其餘 → deploy-vps-decisions.sh ／ test_deploy_vps_decisions.sh
 # 前綴在比對時會被去掉，輸出裡看不到。
 MUTANTS=(
@@ -206,6 +215,33 @@ MUTANTS=(
   # 這一條是**設計決定**本身：num_ctx 沒生效走 2 不走 1。改了它，
   # run_ctx 就再也沒有告訴任何人「堆疊是好的、只是這個設定沒生效」。
   "py:ctx：沒生效當成判準沒過（回 1）|EXIT_CTX_NOT_APPLIED = EXIT_INDETERMINATE|EXIT_CTX_NOT_APPLIED = EXIT_FAIL"
+
+  # ── profile-lifecycle.sh：殘留容器與對外連線狀態 ──
+  # 這一組的兩個方向都會出錯，而**誤殺比漏清貴**：漏清留下一個還在對外服務
+  # 的 cloudflared（D-029 的缺陷本體），誤殺則是把正在服務的容器砍掉，而
+  # 使用者只會看到服務突然中斷。下面兩條各守一邊。
+  #
+  # 漏清的方向：不回報任何東西 = 這整套修正等於沒做。
+  "pl:殘留清理：完全不回報（修正等於沒做）|    printf '%s\\n' \"\$name\"|    :"
+  # 誤殺的方向：不問作用中清單就通通當成殘留 —— 這一條會砍掉整個堆疊。
+  "pl:殘留清理：不問清單，全部當成殘留（會砍掉整個堆疊）|    if grep -qxF \"\$svc\" <<<\"\$active\"; then|    if false; then"
+  # `-x` 拿掉：服務 `ollama` 會匹配到 `ollama-extra`，那個容器就被留下來了。
+  "pl:殘留清理：少了 -x，前綴相同的服務被當成同一個|    if grep -qxF \"\$svc\" <<<\"\$active\"; then|    if grep -qF \"\$svc\" <<<\"\$active\"; then"
+  # `-F` 拿掉：服務名裡的 `.` 變成萬用字元。
+  "pl:殘留清理：少了 -F，服務名被當成正則|    if grep -qxF \"\$svc\" <<<\"\$active\"; then|    if grep -qx \"\$svc\" <<<\"\$active\"; then"
+  # 這條守衛擋的是「compose 檔一有語法錯誤就砍掉整個堆疊」——實測
+  # `config --services` 在壞掉的 compose 檔上回 1 且沒有任何輸出。
+  "pl:殘留清理：拿掉空清單守衛（compose 檔一壞就砍掉整個堆疊）|  if [[ -z \"\$active\" ]]; then|  if false; then"
+  # 沒有 service 標籤的容器無從判斷，守衛拿掉就會被當成殘留砍掉。
+  "pl:殘留清理：拿掉空 service 守衛（不確定的容器也砍）|    if [[ -z \"\$svc\" ]]; then|    if false; then"
+  # 介面契約：呼叫方拿輸出直接餵 `docker rm -f`，回服務名會刪錯東西。
+  "pl:殘留清理：回服務名而不是容器名|    printf '%s\\n' \"\$name\"|    printf '%s\\n' \"\$svc\""
+
+  # ── tunnel_state_verdict：四態裡只有 stale 是危險的 ──
+  # 把 stale 併回 off，就回到修正前的行為 ——「設定檔說關了」被當成「沒連線」，
+  # 而容器還在跟 Cloudflare 邊緣保持連線。
+  "pl:對外：stale 併入 off（說關了其實還開著）|      printf 'stale'|      printf 'off'"
+  "pl:對外：profile 的判定翻轉（四態全部錯位）|  if [[ \"\$profile\" == \"yes\" ]]; then|  if [[ \"\$profile\" != \"yes\" ]]; then"
 )
 
 caught=0
@@ -240,12 +276,18 @@ for entry in "${MUTANTS[@]}"; do
   cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
   cp "$PROBE" "$WORK/deploy_smoke_probe.py"
   cp "$PROBE_TEST" "$WORK/test_deploy_smoke_probe.py"
+  cp "$LIFECYCLE" "$WORK/profile-lifecycle.sh"
+  cp "$LIFECYCLE_TEST" "$WORK/test_profile_lifecycle.sh"
 
   case "$label" in
     py:*)
       label="${label#py:}"
       TARGET="$WORK/deploy_smoke_probe.py"
       SRCFILE="$PROBE" ;;
+    pl:*)
+      label="${label#pl:}"
+      TARGET="$WORK/profile-lifecycle.sh"
+      SRCFILE="$LIFECYCLE" ;;
     *)
       TARGET="$WORK/deploy-vps-decisions.sh"
       SRCFILE="$MODULE" ;;
@@ -268,11 +310,12 @@ for entry in "${MUTANTS[@]}"; do
   }
 
   # 測試必須**失敗**才算抓到。跑哪一支由上面那個 case 決定。
-  if [[ "$TARGET" == *.py ]]; then
-    python3 "$WORK/test_deploy_smoke_probe.py" >/dev/null 2>&1 && mut_rc=0 || mut_rc=1
-  else
-    bash "$WORK/test_deploy_vps_decisions.sh" >/dev/null 2>&1 && mut_rc=0 || mut_rc=1
-  fi
+  case "$TARGET" in
+    *.py)                 TESTCMD=(python3 "$WORK/test_deploy_smoke_probe.py") ;;
+    *profile-lifecycle.sh) TESTCMD=(bash "$WORK/test_profile_lifecycle.sh") ;;
+    *)                    TESTCMD=(bash "$WORK/test_deploy_vps_decisions.sh") ;;
+  esac
+  if "${TESTCMD[@]}" >/dev/null 2>&1; then mut_rc=0; else mut_rc=1; fi
 
   if [[ "$mut_rc" -eq 0 ]]; then
     fail "漏掉！$label —— 判準壞成這樣，測試還是通過了"
@@ -291,4 +334,4 @@ if [[ "${#missed[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-ok "$caught/$total 個突變全數被抓到，且兩份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、.env 的每條邊界，以及煙霧測試的四條斷言都有測試守著"
+ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"

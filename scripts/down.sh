@@ -30,14 +30,20 @@ if [[ "$PURGE" == true ]]; then
     info "已取消"
     exit 0
   fi
-  $COMPOSE down -v --remove-orphans
-  ok "容器與 volume 已刪除"
+  $COMPOSE --profile '*' down -v --remove-orphans
+  ok "容器與 volume 已刪除（含被停用 profile 的）"
 else
-  # --remove-orphans：若 cloudflared 是在 tunnel profile 啟用時建立、
-  # 而現在該 profile 已被停用，它不屬於作用中的 compose 設定，
-  # 不加這個旗標就會留在背景繼續把服務對外（見 up.sh 的同名說明）。
-  $COMPOSE down --remove-orphans
-  ok "容器已停止（volume 保留，模型無需重新下載）"
+  # **`--profile '*'` 是必要的，`--remove-orphans` 不夠。**
+  # 這裡原本寫著「不加 --remove-orphans，停用 profile 的 cloudflared 就會留在
+  # 背景繼續把服務對外」—— 那句話是**錯的**：加了也一樣不會被清掉（實測，
+  # 見 D-029）。compose 對 orphan 的定義是「compose 檔裡**沒有定義**的服務」，
+  # 而被 profile 停用的服務仍然有定義。
+  #
+  # `'*'` 是把所有 profile 都納入這次 down 的作用範圍 —— 那才是「把整個堆疊
+  # 停掉」真正的意思。少了它，一次 `down.sh` 之後 cloudflared 還在對外服務，
+  # 而使用者以為已經收工了。
+  $COMPOSE --profile '*' down --remove-orphans
+  ok "容器已停止（含被停用 profile 的；volume 保留，模型無需重新下載）"
   info "若要一併清除 volume：bash scripts/down.sh --purge"
 fi
 

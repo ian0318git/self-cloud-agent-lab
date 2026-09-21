@@ -118,6 +118,13 @@ bash scripts/check-exposure.sh
 「對 Internet 開放」與「只有區網可達」。注意後者是**靠你的路由器擋住的，
 不是靠這套堆疊** —— 同一個設定一落到公開 IP 上，就會變成真的暴露。
 
+**這支檢查答不了什麼：** 它讀的是**埠**，而 Cloudflare Tunnel **不發布任何埠**
+—— 那正是它叫 tunnel 的原因。所以「沒有開著的埠」不等於「連不到」。
+tunnel 開著的時候，這台主機正在服務你的主機名，而 `check-exposure.sh`
+會回報「沒有任何介面暴露」。那不是它錯了，是它答的是另一個問題。
+**tunnel 本身的狀態由 `bash scripts/status.sh` 回報**，它讀的是**容器**、
+不是設定檔 —— 為什麼這個區分是關鍵，見下面的「要關掉 tunnel」。
+
 **手工做的時候有個陷阱**，而這正是腳本要在呼叫 `load_env` **之前**寫
 `.env` 的原因：`docker compose` 解析**shell 環境變數**的順序在 `.env` 之前，
 而 `load_env` 會把它 source 進來的東西全部 **export**。所以先改 `.env` 再跑
@@ -305,8 +312,9 @@ bash scripts/up.sh
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 |
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
 | `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對 bash 模組與煙霧探針做 53 道突變，每一個都必須被抓到 |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 62 道突變，每一個都必須被抓到 |
 | `python3 scripts/test_deploy_smoke_probe.py` | 佈署後煙霧測試的四條斷言各自會咬人，包含它存在的理由本身：被 token 上限切斷的生成讀起來像成功 |
+| `bash scripts/test_profile_lifecycle.sh` | 殘留容器的**差集**兩個方向都不能錯 —— 要回報被停用 profile 留下的那個，**且**不能砍掉還在服務的容器 —— 外加空清單守衛與對外連線的四態（D-029） |
 
 ---
 
@@ -388,9 +396,19 @@ docker compose logs --tail=20 cloudflared   # 應出現 "Registered tunnel conne
 ```
 
 **要關掉 tunnel：** 把 `COMPOSE_PROFILES` 註解回去，執行 `bash scripts/up.sh`。
-停用 profile **不會**停止已經在跑的容器 —— `up.sh` 與 `down.sh` 都帶了
-`--remove-orphans`，才會真正把殘留的 `cloudflared` 移除。少了這個旗標，
-「我已經把 tunnel 關掉了」會是個錯誤的認知，而服務其實仍連得到。
+停用 profile **不會**停止已經在跑的容器 —— 而這裡有個容易搞錯的地方：
+**`--remove-orphans` 也清不掉它。** compose 對 orphan 的定義是「compose 檔裡
+**沒有定義**的服務」，而被 profile 停用的服務**仍然有定義**，所以那個旗標
+再怎麼加都不會動它（實測三種寫法：`up -d --remove-orphans`、
+`down --remove-orphans`、不加旗標的 `down`，三者**都不動**）。因此 `up.sh`
+改用**差集**清除殘留容器 —— 「`config --services` 說目前作用中的服務」對比
+「實際存在的容器身上的 service 標籤」；`down.sh` 則加上 `--profile '*'`，
+讓「把堆疊停掉」真的等於整個堆疊。少了這一段，「我已經把 tunnel 關掉了」
+會是個錯誤的認知，而服務其實仍連得到 —— 且 `status.sh` 還會一邊印出
+「未啟用」。
+
+現在若 profile 已關、`cloudflared` 卻還在跑，`status.sh` 會用紅字說出來，
+而不是回報成關閉。
 
 > ⚠️ **絕對不要用 Quick Tunnel（`*.trycloudflare.com`）承載私有資料。**
 > Quick Tunnel **沒有附掛任何 Access 政策**，任何知道網址的人都連得到，

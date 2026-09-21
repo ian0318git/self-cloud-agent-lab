@@ -7,6 +7,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # 閘門的判定表（exposure_gate_verdict）在這個模組裡 —— 它可被離線測試，
 # 而「把結束碼 2 讀成安全」正是這整件事最不能出的錯。
 source "$(dirname "${BASH_SOURCE[0]}")/deploy-vps-decisions.sh"
+# 殘留容器的差集判斷（stale_containers）在這個模組裡。它守的是同一個形狀的
+# 錯誤：「我已經把 tunnel 關掉了」不能是錯的（見下面清理那一段）。
+source "$(dirname "${BASH_SOURCE[0]}")/profile-lifecycle.sh"
 
 require_docker
 detect_compose
@@ -25,6 +28,41 @@ if [[ ",${COMPOSE_PROFILES:-}," == *",tunnel,"* ]]; then
     exit 1
   fi
   ok "Cloudflare Tunnel 已啟用"
+fi
+
+# ── 清掉「上一個設定留下的」容器 ────────────────────────
+# **`--remove-orphans` 做不到這件事，這是實測結果不是推論。** compose 對
+# orphan 的定義是「compose 檔裡**沒有定義**的服務」，而**被 profile 停用的
+# 服務仍然有定義** —— 所以旗標再怎麼加都不會動它。實測 `up -d
+# --remove-orphans`、`down --remove-orphans`、`down`（不加旗標）三者對
+# 「profile 已停用、容器還在跑」的處置**完全相同：都不動**。
+#
+# 後果是 fail-open，而且兩個既有儀器都會附和：cloudflared 還連著 Cloudflare
+# 邊緣、主機名還在服務你的 Open WebUI，而 `status.sh` 說「未啟用」、
+# `check-exposure.sh` 看不到它。使用者因此得到「我已經把 tunnel 關掉了」
+# 這個**錯誤的認知** —— 而這條路徑整個存在的理由，就是那個認知要是對的。
+#
+# 找法是一對事實的差集：`config --services` 是**目前作用中**的服務，
+# `ps -a` 是**實際存在**的容器。`-a` 是關鍵 —— 單獨用 `ps` 只看得到作用中
+# 的服務，要清掉的那個正好在它的盲區裡。
+if ! ACTIVE_SERVICES="$($COMPOSE config --services 2>/dev/null)"; then
+  # 失敗時**不清**。這不是保守，是兩個方向的代價不對稱：漏清留下一個還在
+  # 對外服務的容器（而 status.sh 現在會把它說出來），誤清則是砍掉你正在用
+  # 的堆疊 —— 而 `config --services` 失敗正是 compose 檔有問題的症狀。
+  warn "無法取得作用中的服務清單（compose 檔可能有問題）—— 跳過殘留容器清理。"
+  warn "殘留容器不會被自動移除，請先確認：bash scripts/status.sh"
+fi
+EXISTING_PAIRS="$($COMPOSE ps -a --format '{{.Name}}{{"\t"}}{{.Label "com.docker.compose.service"}}' 2>/dev/null || true)"
+STALE_CONTAINERS="$(stale_containers "$ACTIVE_SERVICES" "$EXISTING_PAIRS")"
+if [[ -n "$STALE_CONTAINERS" ]]; then
+  warn "發現不屬於目前設定的殘留容器（--remove-orphans 不會清掉它們，理由見上）："
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && warn "  • $c"
+  done <<<"$STALE_CONTAINERS"
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && docker rm -f "$c" >/dev/null 2>&1
+  done <<<"$STALE_CONTAINERS"
+  ok "已移除。若其中包含 cloudflared，它原本還在對外服務。"
 fi
 
 info "啟動容器（等待 healthcheck 通過，首次可能需要 1-2 分鐘）..."

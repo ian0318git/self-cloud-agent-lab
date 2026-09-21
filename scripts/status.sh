@@ -3,11 +3,22 @@
 # 在 8GB 的 codespace 上，記憶體是主要瓶頸，因此一併顯示。
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# tunnel 的四態判定（tunnel_state_verdict）在這個模組裡。
+source "$(dirname "${BASH_SOURCE[0]}")/profile-lifecycle.sh"
 
 detect_compose
 
-# 讓 docker compose 看見 tunnel profile —— 否則即使 cloudflared 正在執行，
-# 它也不會出現在 ps 的輸出裡，看起來像沒在跑。
+# 讓 docker compose 的指令把 tunnel profile 算進來。
+#
+# **原本這裡寫的理由不成立**：「否則即使 cloudflared 正在執行，它也不會出現
+# 在 ps 的輸出裡，看起來像沒在跑」—— 實測（2026-09-21，compose v5.5.1）
+# 顯示對**正在執行**的被停用 profile 容器，`compose ps` 一律會列出，
+# export 與否結果相同。
+#
+# 還是留著，因為它是零成本的版本保險：這行為在 compose 各版本間並不保證
+# 一致，而本專案會跑在 Codespaces、本機、以及將來的 VPS 上。**這一段的結論
+# 已經不依賴它** —— tunnel 是開是關由容器決定（見下面的四態判定）。
+#
 # 這裡直接讀 .env 而不呼叫 load_env，避免 status 產生 golden key 等副作用。
 COMPOSE_PROFILES="$(grep -E '^COMPOSE_PROFILES=' "$PROJECT_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
 export COMPOSE_PROFILES
@@ -29,22 +40,51 @@ free -h | awk 'NR==1 || /^Mem:/'
 
 echo
 echo "── 對外連線（Cloudflare Tunnel）──────────────"
+# **判斷依據是容器，不是 .env 的那一行。**
+# 原本這裡的閘門是「`COMPOSE_PROFILES` 裡有沒有 tunnel」，於是「profile 被
+# 停用、但 cloudflared 還跑著」會走到 else 那一支，被印成「未啟用」—— 而
+# 那個容器還在跟 Cloudflare 邊緣保持連線、你的主機名還在服務 Open WebUI。
+# 上面「容器狀態」那一段會把它列出來，跟這一段的結論互相矛盾。
+#
+# 使用者問的是「tunnel 現在是開的還是關的」，那個答案在容器上，不在設定檔裡。
+TUNNEL_PROFILE=no
 if [[ ",${COMPOSE_PROFILES:-}," == *",tunnel,"* ]]; then
-  if $COMPOSE ps --status running --services 2>/dev/null | grep -qx cloudflared; then
+  TUNNEL_PROFILE=yes
+fi
+TUNNEL_RUNNING=no
+if $COMPOSE ps --status running --services 2>/dev/null | grep -qx cloudflared; then
+  TUNNEL_RUNNING=yes
+fi
+
+# 這一支只印訊息、不改結束碼：status.sh 是**報告**不是閘門，而它被 up.sh 與
+# deploy-vps.sh 在結尾直接呼叫 —— 讓它回非 0 會在那兩條路徑上變成假失敗
+# （D-016）。擋下殘留容器是 up.sh 的工作，這裡的工作是**把它說出來**。
+case "$(tunnel_state_verdict "$TUNNEL_PROFILE" "$TUNNEL_RUNNING")" in
+  active)
     ok "cloudflared 執行中 —— Open WebUI 可透過你的網域存取"
     # 連線是否真的建立要看日誌裡有沒有註冊成功的訊息，容器「跑著」不等於「通了」
     if $COMPOSE logs --tail=50 cloudflared 2>/dev/null | grep -qiE 'Registered tunnel connection|Connection .* registered'; then
       echo "   日誌顯示已向 Cloudflare 註冊連線"
     else
       warn "日誌未看到註冊成功的訊息，請確認：docker compose logs --tail=20 cloudflared"
-    fi
-  else
-    warn "tunnel profile 已啟用，但 cloudflared 不在執行中"
-  fi
-else
-  echo "未啟用（僅在本機／Codespaces 埠轉送內可用）"
-  echo "   啟用方式見 .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落"
-fi
+    fi ;;
+
+  enabled-but-down)
+    warn "tunnel profile 已啟用，但 cloudflared 不在執行中" ;;
+
+  stale)
+    fail "cloudflared **還在執行**，但 .env 已經沒有啟用 tunnel profile。"
+    echo "   這不是「已關閉」—— 它仍然連著 Cloudflare 邊緣，主機名還在服務。"
+    echo "   殘留的原因：compose 的 --remove-orphans 不會清掉被停用 profile 的"
+    echo "   容器，因為那些服務在 compose 檔裡「仍然有定義」（D-029）。"
+    echo "   要真的停掉："
+    echo "       bash scripts/down.sh"
+    echo "   或者下次 bash scripts/up.sh 會自動清掉它。" ;;
+
+  off)
+    echo "未啟用（僅在本機／Codespaces 埠轉送內可用）"
+    echo "   啟用方式見 .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落" ;;
+esac
 
 echo
 echo "── 容器資源用量 ──────────────────────────────"

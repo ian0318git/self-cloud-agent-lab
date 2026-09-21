@@ -126,6 +126,15 @@ public addresses on this host. Note that the LAN-only case is **held back by you
 router, not by this stack** — the same config becomes a real exposure the moment it
 lands on a public IP.
 
+**What this check cannot answer:** it reads **ports**, and a Cloudflare Tunnel
+publishes no port — that is what makes it a tunnel. So "no open ports" is not
+"unreachable". With the tunnel up, this host is serving your hostname while
+`check-exposure.sh` reports nothing exposed on any interface. That is not the check
+being wrong; it is the check answering a different question. The tunnel's own state
+is reported by `bash scripts/status.sh`, which reads the **container**, not the
+config file — see "To turn the tunnel off" below for why that distinction is
+load-bearing.
+
 **There is a trap in doing this by hand**, and it is why the script writes `.env`
 before it calls `load_env`. `docker compose` resolves the *shell* environment
 before it reads `.env`, and `load_env` **exports** everything it sources. So if you
@@ -322,8 +331,9 @@ change anything they cover.
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 53 mutations across the bash module and the smoke probe, every one must be caught |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 62 mutations across the three bash modules and the smoke probe, every one must be caught |
 | `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
+| `bash scripts/test_profile_lifecycle.sh` | That the stale-container **set difference** is wrong in neither direction — it must report a profile-disabled leftover *and* must not delete a container that is still in service — plus the empty-list guard and the tunnel's four states (D-029) |
 
 ---
 
@@ -416,9 +426,20 @@ docker compose logs --tail=20 cloudflared   # "Registered tunnel connection"
 
 **To turn the tunnel off:** comment `COMPOSE_PROFILES` back out and run
 `bash scripts/up.sh`. Disabling a profile does **not** stop a container that is
-already running — `up.sh` and `down.sh` pass `--remove-orphans` so the stale
-`cloudflared` is actually removed. Without that, "I turned the tunnel off" would
-be a false belief while the service stayed reachable.
+already running, and — this is the part that is easy to get wrong —
+**`--remove-orphans` does not remove it either.** Compose defines an orphan as a
+service that is not *defined* in the compose file; a profile-disabled service is
+still defined, so the flag never touches it (measured three ways: `up -d
+--remove-orphans`, `down --remove-orphans`, and plain `down` all leave it
+running). `up.sh` therefore removes stale containers by **set difference** —
+services `config --services` reports as active, versus the service labels of the
+containers that actually exist — and `down.sh` passes `--profile '*'` so that
+"stop the stack" means the whole stack. Without this, "I turned the tunnel off"
+would be a false belief while the service stayed reachable, and `status.sh`
+would have printed "not enabled" while it did so.
+
+If a `cloudflared` container is running while the profile is off, `status.sh`
+now says so in red rather than reporting the tunnel as off.
 
 > ⚠️ **Never use a Quick Tunnel (`*.trycloudflare.com`) for private data.**
 > Quick Tunnels have **no Access policy attached** and are effectively public to
