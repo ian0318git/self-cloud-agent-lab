@@ -297,6 +297,7 @@ Open <http://localhost:3000>.
 | `bash scripts/rag-verify.sh --model qwen2.5:3b` | Same, against a specific model. **The recommended invocation**: a non-thinking model takes 41–94 s per answer, ~2–5 min for the whole run (four runs, 12 samples — D-018). The model must be an argument — `.env` overwrites env vars |
 | `bash scripts/rag-verify.sh --timeout 900` | Raise the per-answer limit, for thinking models. "Too slow" and "unreachable" are reported separately — they send you to different fixes |
 | `bash scripts/rag-http-verify.sh` | **The same four RAG items over the real HTTP path** — create a knowledge base, upload a document, ask about it, ask about what it doesn't say — through `/api/v1/files` and `/api/chat/completions` rather than the app's functions. Needs an API key in `.env` as `WEBUI_API_KEY` (which needs **Admin Panel → Settings → Authentication → API Keys** switched on first). Argues with `rag-verify.sh`'s blind spot, and has its own: it cannot see *which* chunks were retrieved. Exit codes `0`/`1`/`2`/`3` (D-019) |
+| `bash scripts/verify-throughput.sh` | **How fast this machine actually decodes** — a seven-condition matrix, measured three times each, plus the prompt ceiling at two `num_ctx` values. Prints a baseline only if the repeats agree; **exits `1` and names the noisy conditions if they don't**. This is the re-baseline that is still open (D-031) |
 | `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
 | `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
 | `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
@@ -338,6 +339,9 @@ change anything they cover.
 | `bash scripts/test_phase3_mutants.sh` | That the three graders above are actually exercised — 23 mutations of their own criteria, every one must be caught |
 | `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
 | `bash scripts/test_profile_lifecycle.sh` | That the stale-container **set difference** is wrong in neither direction — it must report a profile-disabled leftover *and* must not delete a container that is still in service — plus the empty-list guard and the tunnel's four states (D-029) |
+| `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the three repeats disagree with each other (D-031). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s |
+| `bash scripts/test_throughput_probe.py` | That the ceiling formula, the truncation verdict, the "does the ceiling move with `num_predict`" verdict and the KV grouping each bite — 206 assertions, no Docker. It includes a `num_keep` the project has never observed, because a simplification that is equivalent on every observed input cannot be killed by observation |
+| `bash scripts/test_throughput_probe_mutants.sh` | That the four graders above are actually exercised — 59 mutations of their own criteria, every one must be caught |
 
 ---
 
@@ -868,7 +872,10 @@ Each of these was, at the time of writing, a measurement this project had not
 made. They are listed in the order they should be settled, because later ones
 are wasted effort if an earlier one fails. **All six are now measured** (item 5's
 premise did not survive — read it before acting). Item 3's own rates are
-recorded in D-027; they do **not** re-baseline throughput, which is still open.
+recorded in D-027; they do **not** re-baseline throughput. The re-baseline was
+attempted on 2026-09-21 and **failed its own stability criterion** (D-031) — so
+it is still open, and every rate on record is still either from the old VM or
+from a round that was not stable enough to keep.
 
 Reproduce items 4–6 with:
 
@@ -898,7 +905,8 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
    **One difference worth carrying forward: on this path the model issues tool
    calls one at a time, not as a batch.** Open WebUI emitted 3 calls ~10 ms
    apart (one response); LangGraph emitted its 2 calls **7.4 s** apart — three
-   separate LLM round trips. At the ~14 tok/s measured here, "one more step" on
+   separate LLM round trips. At the single-digit tok/s this machine decodes at
+   (D-031 measures 4.9–6.6 t/s; not yet a baseline), "one more step" on
    LangGraph costs *one more LLM round trip*, not one more token. That bears
    directly on items 3 and 4. It is a single observation — not yet attributable
    to LangGraph, langchain, or sampling.
@@ -1010,12 +1018,37 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
    was checked against, and "verified" it with an experiment in which both
    formulas predict the same number. See D-027 §4.
 
-   **Every token rate previously on record is still from the old VM.** The VM
-   was resized on 2026-09-20 from 2 vCPU / 3.8 GB to 4 vCPU / 16 GB, *after*
-   D-024 was written (D-024's commit is 18:02, the reboot 18:15). This run does
-   not replace those numbers: `num_predict` caps generation before the model
-   stops on its own, so the wall-clock time here is a property of `num_predict`,
-   not of the machine. **Re-baselining throughput is still open.**
+   **The re-baseline was attempted on 2026-09-21 and did not pass — no rate
+   below is a baseline.** The VM was resized on 2026-09-20 from 2 vCPU / 3.8 GB
+   to 4 vCPU / 16 GB, *after* D-024 was written (D-024's commit is 18:02, the
+   reboot 18:15), so every rate on record up to that point describes a machine
+   that no longer exists. `bash scripts/verify-throughput.sh` ran the full
+   matrix on the new VM and exited **1**: two conditions repeated three times
+   each disagreed with *themselves* by 16.0% and 26.7%, over the 15% ceiling.
+   At that noise level "no difference" and "no difference measurable" look
+   identical, so the round is recorded as a failure, not a slow success.
+
+   What the round did establish, and what it did **not** (D-031):
+
+   - The only arm whose conditions match D-014 is `qwen2.5:3b` at
+     `num_predict=1024`, and its generation hit the cap in 3/3 samples
+     (`matched`), so the comparison is at least well-posed: **6.59 t/s**,
+     inside the old VM's 6.38–6.85. Its own spread is 15.7% — the instrument's
+     noise is larger than the effect being looked for.
+   - `qwen3:4b` measured 5.74–5.87 t/s against D-014's 3.78–3.97, but **the two
+     do not compare**: D-014 never recorded `num_ctx`, and item 3 above shows
+     `num_ctx` decides whether the prompt is truncated — i.e. which condition
+     the rate was measured under.
+   - **No CPU-scaling claim.** There is no "4 vCPU made it 48% faster" here, and
+     nothing was measured about memory bandwidth. The most direct surviving
+     explanation for "not obviously faster" is CPU topology (the guest reports
+     its 4 vCPUs as 4 single-core sockets on a hybrid P/E host) — and that has
+     not been tested either.
+
+   The round also produced the instrument: `scripts/throughput_probe.py`
+   (pure verdict functions + measurement), its 206 offline assertions, a
+   59-mutation harness, and `verify-throughput.sh`. Eight defects were found and
+   fixed in it; the ones worth knowing about are in the Evidence table below.
 
 4. **[measured] `recursion_limit=5` is too tight — and the guess about *why* was
    right.** Measured 2026-09-21 (D-030) via `bash scripts/verify-phase3-runtime.sh`.
