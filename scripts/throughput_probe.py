@@ -60,9 +60,37 @@ def _is_int(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
-# 一個樣本的 decode 速率若與同組中位數差超過這個百分比，就標成不穩。
-# 舊 VM 上的重複量測落在 0.7–7% 之間，取 15% 是「明顯不是量測雜訊」的界線。
-STABILITY_TOLERANCE_PCT = 15.0
+# 重複量測散得太開時，那個中位數就不是機器的性質，是這一輪的運氣。
+#
+# ── 2026-09-22：判定的統計量換了，**門檻沒有放寬** ─────────────────────
+# 原本判定的是「全距 / 中位數 ≤ 15%」，而**全距是樣本數的函數**：常態下
+# E[全距] = d₂(n)·σ，d₂(3) = 1.6926、d₂(7) = 2.7044。同一台機器、同一個
+# 真實 σ，7 次取樣的全距期望值比 3 次**大 60%**。所以把「3 次 ≤ 15%」
+# 原封不動搬到 7 次，會變成一個嚴格 60% 的規則 —— 變嚴的不是機器，是
+# 估計量。
+#
+# 換成**變異係數**（樣本標準差 / 中位數），它不隨 n 改變意義。門檻是從
+# 舊門檻**換算**來的，不是重新挑的：
+#
+#     全距 ≤ 0.15·med  ⟺  σ ≤ 0.15·med / 1.6926 = 0.0886·med  ⟺  CV ≤ 8.86%
+#
+# **這個換算假設常態。** d₂ 是常態理論值，而這裡的雜訊（排程、降頻）尾巴
+# 比常態厚，所以它是一個近似。寫在這裡是為了讓它可以被重新推導或被駁倒，
+# 而不是變成一個沒人記得來歷的常數 —— 測試會把這條關係釘住。
+#
+# 換估計量**不保證下一輪會過**：它拿掉的是估計量的假象。如果下一輪仍然
+# 不穩，那就是機器真的這麼吵 —— 那也是一個結果。
+RANGE_TOLERANCE_PCT = 15.0  # 舊門檻。保留：報表仍然印全距，只是不拿它判定
+D2_N3 = 1.6926  # 常態下 n=3 的全距期望值 ÷ σ
+D2_N7 = 2.7044  # 常態下 n=7 的。留著是因為它量化了那個陷阱：15 / 2.7044 = 5.55
+STABILITY_CV_PCT = 8.9  # = RANGE_TOLERANCE_PCT / D2_N3，四捨五入
+
+# 幾個可用樣本才夠判定離散度。少於這個數回 `unknown` —— **不是回 `stable`**。
+#
+# 原本 1 個樣本時全距是 0.0，於是 `--quick`（每條件取樣一次）會讓每一個
+# 條件都變成「穩定」，一整輪基準線就從一次取樣生出來了。一個樣本沒有
+# 任何離散度可言：那不是穩定，是沒量。
+MIN_SAMPLES_FOR_STABILITY = 5
 
 # `total_duration` 與 load+prompt_eval+eval 的差。ollama 的欄位是各自獨立的
 # 計時器，這個差就是「沒有被歸類的行政開銷」。超過這個秒數代表欄位不再
@@ -298,22 +326,69 @@ def sample_usable(sample: dict[str, Any]) -> dict[str, Any]:
     return {"usable": True, "reason": "ok", "message": "可用。"}
 
 
+def cv_is_stable(cv_pct: float) -> bool:
+    """CV 有沒有過門檻。**門檻含**（`<=`）。
+
+    抽成一個函式是為了讓邊界**可以被精確測試**：`STABILITY_CV_PCT` 是 8.9，
+    而 8.9 在二進位浮點裡不精確，所以「CV 剛好等於門檻」的資料集在數學上
+    造不出來（`100 ± 8.9` 的離均差會是 8.900000000000006）。只有直接拿
+    常數比，才測得到 `<=` 與 `<` 的差別 —— 而那個差別就是「門檻含不含」。
+    """
+    return cv_pct <= STABILITY_CV_PCT
+
+
 def summarize(rates: list[float]) -> dict[str, Any]:
-    """一組速率 → 中位數與離散度。空集合回 n=0，不回 None 假裝有值。"""
+    """一組速率 → 中位數與離散度。空集合回 n=0，不回 None 假裝有值。
+
+    **判定用的是 `cv_pct`（樣本標準差 / 中位數），不是 `spread_pct`。**
+    `spread_pct` 是 (max−min)/中位數，仍然算、仍然印，因為它最直觀；但它是
+    樣本數的函數，n 一變就換了意思，所以不拿它判穩定（見 STABILITY_CV_PCT
+    的推導）。兩個都放進 summary，是為了讓讀者看得到「被判定的」與「被印出的」
+    不是同一個數。
+
+    樣本數不足時回 `unknown`，**不回 `stable`** —— 見
+    MIN_SAMPLES_FOR_STABILITY。`unknown` 會擋下基準線判定（允許清單），
+    所以「沒量到」不會被當成「沒問題」。
+    """
     clean = [r for r in rates if _is_num(r) and r > 0]
     if not clean:
-        return {"n": 0, "min": None, "median": None, "max": None, "spread_pct": None, "stability": "unknown"}
+        return {
+            "n": 0, "min": None, "median": None, "max": None,
+            "spread_pct": None, "cv_pct": None,
+            "stability": "unknown", "message": "沒有可用的樣本。",
+        }
     med = statistics.median(clean)
     spread = (max(clean) - min(clean)) / med * 100.0 if len(clean) > 1 else 0.0
-    stability = "stable" if spread <= STABILITY_TOLERANCE_PCT else "noisy"
-    return {
+    base = {
         "n": len(clean),
         "min": round(min(clean), 3),
         "median": round(med, 3),
         "max": round(max(clean), 3),
         "spread_pct": round(spread, 2),
-        "stability": stability,
     }
+    if len(clean) < MIN_SAMPLES_FOR_STABILITY:
+        return {
+            **base,
+            "cv_pct": None,
+            "stability": "unknown",
+            "message": (
+                f"只有 {len(clean)} 個可用樣本（需要 ≥{MIN_SAMPLES_FOR_STABILITY}）"
+                f"—— 樣本太少，離散度沒有意義，**不判定**（不是通過）。"
+            ),
+        }
+    cv = statistics.stdev(clean) / med * 100.0
+    if cv_is_stable(cv):
+        stability, message = "stable", (
+            f"CV {cv:.1f}% ≤ {STABILITY_CV_PCT:.1f}%（= 全距門檻 "
+            f"{RANGE_TOLERANCE_PCT:.0f}% 換算到 n={len(clean)}）—— 這一組可以留。"
+        )
+    else:
+        stability, message = "noisy", (
+            f"CV {cv:.1f}% > {STABILITY_CV_PCT:.1f}%（全距 "
+            f"{spread:.1f}%）—— 重複量測彼此不一致，這一組的**中位數**"
+            f"不是機器的性質。"
+        )
+    return {**base, "cv_pct": round(cv, 2), "stability": stability, "message": message}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -356,12 +431,30 @@ def dependence_verdict(
     }
 
 
-def baseline_verdict(conditions: list[dict[str, Any]], min_conditions: int = 2) -> dict[str, Any]:
+def baseline_verdict(
+    conditions: list[dict[str, Any]],
+    min_conditions: int = 2,
+    attempted: bool = True,
+) -> dict[str, Any]:
     """這一輪量到的東西，夠不夠格被叫做「基準線」？
 
     D-014 的實作：只有一個條件的速率**不是**基準線，它是一個條件下的觀測。
     這條判定故意會擋下「只跑一次就寫進 README」。
+
+    `attempted=False`（`--quick`，每條件一個樣本）回一個**獨立**的 verdict，
+    不回 `unstable`：那一輪從設計上就沒有要建立基準線，把它記成「不穩」是
+    在說一件沒發生的事。呼叫端據此回 exit 2（量不到）而不是 1（準則不成立）。
     """
+    if not attempted:
+        return {
+            "verdict": "not_attempted",
+            "measured_conditions": 0,
+            "message": (
+                "這一輪每個條件只有一個樣本（`--quick`），從設計上就**沒有嘗試**"
+                "建立基準線 —— 不判定。要基準線請讓每條件 ≥"
+                f"{MIN_SAMPLES_FOR_STABILITY} 個樣本。"
+            ),
+        }
     usable = [c for c in conditions if _is_num(c.get("rate")) and c["rate"] > 0]
     if not usable:
         return {"verdict": "unknown", "measured_conditions": 0, "message": "沒有任何條件量到速率。"}
@@ -374,12 +467,31 @@ def baseline_verdict(conditions: list[dict[str, Any]], min_conditions: int = 2) 
                 f"依 D-014 這不能當基準線，只能當「在那個條件下量到的一個數」。"
             ),
         }
-    noisy = [c for c in usable if c.get("stability") == "noisy"]
-    if noisy:
+    # **允許清單**：不是 "stable" 的一律擋，包含 "unknown"。
+    #
+    # 原本這裡寫的是封鎖清單（`== "noisy"` 才擋），於是 `unknown` 直接放行。
+    # 加進 `unknown` 之後那個洞立刻有意義：樣本數不足的條件會一路走到
+    # 「可以當基準線」。封鎖清單漏掉一個值就是 fail-open，這個專案已經
+    # 在 `_all_ok` 的截斷閘門上吃過一次同樣的虧。
+    bad = [c for c in usable if c.get("stability") != "stable"]
+    if bad:
+        noisy = [c for c in bad if c.get("stability") == "noisy"]
+        thin = [c for c in bad if c.get("stability") != "noisy"]
+        parts = []
+        if noisy:
+            parts.append(
+                f"{len(noisy)} 個條件的重複量測散得太開（CV > {STABILITY_CV_PCT:.1f}%）："
+                + "、".join(str(c.get("label")) for c in noisy)
+            )
+        if thin:
+            parts.append(
+                f"{len(thin)} 個條件的樣本數不足以判定離散度（< {MIN_SAMPLES_FOR_STABILITY}）："
+                + "、".join(str(c.get("label")) for c in thin)
+            )
         return {
-            "verdict": "noisy",
+            "verdict": "unstable",
             "measured_conditions": len(usable),
-            "message": f"{len(noisy)} 個條件的重複量測離散度超過 {STABILITY_TOLERANCE_PCT:.0f}%，這一輪的數字不穩。",
+            "message": "；".join(parts) + "。這一輪不能當基準線。",
         }
     return {
         "verdict": "usable",
@@ -1267,8 +1379,17 @@ def _all_ok(out: dict[str, Any]) -> bool:
             return False
         if c.get("usable_samples", 0) < 1:
             return False
-        if c.get("stability") == "noisy":
-            return False
+        # 這裡原本還有一道穩定度閘門（允許清單），理由同樣是 `unknown` 會
+        # 放行。**已經拿掉 —— 它是等效的。** 函式最後把判定整個交給
+        # `baseline_verdict(...) == "usable"`，而那裡已經是同一條允許清單，
+        # 所以這道閘門不管寫成允許清單還是封鎖清單，都改不了回傳值：
+        # 突變台把 `!= "stable"` 換回 `== "noisy"` 之後，216 組輸入的
+        # `_all_ok` 輸出**一個都沒變**。
+        #
+        # 一個改不了結果的檢查不是檢查，是長得像程式的註解；而它更糟的
+        # 副作用是生出一條永遠殺不掉的突變 —— 於是一份「全部抓到」的
+        # 突變報告裡，有一條其實是在說「這裡有一行無效的程式碼」。
+        # 規則**唯一**的權威是 `baseline_verdict`，突變台也只釘那裡。
         for s in c.get("samples", []):
             err = s.get("identity_error_s")
             if err is not None and abs(err) > DURATION_IDENTITY_TOLERANCE_S:
@@ -1292,7 +1413,13 @@ def _all_ok(out: dict[str, Any]) -> bool:
     # 其中一條（上限隨 num_predict 移動）正是這一臂要抓的上游變更。
     if (out.get("reservation") or {}).get("verdict") != "independent":
         return False
-    return baseline_verdict(out.get("conditions", []))["verdict"] == "usable"
+    return (
+        baseline_verdict(
+            out.get("conditions", []),
+            attempted=out.get("baseline_attempted", True),
+        )["verdict"]
+        == "usable"
+    )
 
 
 def _report(out: dict[str, Any]) -> None:
@@ -1314,12 +1441,17 @@ def _report(out: dict[str, Any]) -> None:
         p(f"   {m['name']:<24} {m['size_bytes'] / 2**30:>5.2f} GiB  {m['digest']}")
 
     p("\n── 速率 ──")
-    p(f"   {'條件':<44} {'decode t/s':>11} {'prefill t/s*':>12} {'n':>2} {'離散':>7}")
+    # `CV` 那一欄才是**被判定的**統計量（樣本標準差/中位數）；`全距` 只是
+    # 一起印出來看。判定看 CV 的理由見 STABILITY_CV_PCT 的推導 —— 全距是
+    # 樣本數的函數，n 一變就換了意思。
+    p(f"   {'條件':<44} {'decode t/s':>11} {'prefill t/s*':>12} {'n':>2} {'CV':>7} {'全距':>7}")
     for c in out.get("conditions", []):
+        s = c["summary"]
         r = f"{c['rate']:.2f}" if isinstance(c.get("rate"), (int, float)) else "  —  "
         pf = f"{c['prefill_tps']:.1f}" if isinstance(c.get("prefill_tps"), (int, float)) else "  —  "
-        sp = f"{c['summary'].get('spread_pct'):.1f}%" if isinstance(c["summary"].get("spread_pct"), (int, float)) else "  —  "
-        p(f"   {c['label']:<44} {r:>11} {pf:>12} {c['usable_samples']:>2} {sp:>7}")
+        cv = f"{s.get('cv_pct'):.1f}%" if isinstance(s.get("cv_pct"), (int, float)) else "  —  "
+        sp = f"{s.get('spread_pct'):.1f}%" if isinstance(s.get("spread_pct"), (int, float)) else "  —  "
+        p(f"   {c['label']:<44} {r:>11} {pf:>12} {c['usable_samples']:>2} {cv:>7} {sp:>7}")
         # 長生成那一條的判定要緊跟在它的數字下面。把它擺在報表最後的話，
         # 讀者會先看到一個速率、再看到「這不是對照」—— 順序反了就看不出
         # 那個數字不能用了。
@@ -1382,7 +1514,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--length-predict", nargs="+", type=int, default=[128, 512], help="生成長度掃描的上限")
     ap.add_argument("--reservation-predict", nargs="+", type=int, default=[1, 512, 2000], help="量保留規則時要掃的 num_predict")
-    ap.add_argument("--repeats", type=int, default=3, help="每個條件取樣幾次")
+    ap.add_argument(
+        "--repeats",
+        type=int,
+        default=7,
+        help=(
+            f"每個條件取樣幾次（預設 %(default)s）。少於 {MIN_SAMPLES_FOR_STABILITY} 次時"
+            "離散度無從判定，該條件會回 unknown 並擋下基準線判定 —— **不是通過**。"
+            "取樣次數是最貴的一維：整輪時間大致與它成正比"
+        ),
+    )
     ap.add_argument("--long-prompt-repeats", type=int, default=150, help="量 prefill 速率的長 prompt 重複次數（要放得下）")
     ap.add_argument("--overflow-prompt-repeats", type=int, default=700, help="量保留規則的長 prompt 重複次數（要放不下）")
     ap.add_argument("--keep-alive", default="10m", help="模型留在記憶體的時間")
@@ -1422,7 +1563,12 @@ def main(argv: list[str] | None = None) -> int:
         print(failure["message"], file=sys.stderr)
 
     out["kv"] = kv_slope_verdict(out.get("kv_points", []))
-    out["baseline"] = baseline_verdict(out.get("conditions", []))
+    # `--quick` 每條件只取樣一次，從設計上就沒有要建立基準線。這是輸入的
+    # 性質，不是量到的結果，所以要傳進去而不是從 conditions 推回來。
+    out["baseline_attempted"] = not args.quick
+    out["baseline"] = baseline_verdict(
+        out.get("conditions", []), attempted=out["baseline_attempted"]
+    )
     for c in out["conditions"]:
         for s in c.get("samples", []):
             if s.get("load_duration_ns", 0) and s["usable"]["reason"] == "cold":
@@ -1444,7 +1590,14 @@ def main(argv: list[str] | None = None) -> int:
     # 不能給出結論（D-014）。
     if failure is not None:
         return failure["exit"]
-    return EXIT_PASS if _all_ok(out) else EXIT_FAIL
+    if _all_ok(out):
+        return EXIT_PASS
+    # `--quick` 沒有嘗試建立基準線，所以「沒有基準線」不是**失敗** ——
+    # 回 2（量不到）而不是 1（準則不成立）。把沒做的事記成做失敗，
+    # 就是 D-016 說的假失敗。
+    if out["baseline"]["verdict"] == "not_attempted":
+        return EXIT_UNMEASURED
+    return EXIT_FAIL
 
 
 if __name__ == "__main__":

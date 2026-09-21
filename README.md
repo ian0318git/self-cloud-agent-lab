@@ -297,7 +297,7 @@ Open <http://localhost:3000>.
 | `bash scripts/rag-verify.sh --model qwen2.5:3b` | Same, against a specific model. **The recommended invocation**: a non-thinking model takes 41–94 s per answer, ~2–5 min for the whole run (four runs, 12 samples — D-018). The model must be an argument — `.env` overwrites env vars |
 | `bash scripts/rag-verify.sh --timeout 900` | Raise the per-answer limit, for thinking models. "Too slow" and "unreachable" are reported separately — they send you to different fixes |
 | `bash scripts/rag-http-verify.sh` | **The same four RAG items over the real HTTP path** — create a knowledge base, upload a document, ask about it, ask about what it doesn't say — through `/api/v1/files` and `/api/chat/completions` rather than the app's functions. Needs an API key in `.env` as `WEBUI_API_KEY` (which needs **Admin Panel → Settings → Authentication → API Keys** switched on first). Argues with `rag-verify.sh`'s blind spot, and has its own: it cannot see *which* chunks were retrieved. Exit codes `0`/`1`/`2`/`3` (D-019) |
-| `bash scripts/verify-throughput.sh` | **How fast this machine actually decodes** — a seven-condition matrix, measured three times each, plus the prompt ceiling at two `num_ctx` values. Prints a baseline only if the repeats agree; **exits `1` and names the noisy conditions if they don't**. This is the re-baseline that is still open (D-031) |
+| `bash scripts/verify-throughput.sh` | **How fast this machine actually decodes** — a seven-condition matrix, measured **seven times each** (~35 min), plus the prompt ceiling at two `num_ctx` values. Prints a baseline only if the repeats agree; **exits `1` and names the noisy conditions if they don't**. Scatter is judged by the coefficient of variation, not by the range — the range grows with sample count, so at seven samples the old 15%-range rule would have meant 5.55% (D-032). This is the re-baseline that is still open (D-031, D-032) |
 | `bash scripts/check-egress.sh` | **Where data can flow out** — every enabled external endpoint, read from the database's actual values |
 | `bash scripts/check-egress.sh --fix` | Turn off `openai.enable`, restart, and read back to confirm (D-017) |
 | `bash scripts/probe-openai.sh [URL]` | Conformance probe for any OpenAI-compatible runtime. Defaults to Ollama's `/v1` |
@@ -339,9 +339,9 @@ change anything they cover.
 | `bash scripts/test_phase3_mutants.sh` | That the three graders above are actually exercised — 23 mutations of their own criteria, every one must be caught |
 | `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
 | `bash scripts/test_profile_lifecycle.sh` | That the stale-container **set difference** is wrong in neither direction — it must report a profile-disabled leftover *and* must not delete a container that is still in service — plus the empty-list guard and the tunnel's four states (D-029) |
-| `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the three repeats disagree with each other (D-031). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s |
-| `bash scripts/test_throughput_probe.py` | That the ceiling formula, the truncation verdict, the "does the ceiling move with `num_predict`" verdict and the KV grouping each bite — 206 assertions, no Docker. It includes a `num_keep` the project has never observed, because a simplification that is equivalent on every observed input cannot be killed by observation |
-| `bash scripts/test_throughput_probe_mutants.sh` | That the four graders above are actually exercised — 59 mutations of their own criteria, every one must be caught |
+| `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the seven repeats disagree with each other (D-031, D-032). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s |
+| `bash scripts/test_throughput_probe.py` | That the ceiling formula, the truncation verdict, the "does the ceiling move with `num_predict`" verdict and the KV grouping each bite — 247 assertions, no Docker. It includes a `num_keep` the project has never observed, because a simplification that is equivalent on every observed input cannot be killed by observation |
+| `bash scripts/test_throughput_probe_mutants.sh` | That the four graders above are actually exercised — 71 mutations of their own criteria, every one must be caught. A mutation harness's own output is a claim, so it is checked too: the criteria must not merely be *broken* by the substitution, they must be broken **in a way an assertion notices** — a no-op substitution, a mangled field or a syntax error all "fail the tests" without guarding anything (D-032) |
 
 ---
 
@@ -1046,9 +1046,22 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
      not been tested either.
 
    The round also produced the instrument: `scripts/throughput_probe.py`
-   (pure verdict functions + measurement), its 206 offline assertions, a
-   59-mutation harness, and `verify-throughput.sh`. Eight defects were found and
+   (pure verdict functions + measurement), its 247 offline assertions, a
+   71-mutation harness, and `verify-throughput.sh`. Eight defects were found and
    fixed in it; the ones worth knowing about are in the Evidence table below.
+
+   **The criterion was then changed (D-032): seven samples, judged by CV.**
+   The next round takes seven repeats per condition instead of three and judges
+   their scatter by the coefficient of variation (sample stdev / median,
+   `<= 8.9%`) instead of the range. This is a **correction of an estimator, not
+   a relaxation of the standard**: the range is a function of sample size
+   (`E[range] = d₂(n)·σ`, `d₂(3) = 1.6926`, `d₂(7) = 2.7044`), so keeping the
+   old 15%-of-range rule at seven samples would have meant an effective
+   `CV ≤ 5.55%` — a bar **59% stricter** than the one D-031 failed against, an
+   artifact of counting rather than of the machine. `8.9%` is the old threshold
+   translated (`15 / 1.6926 = 8.86`). Individual datasets can move either way,
+   and **this does not promise the next round passes** — if seven samples still
+   scatter, the machine really is that noisy, and that is the result.
 
 4. **[measured] `recursion_limit=5` is too tight — and the guess about *why* was
    right.** Measured 2026-09-21 (D-030) via `bash scripts/verify-phase3-runtime.sh`.

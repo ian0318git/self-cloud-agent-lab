@@ -19,8 +19,11 @@
 #   `sample_usable` 的冷樣本 —— 重新載入後的第一個樣本量到 5.65 t/s，
 #     同組其餘是 6.20／6.82。放它進去就是讓一個不同條件的樣本冒充同組。
 #
-#   `summarize` 的分母 —— 離散度除以**中位數**。改成除以最大值會讓
-#     每一組看起來都更穩，門檻 15% 就不再是 15%。
+#   `summarize` 的穩定度 —— 判定的統計量是**變異係數**（樣本標準差/中位數），
+#     門檻 8.9% 是從舊的全距門檻 15% 換算來的（15 / d₂(3) = 15/1.6926）。
+#     這一組有四條：門檻放寬、換回全距、分母換掉、樣本數下限拿掉。
+#     **樣本數下限那一條是原本就有的洞**：1 個樣本時全距是 0.0，於是
+#     `--quick` 讓每個條件都「穩定」，一整輪基準線從一次取樣生出來。
 #
 #   `baseline_verdict` 的 D-014 —— 只有一個條件時回 `single_condition`。
 #     這一條被弄壞，就等於把「單一條件下的結果不外推」這條規則取消，
@@ -76,6 +79,16 @@ done
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# **不要寫 .pyc。** 突變是用字串取代植入的，而 CPython 對 .pyc 的有效性
+# 檢查只比對「原始檔的 mtime（**秒**）與大小」。兩條連續的突變若長度相同
+# 又落在同一秒內，第二次寫入就會命中第一次留下的 .pyc —— 那個突變**根本
+# 沒有被執行**，測試當然通過，而突變台把它報成「抓到」。
+# 這一支就是踩到的現場：兩條相鄰的突變都只把 `!= "stable"` 換成
+# `== "noisy"`（各減 1 個字元，**長度一模一樣**），於是同一輪裡第一次跑
+# 報 70/71、第二次跑報 71/71 —— 差別只在兩次執行有沒有落在同一秒。
+# 一個會謊報「抓到」的突變台是 fail-open：它讓「全部抓到」變成假的。
+export PYTHONDONTWRITEBYTECODE=1
+
 ok()   { printf '  ✓ %s\n' "$*"; }
 info() { printf '\n── %s ──\n' "$*"; }
 fail() { printf '  ✗ %s\n' "$*"; }
@@ -86,7 +99,8 @@ restore() {
 }
 
 cat > "$WORK/inject.py" <<'PY'
-import io, sys
+import ast, io, os, subprocess, sys
+
 path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 src = io.open(path, encoding="utf-8").read()
 n = src.count(old)
@@ -96,7 +110,43 @@ if n != 1:
     # 就會去翻原始碼找重複，而該改的是清單那一行。
     print("NOT_FOUND" if n == 0 else "NOT_UNIQUE:%d" % n, file=sys.stderr)
     sys.exit(1)
-io.open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+mutated = src.replace(old, new, 1)
+
+# 植入之後還要再過一關，因為「測試變紅」不等於「有斷言守住」。這一關擋的
+# 是**假抓到**，它有兩張臉，而且都不會讓任何一條斷言叫起來：
+#   NO_OP       取代沒有改變語意（`if slack < -0:` 就是 `if slack < 0:`）。
+#               它殺不掉任何東西，卻在報告裡佔一個「抓到」的名額 —— 更糟
+#               的是它讓一份「全部抓到」看起來很完整。`ast.dump` 不比對
+#               註解與空白，所以只改註解的那種也會在這裡現形。這一條真的
+#               抓到過一條：同大小、同一秒寫入的兩條突變，後一條重用了前
+#               一條的位元碼，於是「被殺掉」是假的。
+#   BROKEN_CODE 植入後根本不是合法程式。測試當然會失敗，但那是模組匯入
+#               不了，不是判準被守住。真的混進來過：`"message": (` 少一個
+#               括號、目標行裡的 `||` 被當成欄位分隔符。
+# 兩者都只說明**這條突變寫壞了**，原始碼沒有問題。
+ext = os.path.splitext(path)[1]
+if ext == ".py":
+    try:
+        before = ast.dump(ast.parse(src))
+        after = ast.dump(ast.parse(mutated))
+    except SyntaxError as e:
+        print("BROKEN_CODE:%s" % e.msg, file=sys.stderr)
+        sys.exit(1)
+    if before == after:
+        print("NO_OP", file=sys.stderr)
+        sys.exit(1)
+elif ext == ".sh":
+    # shell 的等價性在這裡判不了（那要真的比語意），所以只驗語法。
+    # 走 stdin 而不是暫存檔：`bash -n` 的訊息就會是乾淨的 `line N`，
+    # 不必把一個臨時路徑印進錯誤訊息裡。
+    p = subprocess.run(["bash", "-n"], input=mutated,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        last = (p.stderr.strip().splitlines() or ["bash -n 失敗"])[-1]
+        print("BROKEN_CODE:%s" % last, file=sys.stderr)
+        sys.exit(1)
+
+io.open(path, "w", encoding="utf-8").write(mutated)
 PY
 
 echo "======================================================================"
@@ -157,11 +207,30 @@ MUTANTS=(
   # 讀不到 load_duration 也放行 → 不知道冷不冷就敢用
   "load_duration 讀不到仍算可用|        return {\"usable\": False, \"reason\": \"unreadable\", \"message\": \"load_duration 讀不到，無法判斷這是不是冷樣本。\"}|        return {\"usable\": True, \"reason\": \"ok\", \"message\": \"load_duration 讀不到，當成可用。\"}"
   # 離散度的分母改成最大值 → 每一組看起來都更穩
-  "離散度改用最大值當分母|    spread = (max(clean) - min(clean)) / med * 100.0 if len(clean) > 1 else 0.0|    spread = (max(clean) - min(clean)) / max(clean) * 100.0 if len(clean) > 1 else 0.0"
-  # 門檻 15% 改成 20% → 一個明顯不穩的條件被講成穩定
-  "穩定門檻放寬到 20%|STABILITY_TOLERANCE_PCT = 15.0|STABILITY_TOLERANCE_PCT = 20.0"
+  "全距改用最大值當分母|    spread = (max(clean) - min(clean)) / med * 100.0 if len(clean) > 1 else 0.0|    spread = (max(clean) - min(clean)) / max(clean) * 100.0 if len(clean) > 1 else 0.0"
+  # CV 的分母改成最大值 → 同上，但走的是**被判定的那個**統計量
+  "CV 改用最大值當分母|    cv = statistics.stdev(clean) / med * 100.0|    cv = statistics.stdev(clean) / max(clean) * 100.0"
+  # 標準差換成母體標準差 → 每一組都更穩一點點，而門檻是照樣本標準差校準的
+  "CV 改用母體標準差|    cv = statistics.stdev(clean) / med * 100.0|    cv = statistics.pstdev(clean) / med * 100.0"
+  # **換回全距判定。** 這是最像「無害重構」的一條，也是整個改動的核心：
+  # 全距是樣本數的函數，n=7 時它會膨脹 60%，所以換回全距不是回到原狀，
+  # 是變成嚴格 59% 的規則。n=7、全距 20%、CV 6.56% 那一筆會當場翻面。
+  "穩定度判定換回全距|    if cv_is_stable(cv):|    if spread <= RANGE_TOLERANCE_PCT:"
+  # 樣本數下限拿掉 → `--quick`（每條件一次取樣）又變成「穩定」
+  "樣本數下限拿掉（--quick 又能生出基準線）|    if len(clean) < MIN_SAMPLES_FOR_STABILITY:|    if False:"
+  # 下限降到 1 → 同一個洞，走另一條路
+  "樣本數下限降到 1|MIN_SAMPLES_FOR_STABILITY = 5|MIN_SAMPLES_FOR_STABILITY = 1"
+  # 樣本不足時回 stable → 「沒量到」被講成「沒問題」
+  $'樣本不足時回 stable|            "cv_pct": None,\n            "stability": "unknown",|            "cv_pct": None,\n            "stability": "stable",'
+  # 門檻含改成不含 → 剛好等於門檻的那一組被擋掉
+  "CV 門檻改成不含（<= 變 <）|    return cv_pct <= STABILITY_CV_PCT|    return cv_pct < STABILITY_CV_PCT"
+  # CV 門檻 8.9% 改成 20% → 一個明顯不穩的條件被講成穩定
+  "CV 門檻放寬到 20%|STABILITY_CV_PCT = 8.9  # = RANGE_TOLERANCE_PCT / D2_N3，四捨五入|STABILITY_CV_PCT = 20.0  # = RANGE_TOLERANCE_PCT / D2_N3，四捨五入"
+  # 門檻直接抄回舊的 15 → 「換估計量」被當成「放寬門檻」的偷渡路徑。
+  # 測試會用 15 / d₂(3) 把那條關係釘住，所以這一條必須被抓到。
+  "CV 門檻偷渡回 15|STABILITY_CV_PCT = 8.9|STABILITY_CV_PCT = 15.0"
   # 空集合回 median=0 → 「沒有資料」被講成「速率 0」
-  "空集合的中位數回 0.0|        return {\"n\": 0, \"min\": None, \"median\": None, \"max\": None, \"spread_pct\": None, \"stability\": \"unknown\"}|        return {\"n\": 0, \"min\": None, \"median\": 0.0, \"max\": None, \"spread_pct\": None, \"stability\": \"unknown\"}"
+  $'空集合的中位數回 0.0|            "n": 0, "min": None, "median": None, "max": None,|            "n": 0, "min": None, "median": 0.0, "max": None,'
 
   # ══════════════════════════════════════════════════════════
   # D-014：一個條件不是基準線
@@ -169,9 +238,32 @@ MUTANTS=(
   # 單一條件也放行 → 這次重打基準線的理由被取消
   "單一條件被判成可用基準線|    if len(usable) < min_conditions:|    if False:"
   # 門檻預設從 2 降到 1 → 同上，但走另一條路
-  "基準線門檻預設降到 1|def baseline_verdict(conditions: list[dict[str, Any]], min_conditions: int = 2) -> dict[str, Any]:|def baseline_verdict(conditions: list[dict[str, Any]], min_conditions: int = 1) -> dict[str, Any]:"
-  # noisy 不再擋 → 不穩的數字照樣被當基準線
-  "noisy 條件不再擋下基準線判定|    if noisy:|    if False:"
+  $'基準線門檻預設降到 1|def baseline_verdict(\n    conditions: list[dict[str, Any]],\n    min_conditions: int = 2,|def baseline_verdict(\n    conditions: list[dict[str, Any]],\n    min_conditions: int = 1,'
+  # 不穩的條件不再擋 → 不穩的數字照樣被當基準線。
+  # 目標要帶上 `bad = ...` 那一行：`long_generation_overall` 裡也有一個
+  # `if bad:`，只寫那一行的話植入會 NOT_UNIQUE，而突變台正確地拒絕猜。
+  $'不穩的條件不再擋下基準線判定|    bad = [c for c in usable if c.get("stability") != "stable"]\n    if bad:|    bad = [c for c in usable if c.get("stability") != "stable"]\n    if False:'
+  # **封鎖清單復辟**：只擋 noisy，`unknown`（樣本數不足）就放行了。
+  # 這一條重現的正是原本的洞，而且在加了 unknown 之後它第一次真的有殺傷力。
+  "baseline_verdict 退回封鎖清單（unknown 放行）|    bad = [c for c in usable if c.get(\"stability\") != \"stable\"]|    bad = [c for c in usable if c.get(\"stability\") == \"noisy\"]"
+  # **同一個洞的第二處**：`_all_ok` 的穩定度閘門。
+  # **這一條原本是「`_all_ok` 的穩定度閘門退回封鎖清單」，已經刪掉。**
+  # 不是因為它過時，是因為它**殺不掉**：`_all_ok` 結尾把判定整個交給
+  # `baseline_verdict(...) == "usable"`，而那份允許清單已經在那裡，所以
+  # `_all_ok` 裡那一份改不動任何結果（216 組輸入逐一比對，差異 **0** 組）。
+  # 一份殺不掉的突變會讓上面那句「全部抓到」失去意義 —— 它其實是在說
+  # 「這裡有一行無效的程式碼」。冗餘的那一份已經從探針刪除，權威留在
+  # `baseline_verdict`（上面那條封鎖清單復辟釘的就是它）。
+  #
+  # 改釘 `_all_ok` 的**委派**：判定不是 `usable` 也放行。這是真正的
+  # fail-open（`single_condition`、`unknown`、`not_attempted` 都會過關），
+  # 而且殺得掉 —— 下面 `--quick` 那條斷言會叫。
+  "判定不是 usable 也放行|        == \"usable\"|        != \"unstable\""
+  # `--quick` 不再被視為「沒有嘗試建立基準線」→ 一次取樣的一輪走回失敗路徑。
+  # 這一條守的是 D-016：沒做的事不可以記成做失敗。
+  "quick 不再被當成『沒有嘗試』|    if not attempted:|    if False:"
+  # `--quick` 反過來被當成有嘗試 → 它會走到 unstable，記成「不穩」（沒發生的事）
+  "quick 被當成有嘗試建立基準線|    attempted: bool = True,|    attempted: bool = False,"
   # 速率 0 也算一個條件 → 用「量不到」湊到條件數
   "速率 0 也算一個已量測條件|    usable = [c for c in conditions if _is_num(c.get(\"rate\")) and c[\"rate\"] > 0]|    usable = [c for c in conditions if _is_num(c.get(\"rate\"))]"
 
@@ -186,7 +278,12 @@ MUTANTS=(
   "num_keep 寫死 4（化簡式冒充完整公式）|    room = max((num_ctx - num_keep) // 2, 1)|    room = max((num_ctx - 4) // 2, 1)"
   # 塞得下卻剛好等於上限時不再判被切 → 保留臂的真實資料（4098 @ ctx 8192）
   # 會落到下面的「塞得下」而出門，一個被切掉的 prompt 被講成完整。
-  $'等於上限不再判被切（被切的 prompt 變完整）|    if prompt_eval_count == limit:\n        return {\n            "verdict": "truncated",\n            "limit": limit,\n            "message": (\n                f"prompt_eval_count={prompt_eval_count} 正好是被切之後的長度 {limit}"|    if False:\n        return {\n            "verdict": "truncated",'
+  # 界線挪一格而不是把整個 `if` 拔掉。原本的寫法把 `"message": (` 那一行
+  # 也吃掉了，留下的括號對不起來 —— **植入後是 SyntaxError**。那樣子測試
+  # 當然會「失敗」，但失敗的原因是整個模組匯入不了，不是哪一條斷言叫了：
+  # 它守不住任何判準，卻在「全部抓到」裡佔一個名額。同一個 no-op 家族的
+  # 另一種形態（見 `test_phase3_mutants.sh` 的 `< -0`）。
+  $'等於上限不再判被切（被切的 prompt 變完整）|    if prompt_eval_count == limit:\n        return {\n            "verdict": "truncated",\n            "limit": limit,\n            "message": (\n                f"prompt_eval_count={prompt_eval_count} 正好是被切之後的長度 {limit}"|    if prompt_eval_count == limit + 1:\n        return {\n            "verdict": "truncated",\n            "limit": limit,\n            "message": (\n                f"prompt_eval_count={prompt_eval_count} 正好是被切之後的長度 {limit}"'
   # 邊界寫成「不大於」→ 剛好填滿 context 被放行成完整。那個輸入依
   # D-027 第三節的夾縫（687 → 346）一定被切，所以看到它就代表規則變了，
   # 放行等於把「上游變了」講成「prompt 完整」。
@@ -324,6 +421,21 @@ fi
 CAUGHT=0
 MISSED=()
 
+# 每一條都必須**恰好**兩個 `|`（label|old|new）。多寫一個就會被切錯，而且
+# 症狀是**靜默**的：`old` 被截短、`new` 從 `|` 開始，植入的是一段壞掉的
+# 程式碼 —— 測試當然會失敗，於是它被算進「抓到」，但它守不住任何判準。
+# 這一條真的抓到過一條：目標行裡的 `||` 被當成了分隔符。
+BADFIELDS=""
+for m in "${MUTANTS[@]}"; do
+  pipes="${m//[^|]/}"                      # 只留 `|`，數它有幾個
+  [[ ${#pipes} -eq 2 ]] || BADFIELDS+="  ${m%%|*}"$'\n'
+done
+if [[ -n "$BADFIELDS" ]]; then
+  fail "突變清單有條目的 \`|\` 不是剛好兩個 —— 欄位會被切錯，植入的是壞掉的程式碼："
+  printf '%s' "$BADFIELDS"
+  exit 3
+fi
+
 for entry in "${MUTANTS[@]}"; do
   label="${entry%%|*}"
   rest="${entry#*|}"
@@ -341,6 +453,12 @@ for entry in "${MUTANTS[@]}"; do
       NOT_UNIQUE:*)
         fail "植入失敗：$label —— 目標字串出現 ${INJECT_MSG#NOT_UNIQUE:} 次（必須唯一）"
         fail "  原始碼改了，這條突變對不上（要更新這支腳本，不是更新原始碼）" ;;
+      NO_OP)
+        fail "植入失敗：$label —— 取代**沒有改變語意**，這條突變殺不掉任何斷言"
+        fail "  這不是「很弱的突變」，是沒有突變。掃描會把它算進「抓到」，但它是空的" ;;
+      BROKEN_CODE:*)
+        fail "植入失敗：$label —— 植入之後**根本不是合法程式**（${INJECT_MSG#BROKEN_CODE:}）"
+        fail "  測試會變紅，但那是跑不起來，不是判準守住了。原始碼沒問題，是這條突變寫壞了" ;;
       *)
         fail "植入失敗：$label（$INJECT_MSG）" ;;
     esac

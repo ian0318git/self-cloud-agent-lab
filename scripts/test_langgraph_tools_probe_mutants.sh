@@ -28,6 +28,15 @@ TEST="$SCRIPT_DIR/test_langgraph_tools_probe.py"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# **不要寫 .pyc。** 突變是用字串取代植入的，而 CPython 對 .pyc 的有效性
+# 檢查只比對「原始檔的 mtime（**秒**）與大小」。兩條連續的突變若長度相同
+# 又落在同一秒內，第二次寫入就會命中第一次留下的 .pyc —— 那個突變**根本
+# 沒有被執行**，測試當然通過，而突變台把它報成「抓到」。
+# 實測：`return 1` → `return 2` 這種同長度取代，在同一秒內被完全忽略。
+# 一個會謊報「抓到」的突變台是 fail-open —— 比沒有突變台更糟，因為它讓
+# 「全部抓到」這句話變成假的。
+export PYTHONDONTWRITEBYTECODE=1
+
 # ── 對照組先跑：不動任何東西，測試必須通過 ──────────────
 # 沒有這一步，下面「每個突變都被抓到」可能只是因為測試**永遠失敗**。
 info "對照組（無突變）"
@@ -57,6 +66,21 @@ MUTANTS=(
 caught=0
 missed=()
 
+# 每一條都必須**恰好**兩個 `|`（label|old|new）。多寫一個就會被切錯，而且
+# 症狀是**靜默**的：`old` 被截短、`new` 從 `|` 開始，植入的是一段壞掉的
+# 程式碼 —— 測試當然會失敗，於是它被算進「抓到」，但它守不住任何判準。
+# 這一條真的抓到過一條：目標行裡的 `||` 被當成了分隔符。
+BADFIELDS=""
+for m in "${MUTANTS[@]}"; do
+  pipes="${m//[^|]/}"                      # 只留 `|`，數它有幾個
+  [[ ${#pipes} -eq 2 ]] || BADFIELDS+="  ${m%%|*}"$'\n'
+done
+if [[ -n "$BADFIELDS" ]]; then
+  fail "突變清單有條目的 \`|\` 不是剛好兩個 —— 欄位會被切錯，植入的是壞掉的程式碼："
+  printf '%s' "$BADFIELDS"
+  exit 3
+fi
+
 for entry in "${MUTANTS[@]}"; do
   label="${entry%%|*}"
   rest="${entry#*|}"
@@ -66,20 +90,75 @@ for entry in "${MUTANTS[@]}"; do
   cp "$PROBE" "$WORK/langgraph_tools_probe.py"
   cp "$TEST" "$WORK/test_langgraph_tools_probe.py"
 
-  if ! python3 - "$WORK/langgraph_tools_probe.py" "$old" "$new" <<'PY'
-import io, sys
+  INJECT_MSG="$(python3 - "$WORK/langgraph_tools_probe.py" "$old" "$new" 2>&1 >/dev/null <<'PY'
+import ast, io, os, subprocess, sys
+
 path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 src = io.open(path, encoding="utf-8").read()
-if src.count(old) != 1:
-    sys.exit(1)  # 找不到，或不是唯一 —— 兩種都會讓突變失去意義
-io.open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+n = src.count(old)
+if n != 1:
+    # 「找不到」與「不唯一」要分開講。合併成一句會誤導：目標字串裡多寫了
+    # 一個 `|` 時欄位會被切錯，症狀是**找不到**，但訊息若說「不唯一」，
+    # 就會去翻原始碼找重複，而該改的是清單那一行。
+    print("NOT_FOUND" if n == 0 else "NOT_UNIQUE:%d" % n, file=sys.stderr)
+    sys.exit(1)
+mutated = src.replace(old, new, 1)
+
+# 植入之後還要再過一關，因為「測試變紅」不等於「有斷言守住」。這一關擋的
+# 是**假抓到**，它有兩張臉，而且都不會讓任何一條斷言叫起來：
+#   NO_OP       取代沒有改變語意（`if slack < -0:` 就是 `if slack < 0:`）。
+#               它殺不掉任何東西，卻在報告裡佔一個「抓到」的名額 —— 更糟
+#               的是它讓一份「全部抓到」看起來很完整。`ast.dump` 不比對
+#               註解與空白，所以只改註解的那種也會在這裡現形。
+#   BROKEN_CODE 植入後根本不是合法程式。測試當然會失敗，但那是模組匯入
+#               不了，不是判準被守住。真的混進來過：目標行裡的 `||` 被
+#               當成欄位分隔符，以及雙引號裡的字面 `\n`。
+# 兩者都只說明**這條突變寫壞了**，原始碼沒有問題。
+ext = os.path.splitext(path)[1]
+if ext == ".py":
+    try:
+        before = ast.dump(ast.parse(src))
+        after = ast.dump(ast.parse(mutated))
+    except SyntaxError as e:
+        print("BROKEN_CODE:%s" % e.msg, file=sys.stderr)
+        sys.exit(1)
+    if before == after:
+        print("NO_OP", file=sys.stderr)
+        sys.exit(1)
+elif ext == ".sh":
+    # shell 的等價性在這裡判不了（那要真的比語意），所以只驗語法。
+    # 走 stdin 而不是暫存檔：`bash -n` 的訊息就會是乾淨的 `line N`，
+    # 不必把一個臨時路徑印進錯誤訊息裡。
+    p = subprocess.run(["bash", "-n"], input=mutated,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        last = (p.stderr.strip().splitlines() or ["bash -n 失敗"])[-1]
+        print("BROKEN_CODE:%s" % last, file=sys.stderr)
+        sys.exit(1)
+
+io.open(path, "w", encoding="utf-8").write(mutated)
 PY
-  then
-    fail "植入失敗：$label —— 突變目標在 $PROBE 裡不是唯一字串"
-    fail "  這代表原始碼改了，這條突變已經對不上（要更新這支腳本，不是更新探針）"
+)" && : || {
+    case "$INJECT_MSG" in
+      NOT_FOUND)
+        fail "植入失敗：$label —— 目標字串在 $PROBE 裡**找不到**"
+        fail "  兩個常見原因：(1) 原始碼改了，這條突變對不上（要更新這支腳本）" \
+             "；(2) 目標字串裡有 \`|\`，欄位被切錯了（目標行必須不含 \`|\`）" ;;
+      NOT_UNIQUE:*)
+        fail "植入失敗：$label —— 目標字串在 $PROBE 裡出現 ${INJECT_MSG#NOT_UNIQUE:} 次"
+        fail "  原始碼改了，這條突變對不上（要更新這支腳本，不是更新探針）" ;;
+      NO_OP)
+        fail "植入失敗：$label —— 取代**沒有改變語意**，這條突變殺不掉任何斷言"
+        fail "  這不是「很弱的突變」，是沒有突變。掃描會把它算進「抓到」，但它是空的" ;;
+      BROKEN_CODE:*)
+        fail "植入失敗：$label —— 植入之後**根本不是合法程式**（${INJECT_MSG#BROKEN_CODE:}）"
+        fail "  測試會變紅，但那是跑不起來，不是判準守住了。原始碼沒問題，是這條突變寫壞了" ;;
+      *)
+        fail "植入失敗：$label（$INJECT_MSG）" ;;
+    esac
     missed+=("$label（植入失敗）")
     continue
-  fi
+  }
 
   if python3 "$WORK/test_langgraph_tools_probe.py" >/dev/null 2>&1; then
     fail "漏掉！$label —— 評分器壞成這樣，測試還是通過了"

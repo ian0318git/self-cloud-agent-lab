@@ -279,7 +279,7 @@ bash scripts/up.sh
 | `bash scripts/rag-verify.sh --model qwen2.5:3b` | 同上，指定模型。**建議的跑法**：非思考型模型，三次生成各 41–94 秒，整輪約 2–5 分鐘（四輪 12 個樣本實測，D-018）。模型必須是參數——`.env` 會覆蓋環境變數 |
 | `bash scripts/rag-verify.sh --timeout 900` | 拉長單題時限，給思考型模型用。「太慢」與「連不上」會分開講 —— 兩者要修的東西不同 |
 | `bash scripts/rag-http-verify.sh` | **同樣四項 RAG，改走真正的 HTTP 路徑** —— 建立知識庫、上傳文件、問文件裡的事、問文件裡沒有的事 —— 走 `/api/v1/files` 與 `/api/chat/completions`，而不是應用程式的函式。需要 `.env` 裡有一組 `WEBUI_API_KEY`（而那又需要先打開 **管理員控制台 → 設定 → 驗證 → API 金鑰**）。它補上 `rag-verify.sh` 的盲點，也有自己的盲點：看不到撈回了哪些 chunk。結束碼 `0`/`1`/`2`/`3`（D-019） |
-| `bash scripts/verify-throughput.sh` | **這台機器實際解碼多快** —— 七個條件的矩陣，每個量三次，外加兩組 `num_ctx` 下的 prompt 上限。只有在三次重複彼此一致時才印出基準線；**不一致時 exit `1` 並指出是哪幾個條件在吵**。這就是仍未完成的那次重打（D-031） |
+| `bash scripts/verify-throughput.sh` | **這台機器實際解碼多快** —— 七個條件的矩陣，每個量**七次**（約 35 分鐘），外加兩組 `num_ctx` 下的 prompt 上限。只有在重複彼此一致時才印出基準線；**不一致時 exit `1` 並指出是哪幾個條件在吵**。離散度看的是變異係數而不是全距 —— 全距會隨樣本數變大，七次取樣下舊的「全距 15%」實際上等於 5.55%（D-032）。這就是仍未完成的那次重打（D-031、D-032） |
 | `bash scripts/check-egress.sh` | **資料可能流向哪些外部服務** —— 以資料庫的實際值為準，列出「啟用中」的外部端點 |
 | `bash scripts/check-egress.sh --fix` | 關掉 `openai.enable`，重啟容器，並回讀確認（D-017） |
 | `bash scripts/probe-openai.sh [URL]` | 任何 OpenAI-compatible runtime 的相容性探針。預設指向 Ollama 的 `/v1` |
@@ -320,9 +320,9 @@ bash scripts/up.sh
 | `bash scripts/test_phase3_mutants.sh` | 上面三個評分器真的有在被執行 —— 對它們自己的 23 道判準做突變，每一個都必須被抓到 |
 | `python3 scripts/test_deploy_smoke_probe.py` | 佈署後煙霧測試的四條斷言各自會咬人，包含它存在的理由本身：被 token 上限切斷的生成讀起來像成功 |
 | `bash scripts/test_profile_lifecycle.sh` | 殘留容器的**差集**兩個方向都不能錯 —— 要回報被停用 profile 留下的那個，**且**不能砍掉還在服務的容器 —— 外加空清單守衛與對外連線的四態（D-029） |
-| `bash scripts/verify-throughput.sh` | 七個條件的解碼速率矩陣、**兩組** `num_ctx` 下的截斷上限實測、以及按模型分組的 KV cache 斜率 —— 而且當三次重複彼此不一致時，它**拒絕把任何數字叫做基準線**（D-031）。它的 prefill 欄是刻意標成不可引用的：探針控制不了 prefix cache 的重用，所以它報 306–14,710 t/s，而真實的冷 prefill 約 25 t/s |
-| `bash scripts/test_throughput_probe.py` | 上限公式、截斷判定、「上限會不會隨 `num_predict` 移動」的判定、以及 KV 分組，每一個都會咬人 —— 206 項斷言，不碰 Docker。裡面有一條專案**從來沒觀測過**的 `num_keep`，因為一個在每個已觀測輸入上都等價的化簡，靠觀測是殺不掉的 |
-| `bash scripts/test_throughput_probe_mutants.sh` | 上面四個判定真的被操到 —— 59 條針對自身準則的突變，每一條都必須被抓到 |
+| `bash scripts/verify-throughput.sh` | 七個條件的解碼速率矩陣、**兩組** `num_ctx` 下的截斷上限實測、以及按模型分組的 KV cache 斜率 —— 而且當七次重複彼此不一致時，它**拒絕把任何數字叫做基準線**（D-031、D-032）。它的 prefill 欄是刻意標成不可引用的：探針控制不了 prefix cache 的重用，所以它報 306–14,710 t/s，而真實的冷 prefill 約 25 t/s |
+| `bash scripts/test_throughput_probe.py` | 上限公式、截斷判定、「上限會不會隨 `num_predict` 移動」的判定、以及 KV 分組，每一個都會咬人 —— 247 項斷言，不碰 Docker。裡面有一條專案**從來沒觀測過**的 `num_keep`，因為一個在每個已觀測輸入上都等價的化簡，靠觀測是殺不掉的 |
+| `bash scripts/test_throughput_probe_mutants.sh` | 上面四個判定真的被操到 —— 71 條針對自身準則的突變，每一條都必須被抓到。突變台自己的輸出也是一句斷言，所以它也被檢查：準則不只要被取代**弄壞**，還要壞在**有斷言會叫**的地方 —— 一個 no-op 的取代、被切錯的欄位、或植入後語法就不合法，三者都會讓測試「失敗」，但什麼都沒守住（D-032） |
 
 ---
 
@@ -948,8 +948,18 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
      而那個解釋也還沒被檢驗。
 
    這一輪同時做出了儀器：`scripts/throughput_probe.py`（純判定函式 + 量測）、
-   它的 206 項離線斷言、一份 59 條突變的突變台，以及 `verify-throughput.sh`。
+   它的 247 項離線斷言、一份 71 條突變的突變台，以及 `verify-throughput.sh`。
    儀器裡抓到並修掉八個缺陷；值得知道的列在下面的 Evidence 表。
+
+   **接著換了估計量（D-032）：七次取樣，看變異係數。** 下一輪每個條件取
+   **七個**樣本，離散度判定改成變異係數（樣本標準差 / 中位數，`<= 8.9%`），
+   不再用全距。這是**估計量的修正，不是把標準放寬**：全距是樣本數的函數
+   （`E[全距] = d₂(n)·σ`，`d₂(3) = 1.6926`、`d₂(7) = 2.7044`），所以七次
+   取樣還沿用舊的「全距 15%」，實際上是 `CV ≤ 5.55%` —— 比 D-031 失敗的那道
+   門檻**嚴了 59%**，而那是數出來的，不是機器量出來的。`8.9%` 是舊門檻的
+   換算值（`15 / 1.6926 = 8.86`）。個別資料集可能因此過、也可能因此不過，
+   而且**這一換不保證下一輪會過** —— 七個樣本還是散，那就是機器真的這麼吵，
+   那也是一個結果。
 
 4. **[已量測] `recursion_limit=5` 確實太緊 —— 而且「為什麼」的猜測是對的。**
    2026-09-21 實測（D-030），指令為 `bash scripts/verify-phase3-runtime.sh`。

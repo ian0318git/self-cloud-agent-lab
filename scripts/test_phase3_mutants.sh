@@ -54,6 +54,15 @@ done
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# **不要寫 .pyc。** 突變是用字串取代植入的，而 CPython 對 .pyc 的有效性
+# 檢查只比對「原始檔的 mtime（**秒**）與大小」。兩條連續的突變若長度相同
+# 又落在同一秒內，第二次寫入就會命中第一次留下的 .pyc —— 那個突變**根本
+# 沒有被執行**，測試當然通過，而突變台把它報成「抓到」。
+# 實測：`return 1` → `return 2` 這種同長度取代，在同一秒內被完全忽略。
+# 一個會謊報「抓到」的突變台是 fail-open —— 比沒有突變台更糟，因為它讓
+# 「全部抓到」這句話變成假的。
+export PYTHONDONTWRITEBYTECODE=1
+
 ok()   { printf '  ✓ %s\n' "$*"; }
 info() { printf '\n── %s ──\n' "$*"; }
 fail() { printf '  ✗ %s\n' "$*"; }
@@ -66,7 +75,7 @@ restore() {
 }
 
 cat > "$WORK/inject.py" <<'PY'
-import io, sys
+import ast, io, os, subprocess, sys
 
 path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 src = io.open(path, encoding="utf-8").read()
@@ -77,7 +86,44 @@ if n != 1:
     # 「不是唯一」，於是會去翻原始碼找重複，而該改的是清單那一行。
     print("NOT_FOUND" if n == 0 else "NOT_UNIQUE:%d" % n, file=sys.stderr)
     sys.exit(1)
-io.open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+mutated = src.replace(old, new, 1)
+
+# 植入之後還要再過一關，因為「測試變紅」不等於「有斷言守住」。這一關擋的
+# 是**假抓到**，它有兩張臉，而且都不會讓任何一條斷言叫起來：
+#   NO_OP       取代沒有改變語意（`if slack < -0:` 就是 `if slack < 0:`）。
+#               它殺不掉任何東西，卻在報告裡佔一個「抓到」的名額 —— 更糟
+#               的是它讓一份「全部抓到」看起來很完整。`ast.dump` 不比對
+#               註解與空白，所以只改註解的那種也會在這裡現形。這一條真的
+#               抓到過一條：`slack < -0` 混在清單裡，只因為它跟前一條同
+#               大小、同一秒寫入，重用到了前一條的位元碼才「被殺掉」。
+#   BROKEN_CODE 植入後根本不是合法程式。測試當然會失敗，但那是檔案跑不
+#               起來，不是判準被守住。真的混進來過：目標行裡的 `||` 被
+#               當成欄位分隔符，以及雙引號裡的字面 `\n`。
+# 兩者都只說明**這條突變寫壞了**，原始碼沒有問題。
+ext = os.path.splitext(path)[1]
+if ext == ".py":
+    try:
+        before = ast.dump(ast.parse(src))
+        after = ast.dump(ast.parse(mutated))
+    except SyntaxError as e:
+        print("BROKEN_CODE:%s" % e.msg, file=sys.stderr)
+        sys.exit(1)
+    if before == after:
+        print("NO_OP", file=sys.stderr)
+        sys.exit(1)
+elif ext == ".sh":
+    # shell 的等價性在這裡判不了（那要真的比語意），所以只驗語法 ——
+    # 但光是這一半就攔下了本輪那條 `||` 被當成分隔符的突變。
+    # 走 stdin 而不是暫存檔：`bash -n` 的訊息就會是乾淨的 `line N`，
+    # 不必把一個臨時路徑印進錯誤訊息裡。
+    p = subprocess.run(["bash", "-n"], input=mutated,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        last = (p.stderr.strip().splitlines() or ["bash -n 失敗"])[-1]
+        print("BROKEN_CODE:%s" % last, file=sys.stderr)
+        sys.exit(1)
+
+io.open(path, "w", encoding="utf-8").write(mutated)
 PY
 
 echo "======================================================================"
@@ -110,8 +156,17 @@ MUTANTS=(
   "py:item4：headroom 常數改成 0|RECURSION_LIMIT_HEADROOM = 1|RECURSION_LIMIT_HEADROOM = 0"
   # 零餘裕被講成不夠 → 會叫使用者把一個跑得完的 limit 調大（假失敗，D-016）
   "py:item4：tight 被併進 blocks（slack==0 判成不夠）|    if slack < 0:|    if slack <= 0:"
-  # 反方向：不夠被講成零餘裕 → 一個跑不完的計畫被說成跑得完（fail-open）
-  "py:item4：blocks 被併進 tight（slack<0 判成零餘裕）|    if slack < 0:|    if slack < -0:"
+  # 反方向：blocks 這一支不再擋 → 負餘裕落到最後的 ample，一個跑不完的計畫
+  # 被說成「有 -3 步餘裕」（fail-open）。
+  #
+  # **這裡原本寫的是 `if slack < -0:`，那是個 no-op** —— `-0` 就是 `0`，所以
+  # 植入的程式碼與原版語意完全相同，這條突變**永遠殺不掉**。它多年來一直
+  # 報「抓到」，靠的是突變台自己的缺陷：上一條突變（`slack <= 0`）的檔案
+  # 長度與這一條**一模一樣**，同一秒內寫入時 CPython 會沿用上一條留下的
+  # .pyc，於是跑的是上一條（會失敗）的程式碼。那隻 .pyc 關掉之後（見
+  # `PYTHONDONTWRITEBYTECODE`）真相才出來：漏掉 1 條。
+  # 教訓：**no-op 突變不是「很弱的突變」，是沒有突變。**
+  "py:item4：blocks 不再擋（負餘裕被講成有餘裕）|    if slack < 0:|    if False:"
   # 負數不再拋 → 靜默回一個看起來合理的值
   "py:item4：super_steps 負數不再拋|    if super_steps < 0:|    if False:"
   # 「工作全部做完卻被擋」的判定有**兩個**條件（已完成數 == 節點數，**且**沒有下一步）。
@@ -179,12 +234,33 @@ MUTANTS=(
   "sh:item5：avail>=new 改成 >（剛好放得下被判不夠）|  if (( avail_mb >= new_mb )); then|  if (( avail_mb > new_mb )); then"
   # reclaim 的邊界：改成 > 會讓「回收量剛好夠」被講成沒救
   "sh:item5：reclaim>=new 改成 >（回收剛好夠被判 blocked）|  if (( reclaim_mb >= new_mb )); then|  if (( reclaim_mb > new_mb )); then"
-  # 非數字被當成 0 → 「讀不到」變成「放得下」
-  "sh:item5：非數字不再判 unknown|    [[ \"\$n\" =~ ^[0-9]+\$ ]] |||    [[ -n \"\$n\" ]] ||"
+  # 非數字被當成 0 → 「讀不到」變成「放得下」。
+  #
+  # **目標只取正則那一段，不碰後面的 `|| { ... }`** —— 那一行裡有 `|`
+  # （`echo "unknown|數值無法解析"`），整段寫進來會被突變清單的分隔符切錯，
+  # 植入的變成一行的開頭是 `||` 的壞程式碼。它以前就是這樣「被抓到」的：
+  # 測試不是因為哪條斷言叫了而失敗，是因為整個檔案 `bash -n` 就不過。
+  # 現在清單開頭有守衛會直接擋下這種條目（rc=3），這一條也照規則改寫。
+  "sh:item5：非數字不再判 unknown|[[ \"\$n\" =~ ^[0-9]+\$ ]]|[[ -n \"\$n\" ]]"
 )
 
 CAUGHT=0
 MISSED=()
+
+# 每一條都必須**恰好**兩個 `|`（label|old|new）。多寫一個就會被切錯，而且
+# 症狀是**靜默**的：`old` 被截短、`new` 從 `|` 開始，植入的是一段壞掉的
+# 程式碼 —— 測試當然會失敗，於是它被算進「抓到」，但它守不住任何判準。
+# 這一條真的抓到過一條：目標行裡的 `||` 被當成了分隔符。
+BADFIELDS=""
+for m in "${MUTANTS[@]}"; do
+  pipes="${m//[^|]/}"                      # 只留 `|`，數它有幾個
+  [[ ${#pipes} -eq 2 ]] || BADFIELDS+="  ${m%%|*}"$'\n'
+done
+if [[ -n "$BADFIELDS" ]]; then
+  fail "突變清單有條目的 \`|\` 不是剛好兩個 —— 欄位會被切錯，植入的是壞掉的程式碼："
+  printf '%s' "$BADFIELDS"
+  exit 3
+fi
 
 for entry in "${MUTANTS[@]}"; do
   label="${entry%%|*}"
@@ -216,6 +292,12 @@ for entry in "${MUTANTS[@]}"; do
       NOT_UNIQUE:*)
         fail "植入失敗：$label —— 目標字串在 $(basename "$SRCFILE") 裡出現 ${INJECT_MSG#NOT_UNIQUE:} 次"
         fail "  原始碼改了，這條突變對不上（要更新這支腳本，不是更新原始碼）" ;;
+      NO_OP)
+        fail "植入失敗：$label —— 取代**沒有改變語意**，這條突變殺不掉任何斷言"
+        fail "  這不是「很弱的突變」，是沒有突變。掃描會把它算進「抓到」，但它是空的" ;;
+      BROKEN_CODE:*)
+        fail "植入失敗：$label —— 植入之後**根本不是合法程式**（${INJECT_MSG#BROKEN_CODE:}）"
+        fail "  測試會變紅，但那是跑不起來，不是判準守住了。原始碼沒問題，是這條突變寫壞了" ;;
       *)
         fail "植入失敗：$label（$INJECT_MSG）" ;;
     esac

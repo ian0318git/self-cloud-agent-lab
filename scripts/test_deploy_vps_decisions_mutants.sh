@@ -46,6 +46,15 @@ LIB="$SCRIPT_DIR/lib.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# **不要寫 .pyc。** 突變是用字串取代植入的，而 CPython 對 .pyc 的有效性
+# 檢查只比對「原始檔的 mtime（**秒**）與大小」。兩條連續的突變若長度相同
+# 又落在同一秒內，第二次寫入就會命中第一次留下的 .pyc —— 那個突變**根本
+# 沒有被執行**，測試當然通過，而突變台把它報成「抓到」。
+# 實測：`return 1` → `return 2` 這種同長度取代，在同一秒內被完全忽略。
+# 一個會謊報「抓到」的突變台是 fail-open —— 比沒有突變台更糟，因為它讓
+# 「全部抓到」這句話變成假的。
+export PYTHONDONTWRITEBYTECODE=1
+
 # 測試自己會去 source（bash）或 import（python）同目錄的受測檔案，所以
 # 每一份都要在 $WORK。lib.sh 不突變 —— 只放在那裡讓決定模組的測試找得到
 # （它的 PROJECT_ROOT 在那個測試裡用不到，沒有任何函式會讀它）。
@@ -127,7 +136,7 @@ MUTANTS=(
   # 而處理方式是修突變、不是修測試（與 test_mem0_add_cost_probe_mutants.sh
   # 記的那條同一個形狀：倖存的突變要先懷疑突變本身）。
   # 改成真的實作那個 bug：不確定的（非雲廠商）也當成 1:1 NAT 環境。
-  "NAT 判定：不確定的也當成命中|  printf ''|  printf 'unknown'"}
+  "NAT 判定：不確定的也當成命中|  printf ''|  printf 'unknown'"
 
   # ── wide_bind_verdict：綁在萬用位址時的結論 ──
   # **最貴的兩條。** 前者是這次要補的洞（讀不到 ip 被讀成安全），後者是
@@ -194,7 +203,12 @@ MUTANTS=(
   # **把 `think: false` 加回去。** 這是實際踩過的坑：它不會關掉推理，只把
   # 推理從 `thinking` 搬進 `content`，於是「content 非空」可以被推理前言
   # 單獨滿足 —— 一個從頭到尾自言自語、從沒回答的模型也會過關。
-  "py:煙霧：把 think=false 加回去（推理會搬進 content）|        \"stream\": False,|        \"stream\": False,\n        \"think\": False,"
+  # 多行要用 `$'...'` —— 雙引號**不展開 `\n`**，植入的會是一個字面的
+  # 反斜線加 n，症狀是 SyntaxError：測試確實失敗了，但失敗的原因是模組
+  # 匯入不了，不是哪一條斷言叫了。同一個家族（no-op／壞掉的植入）在
+  # `test_phase3_mutants.sh` 的 `< -0` 與 `test_throughput_probe_mutants.sh`
+  # 的 `"message": (` 各出現過一次。
+  $'py:煙霧：把 think=false 加回去（推理會搬進 content）|        "stream": False,|        "stream": False,\n        "think": False,'
   # 預設預算被調回一個註定不夠的值：實測推理要 152 個 token，32 會全部
   # 被吃掉，然後 done_reason=length 被讀成「上游變了」—— 假失敗（D-016）。
   #
@@ -251,7 +265,7 @@ missed=()
 # `if ! VAR="$(cmd <<'PY' ... PY)"` 那種組合（實際踩過，錯誤訊息只說
 # 「syntax error near unexpected token `then'」，不會告訴你是 heredoc）。
 cat > "$WORK/inject.py" <<'PY'
-import io, sys
+import ast, io, os, subprocess, sys
 
 path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 src = io.open(path, encoding="utf-8").read()
@@ -262,8 +276,57 @@ if n != 1:
     # 「不是唯一」，於是會去翻原始碼找重複，而該改的是清單那一行。
     print("NOT_FOUND" if n == 0 else "NOT_UNIQUE:%d" % n, file=sys.stderr)
     sys.exit(1)
-io.open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+mutated = src.replace(old, new, 1)
+
+# 植入之後還要再過一關，因為「測試變紅」不等於「有斷言守住」。這一關擋的
+# 是**假抓到**，它有兩張臉，而且都不會讓任何一條斷言叫起來：
+#   NO_OP       取代沒有改變語意（`if slack < -0:` 就是 `if slack < 0:`）。
+#               它殺不掉任何東西，卻在報告裡佔一個「抓到」的名額 —— 更糟
+#               的是它讓一份「全部抓到」看起來很完整。`ast.dump` 不比對
+#               註解與空白，所以只改註解的那種也會在這裡現形。
+#   BROKEN_CODE 植入後根本不是合法程式。測試當然會失敗，但那是模組匯入
+#               不了，不是判準被守住。真的混進來過：目標行裡的 `||` 被
+#               當成欄位分隔符，以及雙引號裡的字面 `\n`。
+# 兩者都只說明**這條突變寫壞了**，原始碼沒有問題。
+ext = os.path.splitext(path)[1]
+if ext == ".py":
+    try:
+        before = ast.dump(ast.parse(src))
+        after = ast.dump(ast.parse(mutated))
+    except SyntaxError as e:
+        print("BROKEN_CODE:%s" % e.msg, file=sys.stderr)
+        sys.exit(1)
+    if before == after:
+        print("NO_OP", file=sys.stderr)
+        sys.exit(1)
+elif ext == ".sh":
+    # shell 的等價性在這裡判不了（那要真的比語意），所以只驗語法。
+    # 走 stdin 而不是暫存檔：`bash -n` 的訊息就會是乾淨的 `line N`，
+    # 不必把一個臨時路徑印進錯誤訊息裡。
+    p = subprocess.run(["bash", "-n"], input=mutated,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        last = (p.stderr.strip().splitlines() or ["bash -n 失敗"])[-1]
+        print("BROKEN_CODE:%s" % last, file=sys.stderr)
+        sys.exit(1)
+
+io.open(path, "w", encoding="utf-8").write(mutated)
 PY
+
+# 每一條都必須**恰好**兩個 `|`（label|old|new）。多寫一個就會被切錯，而且
+# 症狀是**靜默**的：`old` 被截短、`new` 從 `|` 開始，植入的是一段壞掉的
+# 程式碼 —— 測試當然會失敗，於是它被算進「抓到」，但它守不住任何判準。
+# 這一條真的抓到過一條：目標行裡的 `||` 被當成了分隔符。
+BADFIELDS=""
+for m in "${MUTANTS[@]}"; do
+  pipes="${m//[^|]/}"                      # 只留 `|`，數它有幾個
+  [[ ${#pipes} -eq 2 ]] || BADFIELDS+="  ${m%%|*}"$'\n'
+done
+if [[ -n "$BADFIELDS" ]]; then
+  fail "突變清單有條目的 \`|\` 不是剛好兩個 —— 欄位會被切錯，植入的是壞掉的程式碼："
+  printf '%s' "$BADFIELDS"
+  exit 3
+fi
 
 for entry in "${MUTANTS[@]}"; do
   label="${entry%%|*}"
@@ -302,6 +365,12 @@ for entry in "${MUTANTS[@]}"; do
       NOT_UNIQUE:*)
         fail "植入失敗：$label —— 目標字串在 $SRCFILE 裡出現 ${INJECT_MSG#NOT_UNIQUE:} 次"
         fail "  原始碼改了，這條突變對不上（要更新這支腳本，不是更新原始碼）" ;;
+      NO_OP)
+        fail "植入失敗：$label —— 取代**沒有改變語意**，這條突變殺不掉任何斷言"
+        fail "  這不是「很弱的突變」，是沒有突變。掃描會把它算進「抓到」，但它是空的" ;;
+      BROKEN_CODE:*)
+        fail "植入失敗：$label —— 植入之後**根本不是合法程式**（${INJECT_MSG#BROKEN_CODE:}）"
+        fail "  測試會變紅，但那是跑不起來，不是判準守住了。原始碼沒問題，是這條突變寫壞了" ;;
       *)
         fail "植入失敗：$label（$INJECT_MSG）" ;;
     esac

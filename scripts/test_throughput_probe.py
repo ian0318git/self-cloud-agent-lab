@@ -20,14 +20,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from throughput_probe import (  # noqa: E402
     COLD_LOAD_THRESHOLD_NS,
+    D2_N3,
+    D2_N7,
     DURATION_IDENTITY_TOLERANCE_S,
     EXIT_BROKEN,
     EXIT_FAIL,
     EXIT_UNMEASURED,
-    STABILITY_TOLERANCE_PCT,
+    MIN_SAMPLES_FOR_STABILITY,
+    RANGE_TOLERANCE_PCT,
+    STABILITY_CV_PCT,
     _all_ok,
     baseline_verdict,
     cap_respected_verdict,
+    cv_is_stable,
     long_generation_overall,
     long_generation_verdict,
     classify_failure,
@@ -181,26 +186,68 @@ check("load_duration 缺 → unreadable（不知道冷不冷，就不敢用）",
 check("eval_count 是字串 → unreadable", sample_usable({"eval_count": "10", "eval_duration": 10**9, "load_duration": 0})["reason"], "unreadable")
 print(f"  {COUNT - before} 項")
 
-# ══ summarize：穩定度 ═══════════════════════════════════════════════════════
+# ══ summarize：穩定度（判定看 CV，全距只是印出來） ══════════════════════════
 print("summarize")
 before = COUNT
 s = summarize([6.71, 6.76, 6.72])
 check_close("中位數取中間那個", s["median"], 6.72)
 check("三個樣本 n=3", s["n"], 3)
-check("1.5% 離散 → stable", s["stability"], "stable")
-# 門檻是 15%，兩側都要有案例。分母是**中位數**，所以對稱的 92.5/107.5
-# 才是剛好 15%：(107.5−92.5)/100 = 0.15。
-check_close("剛好 15% 離散（對稱於中位數 100）", summarize([92.5, 107.5])["spread_pct"], 15.0, 0.05)
-check("剛好 15% → stable（門檻含）", summarize([92.5, 107.5])["stability"], "stable")
-check("15.11% → noisy（跨過門檻就要變）", summarize([92.4, 107.5])["stability"], "noisy")
-check_close("離散度用中位數當分母，不是最大值", summarize([100.0, 115.0])["spread_pct"], 13.95, 0.05)
-check("門檻常數是 15", STABILITY_TOLERANCE_PCT, 15.0)
+# n < MIN_SAMPLES_FOR_STABILITY → unknown。**不是 stable。**
+# 這一條是 2026-09-22 改的：原本 1 個樣本時全距是 0.0，於是 `--quick`
+# 會讓每個條件都「穩定」，一整輪基準線就從一次取樣生出來了。
+check("3 個樣本 → unknown（樣本不足，不是通過）", s["stability"], "unknown")
+check("樣本不足時 cv_pct 是 None，不是 0", s["cv_pct"], None)
+check("樣本不足的訊息要講「不判定」", "不判定" in s["message"], True)
+
+# 全距仍然算得出來、仍然印 —— 只是不參與判定。分母是**中位數**。
+check_close("剛好 15% 全距（對稱於中位數 100）", summarize([92.5, 107.5])["spread_pct"], 15.0, 0.05)
+check_close("全距用中位數當分母，不是最大值", summarize([100.0, 115.0])["spread_pct"], 13.95, 0.05)
 check("空集合 → n=0", summarize([])["n"], 0)
 check("空集合 → 中位數 None（不是 0）", summarize([])["median"], None)
 check("空集合 → stability unknown", summarize([])["stability"], "unknown")
 check("全部是 None → n=0", summarize([None, None])["n"], 0)
 check("負速率被濾掉", summarize([-1.0, 5.0])["n"], 1)
-check("單一樣本 → 離散 0", summarize([5.0])["spread_pct"], 0.0)
+
+# ── 門檻的來歷：換估計量，不是放寬門檻 ────────────────────────────────────
+check("舊門檻保留為常數（報表仍然印全距）", RANGE_TOLERANCE_PCT, 15.0)
+check("CV 門檻 = 舊門檻 / d₂(3)", STABILITY_CV_PCT, round(RANGE_TOLERANCE_PCT / D2_N3, 1))
+check("d₂(3) 是常態理論值", D2_N3, 1.6926)
+# 這一條是整個改動的理由。留著它，下次有人想把門檻「調回 15」時會先看到
+# 15 在 n=7 下等效的 CV 是 5.55 —— 那不是原來的門檻，是嚴格 59% 的門檻。
+check("15% 全距在 n=7 下等效的 CV", round(RANGE_TOLERANCE_PCT / D2_N7, 2), 5.55)
+check("所以 CV 門檻比它寬，這正是把 n=3 的嚴格度還原", STABILITY_CV_PCT > RANGE_TOLERANCE_PCT / D2_N7, True)
+
+# ── n 要夠才判定 ──────────────────────────────────────────────────────────
+check("MIN_SAMPLES_FOR_STABILITY 是 5", MIN_SAMPLES_FOR_STABILITY, 5)
+check("4 個樣本仍然 unknown", summarize([6.7, 6.8, 6.6, 6.75])["stability"], "unknown")
+check("5 個樣本開始判定", summarize([6.7, 6.8, 6.6, 6.75, 6.72])["stability"], "stable")
+
+# ── 邊界：門檻含，兩側都要有案例 ──────────────────────────────────────────
+# 用 [100−k, 100−k, 100, 100+k, 100+k]：離均差是 ∓k、∓k、0，
+# 變異數 = 4k²/4 = k²，所以 σ = k、CV = k%。k 直接就是 CV。
+check("CV 5%（很穩） → stable", summarize([95, 95, 100, 105, 105])["stability"], "stable")
+check("CV 9%（散） → noisy", summarize([91, 91, 100, 109, 109])["stability"], "noisy")
+check_close("CV 8.89 的資料集", summarize([91.11, 91.11, 100, 108.89, 108.89])["cv_pct"], 8.89, 0.01)
+check("CV 8.89 → stable（門檻下方一點）", summarize([91.11, 91.11, 100, 108.89, 108.89])["stability"], "stable")
+check("CV 8.91 → noisy（門檻上方一點）", summarize([91.09, 91.09, 100, 108.91, 108.91])["stability"], "noisy")
+# **「門檻含」只能這樣測。** 8.9 在二進位浮點裡不精確，所以「CV 剛好等於
+# 門檻」的資料集造不出來 —— `100 ± 8.9` 的離均差算出來是 8.900000000000006。
+# 直接拿常數比才測得到 `<=` 與 `<` 的差別，而那就是「門檻含不含」。
+check("門檻含：CV 剛好等於門檻 → 過", cv_is_stable(STABILITY_CV_PCT), True)
+check("門檻不含：差一點點就下去", cv_is_stable(STABILITY_CV_PCT + 0.01), False)
+check("CV 0 → 過（完全一致）", cv_is_stable(0.0), True)
+check("noisy 的訊息要同時講 CV 與全距", "CV" in summarize([91, 91, 100, 109, 109])["message"] and "全距" in summarize([91, 91, 100, 109, 109])["message"], True)
+
+# ── 這一組是「換估計量」的證據，也是它唯一會被誤讀的地方 ──────────────────
+# n=7、全距 20%、CV 6.56% → **stable**。在舊規則（全距 ≤15%）下它會是
+# noisy。這不是放寬：常態下 n=7 的全距期望值本來就是 2.70σ，20% 的全距
+# 完全對得起 6.56% 的 σ。**單一資料集會雙向翻轉，校準的目標是「同一台
+# 機器、同一個真實 σ，被擋下的機率不變」，不是「同一筆資料得到同一個
+# 判定」。** 沒有這一條，把判定改回全距的突變不會被抓到。
+_s = summarize([90, 95, 98, 100, 102, 105, 110])
+check_close("n=7 全距 20% 的 CV", _s["cv_pct"], 6.56, 0.01)
+check("n=7、全距 20% → stable（CV 才是被判定的那個）", _s["stability"], "stable")
+check("同一筆資料的全距仍然是 20%", _s["spread_pct"], 20.0)
 print(f"  {COUNT - before} 項")
 
 # ══ dependence_verdict：速率隨什麼變 ════════════════════════════════════════
@@ -233,12 +280,28 @@ check("只有一個條件 → single_condition（不能當基準線）",
       baseline_verdict([cond(6.7)])["verdict"], "single_condition")
 check("single_condition 要說出 D-014", "D-014" in baseline_verdict([cond(6.7)])["message"], True)
 check("兩個條件 → usable", baseline_verdict([cond(6.7), cond(6.5)])["verdict"], "usable")
-check("有 noisy 條件 → noisy", baseline_verdict([cond(6.7), cond(6.5, "noisy")])["verdict"], "noisy")
+check("有 noisy 條件 → unstable", baseline_verdict([cond(6.7), cond(6.5, "noisy")])["verdict"], "unstable")
+# **允許清單**：不是 stable 的一律擋。這一條原本是封鎖清單（只有 noisy
+# 才擋），所以 `unknown` 會一路走到「可以當基準線」—— 樣本不足的條件就是
+# 從那個洞過去的。
+check("有 unknown 條件 → unstable（不是放行）",
+      baseline_verdict([cond(6.7), cond(6.5, "unknown")])["verdict"], "unstable")
+check("unstable 的訊息要指出是哪幾個條件",
+      "qwen" in baseline_verdict([{**cond(6.7), "label": "qwen3:4b"}, {**cond(6.5, "noisy"), "label": "qwen2.5:3b"}])["message"], True)
+check("兩種壞法要分開講", "樣本數不足" in baseline_verdict([cond(6.7, "unknown"), cond(6.5, "noisy")])["message"], True)
 check("完全沒有速率 → unknown", baseline_verdict([])["verdict"], "unknown")
 check("速率是 None 不算數（等同沒有）", baseline_verdict([cond(None), cond(None)])["verdict"], "unknown")
 check("速率是 0 不算數", baseline_verdict([cond(0), cond(0)])["verdict"], "unknown")
 check("measured_conditions 數得對", baseline_verdict([cond(1.0), cond(2.0), cond(None)])["measured_conditions"], 2)
 check("門檻可以調高", baseline_verdict([cond(1.0), cond(2.0)], min_conditions=3)["verdict"], "single_condition")
+# `--quick`：從設計上就沒建立基準線。回一個**獨立**的 verdict，不回
+# unstable —— 那一輪沒有不穩，它只是每條件取樣一次。
+check("attempted=False → not_attempted",
+      baseline_verdict([cond(6.7), cond(6.5)], attempted=False)["verdict"], "not_attempted")
+check("not_attempted 不是 unstable", baseline_verdict([cond(6.7, "noisy")], attempted=False)["verdict"] != "unstable", True)
+check("not_attempted 的訊息要講清楚沒嘗試",
+      "沒有嘗試" in baseline_verdict([cond(6.7)], attempted=False)["message"], True)
+check("attempted=True 是預設", baseline_verdict([cond(6.7), cond(6.5)])["verdict"], "usable")
 print(f"  {COUNT - before} 項")
 
 # ══ kv_slope_verdict：用 /api/ps 的 size 差求 KV 成本 ═══════════════════════
@@ -606,7 +669,7 @@ def good_out():
                     "rate": 6.7,
                     "stability": "stable",
                     "cap": {"verdict": "respected"},
-                    "usable_samples": 3,
+                    "usable_samples": 7,
                     "samples": [],
                 },
                 {
@@ -614,7 +677,7 @@ def good_out():
                     "rate": 4.1,
                     "stability": "stable",
                     "cap": {"verdict": "respected"},
-                    "usable_samples": 3,
+                    "usable_samples": 7,
                     "samples": [],
                 },
             ],
@@ -658,6 +721,64 @@ check("截斷判定是 unexpected → 也不可以當基準線", _all_ok(_tr3), 
 _tr4 = good_out()
 _tr4["conditions"][0]["truncation"] = {"verdict": "unknown"}
 check("截斷判定是 unknown → 也不可以當基準線（沒量到不是沒被切）", _all_ok(_tr4), False)
+
+# **穩定度閘門。** 同一種缺陷的第三處：原本寫的是封鎖清單（`== "noisy"`
+# 才擋），所以 `unknown`（樣本數不足）會直接放行 —— 一次取樣就能生出一整輪
+# 基準線。
+#
+# **這道閘門的權威在 `baseline_verdict`，不在 `_all_ok`。** `_all_ok` 曾經
+# 也有一份同樣的允許清單，而它是**等效的**：函式最後把判定交給
+# `baseline_verdict(...) == "usable"`，那份清單已經在那裡，所以 `_all_ok`
+# 那一份改不動任何結果（突變台把 `!= "stable"` 換回 `== "noisy"`，216 組
+# 輸入一個都沒變）。冗餘的那一份已經刪掉；下面這幾條因此**指名**驗判定，
+# 而不是只驗一個 `_all_ok(...) is False` —— 那個 False 有太多別的原因
+# 可以給（D-024 第八節：理由不對的斷言等於沒有斷言）。
+_st = good_out()
+_st["conditions"][0]["stability"] = "unknown"
+check("樣本數不足（unknown）→ 不可以當基準線", _all_ok(_st), False)
+check("  └ 擋下它的理由是判定本身，不是別的閘門順手擋的",
+      baseline_verdict(_st["conditions"])["verdict"], "unstable")
+_st2 = good_out()
+_st2["conditions"][0]["stability"] = "noisy"
+check("散射（noisy）→ 不可以當基準線", _all_ok(_st2), False)
+check("  └ 擋下它的理由是判定本身", baseline_verdict(_st2["conditions"])["verdict"], "unstable")
+check("對照組：兩個條件都 stable → 仍然可以當基準線", _all_ok(good_out()), True)
+
+# 「樣本不夠」與「樣本太散」要叫下一輪的人做**不同**的事（回去補樣本 vs
+# 去看機器），所以訊息必須分得出來，而且都要點名是哪個條件。只驗「兩者都
+# 被擋下」會讓同一個 verdict 值吃掉兩種診斷 —— 那正是 D-026 第五節。
+_vu = baseline_verdict(_st["conditions"])["message"]
+_vn = baseline_verdict(_st2["conditions"])["message"]
+check("樣本不足與散射的訊息不同", _vu != _vn, True)
+check("樣本不足的訊息講出樣本數下限", str(MIN_SAMPLES_FOR_STABILITY) in _vu, True)
+check("樣本不足的訊息點名是哪個條件", _st["conditions"][0]["label"] in _vu, True)
+check("散射的訊息講出 CV 門檻", f"{STABILITY_CV_PCT:.1f}" in _vn, True)
+check("散射的訊息點名是哪個條件", _st2["conditions"][0]["label"] in _vn, True)
+
+# `--quick` 沒有嘗試建立基準線 → 不可以當基準線，但**也不是失敗**。
+# 呼叫端據此回 exit 2（量不到）而不是 1（準則不成立）。
+_qk = good_out()
+_qk["baseline_attempted"] = False
+check("--quick（每條件一次取樣）→ 不可以當基準線", _all_ok(_qk), False)
+check("--quick 的 baseline verdict 是 not_attempted",
+      baseline_verdict(_qk["conditions"], attempted=_qk["baseline_attempted"])["verdict"], "not_attempted")
+
+# `_all_ok` 的結尾是**委派**：判定必須**恰好**是 `usable`。委派寫成
+# `!= "unstable"` 之類的否定式就是 fail-open，而漏掉的每一個判定值都是一個
+# 放行的洞 —— `not_attempted`（上面那條）、`single_condition`、`unknown`。
+# 下面兩條把後兩個也釘住：**被擋下的理由各自不同**才證明是允許清單，
+# 而不是碰巧被某一條擋住。
+_one = good_out()
+_one["conditions"] = _one["conditions"][:1]
+check("只有一個條件 → 不可以當基準線", _all_ok(_one), False)
+check("  └ 理由是 single_condition（D-014），不是別的",
+      baseline_verdict(_one["conditions"])["verdict"], "single_condition")
+_zero = good_out()
+for c in _zero["conditions"]:
+    c["rate"] = 0.0
+check("速率全是 0（量不到）→ 不可以當基準線", _all_ok(_zero), False)
+check("  └ 理由是 unknown，不是 stable 也不是 unstable",
+      baseline_verdict(_zero["conditions"])["verdict"], "unknown")
 
 # 中斷過就不能下結論 —— 就算中斷前量到的每一個條件都漂亮。
 # 這裡刻意沿用那份 good_out()：兩者的**唯一**差別就是中斷。
