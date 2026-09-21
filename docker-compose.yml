@@ -36,6 +36,25 @@ services:
       # 機器夠大時設 -1 可讓模型常駐，省下每次對話的重載時間。
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
 
+      # 推論的 context 長度（token）。這是**伺服器端的預設值**，也是
+      # mem0 唯一吃得到的旋鈕 —— 它的 OllamaLLM 從頭到尾不送 num_ctx
+      # （llms/ollama.py:129-134 只送 temperature／num_predict／top_p），
+      # 所以 Open WebUI 那個「每則對話的 num_ctx 參數」到不了抽取呼叫。
+      #
+      # 預設值刻意留 4096（= ollama 自己的預設），所以這一行對既有環境
+      # 是 no-op；要開大請改 .env 的 OLLAMA_CONTEXT_LENGTH。
+      #
+      # 為什麼要開大：mem0 的 ADDITIVE_EXTRACTION_PROMPT 實測 8,052 與
+      # 8,100 個 token，而截斷規則是 `num_ctx >= prompt tokens + 1`
+      # （D-027）。4096 之下只有 2,050 進得去，**被丟掉的是開頭與中段，
+      # 也就是模型自己的指令** —— 付了一樣的錢，拿到的是讀不到指令的呼叫。
+      # 要完整需要 >= 8101。
+      #
+      # 代價：KV cache 隨 num_ctx 線性成長。**本堆疊沒有實測過這個代價**
+      # （D-022 的 ~36 KiB/token 是從 Qwen2.5-3B 架構推得的估算值），
+      # 所以只想著「數字大就是好」的話，先確認機器的記憶體。
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-4096}
+
     volumes:
       - ollama_storage:/root/.ollama
 

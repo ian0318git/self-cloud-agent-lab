@@ -36,6 +36,9 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # 讀 ollama 日誌的旁證工具。獨立成檔是為了能被單獨測試 —— 見它開頭的說明。
 source "$(dirname "${BASH_SOURCE[0]}")/ollama_log_corroboration.sh"
+# C2／C3 前提檢查用的門檻與判定（ctx_meets_mem0、MEM0_ADD_MIN_CTX）。
+# 放在那個模組裡是為了能離線測試 —— 這一條錯了會製造假失敗。
+source "$(dirname "${BASH_SOURCE[0]}")/deploy-vps-decisions.sh"
 
 # SCRIPT_DIR 必須在 load_env 之前算：load_env 會 cd 到專案根目錄，
 # 之後再解析相對路徑就會指到錯的地方（而錯誤會延後到 docker build 才爆）。
@@ -95,6 +98,57 @@ for NAME in "$MODEL" "$EMBED_MODEL"; do
     exit 2
   fi
 done
+
+# ── 前提：C2／C3 只在「伺服器預設 num_ctx < 8101」時有定義 ──────────
+#
+# C2 問的是「mem0 送出的 prompt 有沒有被**伺服器預設的 num_ctx** 截斷」，C3
+# 接著問「截斷吃哪一端」。兩者都以「預設值小到會截斷」為前提。而
+# `scripts/deploy-vps.sh --num-ctx 8192`（或 .env 的 OLLAMA_CONTEXT_LENGTH）
+# 會把這個前提拿掉：prompt 完整進得去 → C2 回「沒有截斷」→ 這一輪就以
+# **1「上游變了」**結束。
+#
+# 那是假的。上游沒變，是**判準的前提被我們自己移除了**。而且受害者會是
+# 那個照著文件把 num_ctx 調大的人 —— 他被自己的驗證腳本告知系統壞了，
+# 於是去查一個不存在的問題。這就是 D-016 說的假失敗（比漏報更糟）。
+# 所以這裡回 2「無法判定」，不是 1。
+#
+# 讀的是容器啟動時的環境（Config.Env）—— 那是 ollama **實際讀到**的值。
+# 注意這仍然是「設定值」而不是「生效值」，本專案對這兩者的差別吃過虧
+# （D-028 記了 OLLAMA_CONTEXT_LENGTH 只被證明過名字存在）。所以它只用來
+# **擋住一個已知會造成假失敗的設定**，不用來證明判準成立。
+# 讀不到就當成沒有這回事（不擋）—— 無知不是缺陷（D-016）。
+#
+# 只在真的會跑到 C2 或 C3 時檢查。--sections add 這種分段重跑與這條前提
+# 無關，不該被它擋下來。
+SECTIONS_STR="${SECTION_ARGS[1]:-C2,C2b,C3,C4,add}"
+if [[ ",$SECTIONS_STR," == *",C2,"* || ",$SECTIONS_STR," == *",C3,"* ]]; then
+  CTX_CONFIGURED="$(docker inspect \
+      -f '{{range .Config.Env}}{{println .}}{{end}}' \
+      "$($COMPOSE ps -q ollama 2>/dev/null || true)" 2>/dev/null \
+    | sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' | tail -1 || true)"
+
+  if [[ -n "$CTX_CONFIGURED" ]]; then
+    info "ollama 的 OLLAMA_CONTEXT_LENGTH（容器設定）：$CTX_CONFIGURED"
+  else
+    info "ollama 沒有設 OLLAMA_CONTEXT_LENGTH —— 用 ollama 自己的預設 4096"
+  fi
+
+  if [[ "$(ctx_meets_mem0 "${CTX_CONFIGURED:-0}")" == "yes" ]]; then
+    fail "OLLAMA_CONTEXT_LENGTH=${CTX_CONFIGURED} 已經 >= $MEM0_ADD_MIN_CTX —— **無法判定**。"
+    echo "  C2／C3 問的是「prompt 有沒有被伺服器預設的 num_ctx 截斷」，而這個"
+    echo "  設定讓 prompt 完整進得去（mem0 的抽取 prompt 實測 8,052 與 8,100"
+    echo "  個 token，門檻是 +1 之後的 $MEM0_ADD_MIN_CTX）。前提不成立，判準"
+    echo "  就沒有定義 —— 這**不是**「上游變了」，所以不回 1。"
+    echo
+    echo "  兩個選擇："
+    echo "    · 要驗證「截斷」這件事本身 → 把 num_ctx 調回 4096 再跑："
+    echo "        OLLAMA_CONTEXT_LENGTH=4096 docker compose up -d ollama"
+    echo "      （或改 .env 後重啟 ollama；這是**暫時**的，驗完再調回去）"
+    echo "    · 只是想確認堆疊在 8192 下正常 → 那要跑的是 scripts/deploy-vps.sh"
+    echo "      的煙霧測試，不是這支探針。"
+    exit 2
+  fi
+fi
 
 # ── 前置：探針容器的網路 ────────────────────────────────
 NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' ollama 2>/dev/null \

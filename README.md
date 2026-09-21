@@ -68,13 +68,34 @@ This section records what that move actually involves, so the POC stays a POC
 without quietly becoming a trap. **The architecture was checked against this goal
 on 2026-09-19;** the findings are below, marked by whether they carry over cleanly.
 
+### One command
+
+```bash
+git clone <this repo> && cd self-cloud-agent-lab
+bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 8192
+```
+
+That is the whole deploy. It closes the port, pulls the models, starts the stack,
+verifies the stack generates, and confirms the context size actually took effect.
+The sections below are what it does and why — read them if you want to do it by
+hand, or if something in the script needs to change.
+
+**The ordering is the safety argument, not an implementation detail.** `up.sh`
+alone cannot be used as the deploy path: its defaults were tuned for Codespaces,
+where a published port is private, and on a VPS the same defaults are fail-open.
+Everything below exists because of that difference.
+
+`deploy-vps.sh` supports **fresh installs only**. It will refuse to proceed if the
+Open WebUI database already has accounts or chats, and it never migrates data
+(see "Moving existing data" at the end of this section).
+
 ### What carries over unchanged
 
 | Thing | Why it survives |
 |---|---|
 | `docker-compose.yml` | Two containers and a bridge network. Nothing Codespaces-specific. |
 | Open WebUI state | Chats, Knowledge, MCP connections, users, settings all live in the `open_webui_storage` volume. Copy the volume, keep the data. |
-| Model choice | `OLLAMA_MODEL` in `.env` is the **only** place a model is named. Scripts and compose read that variable. Swapping to a larger model is a one-line change. |
+| Model choice | `OLLAMA_MODEL` in `.env` is where the chat model is named, and `EMBEDDING_MODEL` is where the embedding model is named — those two are the only places. Scripts and compose read those variables. Swapping to a larger model is a one-line change. |
 | MCP / RAG / Memory / Agents | All Open WebUI features configured in its database, not in this repo. They move with the volume. |
 | Cloudflare Tunnel | `cloudflared` runs behind a compose profile and dials **out**. No inbound port needed — which is exactly why it is the right answer for a VPS too. |
 
@@ -105,20 +126,55 @@ public addresses on this host. Note that the LAN-only case is **held back by you
 router, not by this stack** — the same config becomes a real exposure the moment it
 lands on a public IP.
 
+**There is a trap in doing this by hand**, and it is why the script writes `.env`
+before it calls `load_env`. `docker compose` resolves the *shell* environment
+before it reads `.env`, and `load_env` **exports** everything it sources. So if you
+fix `.env` and then run `up.sh`, the corrected value is read from the file but the
+already-exported stale value still wins — compose keeps using `0.0.0.0` and nothing
+tells you. Correcting `.env` after `load_env` is a no-op. Verify with
+`docker port open-webui`, never with the file.
+
 Also keep 11434 unpublished (D-003). Ollama has no authentication at all; the
 script checks this too.
 
 ### Step 2: enlarge the model and the limits
 
-Three values in `.env` were tuned for 2 cores and 8GB. They are the first things to
-raise, and all three are already configurable — no compose edits needed:
+Four values in `.env` were tuned for 2 cores and 8GB. They are the first things to
+raise:
 
 ```bash
 OLLAMA_MODEL=qwen3:70b          # or whatever the VPS can hold
+OLLAMA_CONTEXT_LENGTH=8192      # see below — the default 4096 truncates memory extraction
 OLLAMA_MAX_LOADED_MODELS=3
 OLLAMA_NUM_PARALLEL=4           # big throughput win; shares one model load
 OLLAMA_KEEP_ALIVE=-1            # keep resident; reloading costs tens of seconds
 ```
+
+Unlike the other three, `OLLAMA_CONTEXT_LENGTH` is **not** free — a larger context
+costs KV-cache memory proportional to it (roughly 36 KiB per token for a 3B-class
+model; that figure is an **estimate** from Qwen2.5-3B's architecture, not measured
+on this stack, and it scales with the model's layer/head count). The reason the
+default is worth raising anyway: **memory extraction silently truncates.** A
+`mem0` `add()` call sends an extraction prompt measured at 8,052 and 8,100 tokens,
+and ollama's 4096 default cuts it to 2,050 — dropping the instructions at the end
+of the prompt, so extraction returns zero facts with no error. The operating rule
+is `num_ctx >= prompt_tokens + 1`, so anything ≥ 8,101 preserves that prompt
+(D-027). `deploy-vps.sh` explains this at the point it matters and defaults
+`--num-ctx` to 8192.
+
+**Verifying it took effect is not optional**, because the variable's *name* was
+verified in the binary long before anything proved it does anything (D-028). Read
+it back from the **loaded model**, not from the config: `curl` is unavailable on
+the host by design (ollama publishes no ports), so run it inside a container —
+`deploy-vps.sh` does this for you and reports the value it read.
+
+### Moving existing data
+
+`deploy-vps.sh` is fresh-install only, and it says so rather than half-doing it.
+Migrating a populated install is a separate procedure: stop both stacks, copy the
+`open_webui_storage` and `ollama_models` volumes, bring the target up, and confirm
+the account count and chat count before changing anything else. The script prints
+this reminder instead of guessing.
 
 ### What genuinely does not carry over
 
@@ -215,6 +271,9 @@ Open <http://localhost:3000>.
 
 | Command | Purpose |
 |---|---|
+| `bash scripts/deploy-vps.sh --model M --num-ctx N` | **One-click deploy onto a fresh VPS.** Writes `.env` safely *before* loading it, starts the stack, gates on real port bindings, pulls both models, then proves the stack generates and that `num_ctx` took effect. Fresh installs only — refuses if the database already has accounts or chats |
+| `bash scripts/deploy-vps.sh --dry-run` | Same preconditions and the `.env` diff, writing nothing |
+| `bash scripts/deploy-vps.sh --expose` | Deliberately publish Open WebUI on `0.0.0.0` and downgrade the gate to a warning. **This bypasses Cloudflare Access** — it exists for hosts with real edge filtering, not for convenience |
 | `bash scripts/up.sh` | Start the stack + ensure the model exists (idempotent) |
 | `bash scripts/down.sh` | Stop containers, **keep** models and chat history |
 | `bash scripts/down.sh --purge` | Stop containers and **delete** all volumes |
@@ -259,8 +318,12 @@ change anything they cover.
 | `bash scripts/verify-chroma-dims.sh` | That mem0 reuses a pre-created ChromaDB collection instead of fighting it, and which metadata key is authoritative for embedding dimensions (D-026) |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
 | `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027) |
-| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 46 mutations of its own criteria, every one must be caught |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 78 mutations of its own criteria, every one must be caught |
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences |
+| `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
+| `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 53 mutations across the bash module and the smoke probe, every one must be caught |
+| `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
 
 ---
 

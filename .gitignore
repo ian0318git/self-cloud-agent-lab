@@ -1,5 +1,11 @@
 # 機密 —— 絕對不可提交
 .env
+# `sed -i.bak`（lib.sh 產生 WEBUI_SECRET_KEY 時用的）會留下 .env.bak，
+# **內容與 .env 相同、含同一把金鑰**。原本只忽略 `.env` 一個名字，所以那個
+# 備份檔是「含密鑰、但 git 會照常提交」的狀態。2026-09-21 實際產生過一次
+# （腳本被中斷在 sed 與 rm 之間），所以改成整個 .env.* 都算機密。
+.env.*
+!.env.example
 
 # 模型權重若被下載到專案目錄內（正常情況應在 docker volume 中）
 models/

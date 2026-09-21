@@ -65,13 +65,31 @@ Codespaces 是**測試台**，不是終點。目標是一套可搬移的私有 A
 本節記錄那次搬遷實際上涉及什麼，讓 POC 保持是 POC，而不會悄悄變成陷阱。
 **2026-09-19 已依這個目標檢查過架構**，結果如下，並標明哪些能原樣帶走。
 
+### 一行指令
+
+```bash
+git clone <這個 repo> && cd self-cloud-agent-lab
+bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 8192
+```
+
+這就是整個佈署。它會關掉那個埠、下載模型、起堆疊、驗證堆疊真的生成得出
+東西，並確認 context 長度真的生效了。底下幾節是它在做什麼、以及為什麼 ——
+想手工做的時候讀，或者腳本裡有東西需要改的時候讀。
+
+**順序本身就是安全論證，不是實作細節。** 不能拿 `up.sh` 當佈署路徑：它的
+預設值是為 Codespaces 調的，那裡「發布一個埠」是私密的；同一組預設值在
+VPS 上則是 fail-open。底下每一段都是因為這個差別才存在。
+
+`deploy-vps.sh` **只支援全新安裝**。Open WebUI 的資料庫裡已經有帳號或對話
+時，它會拒絕繼續，而且它永遠不搬資料（見本節最後的「搬既有資料」）。
+
 ### 可以原樣帶走的部分
 
 | 項目 | 為什麼能存活 |
 |---|---|
 | `docker-compose.yml` | 兩個容器加一個 bridge 網路，沒有任何 Codespaces 專屬的東西。 |
 | Open WebUI 的狀態 | 對話、Knowledge、MCP 連線、使用者、設定全都存在 `open_webui_storage` volume 裡。複製 volume，資料就過去了。 |
-| 模型選擇 | `.env` 的 `OLLAMA_MODEL` 是**唯一**提到模型名稱的地方，腳本與 compose 都讀這個變數。換更大的模型是一行的事。 |
+| 模型選擇 | `.env` 的 `OLLAMA_MODEL` 是對話模型的名字，`EMBEDDING_MODEL` 是嵌入模型的名字 —— 這兩個是**唯一**的地方，腳本與 compose 都讀這些變數。換更大的模型是一行的事。 |
 | MCP / RAG / Memory / Agent | 全都是 Open WebUI 在資料庫裡的設定，不在本專案裡。跟著 volume 走。 |
 | Cloudflare Tunnel | `cloudflared` 走 compose profile，而且是**對外**撥接。不需要任何 inbound 埠 —— 這正是它在 VPS 上同樣正確的原因。 |
 
@@ -100,20 +118,49 @@ bash scripts/check-exposure.sh
 「對 Internet 開放」與「只有區網可達」。注意後者是**靠你的路由器擋住的，
 不是靠這套堆疊** —— 同一個設定一落到公開 IP 上，就會變成真的暴露。
 
+**手工做的時候有個陷阱**，而這正是腳本要在呼叫 `load_env` **之前**寫
+`.env` 的原因：`docker compose` 解析**shell 環境變數**的順序在 `.env` 之前，
+而 `load_env` 會把它 source 進來的東西全部 **export**。所以先改 `.env` 再跑
+`up.sh`，修好的值會被讀到，但**已經 export 的舊值仍然勝出** —— compose 繼續
+用 `0.0.0.0`，而且沒有任何東西會告訴你。在 `load_env` 之後才修 `.env` 是
+無效動作。要驗證請用 `docker port open-webui`，永遠不要用檔案。
+
 同時要維持 11434 不發布（D-003）。Ollama 完全沒有認證機制，
 這支腳本也會一併檢查。
 
 ### 第 2 步：放大模型與資源限制
 
-`.env` 裡有三個值是為 2 核心、8GB 調的。它們是第一個該調大的地方，
-而且三個都已經是可設定的 —— 不需要改 compose：
+`.env` 裡有四個值是為 2 核心、8GB 調的。它們是第一個該調大的地方：
 
 ```bash
 OLLAMA_MODEL=qwen3:70b          # 或這台 VPS 裝得下的任何模型
+OLLAMA_CONTEXT_LENGTH=8192      # 見底下 —— 預設的 4096 會截斷記憶抽取
 OLLAMA_MAX_LOADED_MODELS=3
 OLLAMA_NUM_PARALLEL=4           # 吞吐提升明顯；多個請求共用一次模型載入
 OLLAMA_KEEP_ALIVE=-1            # 常駐；重載一次要數十秒
 ```
+
+`OLLAMA_CONTEXT_LENGTH` 與另外三個不同：它**不是免費的**，context 調大會
+按比例增加 KV cache 的記憶體（3B 等級的模型大約每 token 36 KiB；那個數字是
+由 Qwen2.5-3B 的架構推得的**估算值，本堆疊未實測**，而且會隨模型的層數／
+head 數變動）。儘管如此，預設值仍然值得調高的理由：**記憶抽取會被無聲截斷。**
+一次 `mem0` 的 `add()` 送出的抽取 prompt 實測是 8,052 與 8,100 個 token，
+而 ollama 的 4096 預設會把它砍到 2,050 —— prompt 尾端的指示被丟掉，於是抽取
+回傳零筆事實，而且**不報錯**。操作準則是 `num_ctx >= prompt token 數 + 1`，
+所以任何 ≥ 8,101 的值都能保住那個 prompt（D-027）。`deploy-vps.sh` 會在
+相關的那一步解釋這件事，並把 `--num-ctx` 預設為 8192。
+
+**驗證它有生效不是可有可無的步驟**，因為這個變數的**名字**在二進位檔裡被
+驗證過，遠早於有任何東西證明它真的有用（D-028）。要從**已載入的模型**讀
+回來，不是從設定檔：主機上沒有 `curl`（ollama 刻意不發布任何埠），所以要在
+容器裡跑 —— `deploy-vps.sh` 會替你做這件事並回報它讀到的值。
+
+### 搬既有資料
+
+`deploy-vps.sh` 只做全新安裝，而且它會**明講**而不是做一半。搬一個已經有
+資料的安裝是另一份程序：停掉兩邊的堆疊、複製 `open_webui_storage` 與
+`ollama_models` 兩個 volume、把目標起來，然後在動任何設定之前先確認帳號數
+與對話數。腳本會把這段提醒印出來，而不是用猜的。
 
 ### 真正帶不走的部分
 
@@ -208,6 +255,9 @@ bash scripts/up.sh
 
 | 指令 | 用途 |
 |---|---|
+| `bash scripts/deploy-vps.sh --model M --num-ctx N` | **在全新 VPS 上一鍵佈署。** 先安全地寫 `.env`**再**載入它、起堆疊、以真實埠綁定過閘門、下載兩個模型，然後證明堆疊生成得出東西、且 `num_ctx` 真的生效。只做全新安裝 —— 資料庫已有帳號或對話時會拒絕 |
+| `bash scripts/deploy-vps.sh --dry-run` | 同樣的前置檢查與 `.env` 差異，但不寫任何東西 |
+| `bash scripts/deploy-vps.sh --expose` | 刻意把 Open WebUI 發布在 `0.0.0.0`，並把閘門降級成警告。**這會繞過 Cloudflare Access** —— 它是給真的在邊緣有過濾的機器用的，不是方便旗標 |
 | `bash scripts/up.sh` | 啟動堆疊 + 確保模型存在（冪等） |
 | `bash scripts/down.sh` | 停止容器，**保留**模型與對話紀錄 |
 | `bash scripts/down.sh --purge` | 停止容器並**刪除**所有 volume |
@@ -251,8 +301,12 @@ bash scripts/up.sh
 | `bash scripts/verify-chroma-dims.sh` | mem0 會沿用預先建立的 ChromaDB 集合，而不是跟它對抗；以及 embedding 維度以哪個 metadata 鍵為準（D-026） |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 24 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027） |
-| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 46 道判準做突變，每一個都必須被抓到 |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 78 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 |
+| `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
+| `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對 bash 模組與煙霧探針做 53 道突變，每一個都必須被抓到 |
+| `python3 scripts/test_deploy_smoke_probe.py` | 佈署後煙霧測試的四條斷言各自會咬人，包含它存在的理由本身：被 token 上限切斷的生成讀起來像成功 |
 
 ---
 
