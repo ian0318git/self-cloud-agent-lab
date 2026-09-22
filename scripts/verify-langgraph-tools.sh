@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     --num-ctx)  NUM_CTX="$2"; shift 2 ;;
     --rebuild)  REBUILD=1; shift ;;
     --json)     JSON_ARGS+=(--json); shift ;;
-    -h|--help)  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "未知參數：$1（--help 看用法）"; exit 3 ;;
   esac
 done

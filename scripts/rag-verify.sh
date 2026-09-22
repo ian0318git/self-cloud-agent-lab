@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
     --timeout=*) ARGS+=("--timeout" "${1#--timeout=}"); shift ;;
     --json) ARGS+=("--json"); shift ;;
     -h|--help)
-      sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *)
       fail "不認得的參數：$1"

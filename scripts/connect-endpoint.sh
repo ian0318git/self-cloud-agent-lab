@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     --url=*)      URL="${1#--url=}" ;;
     --key)        shift; KEY="${1:-}" ;;
     --key=*)      KEY="${1#--key=}" ;;
-    -h|--help)    sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "未知的參數：$1"; exit 2 ;;
   esac
   shift

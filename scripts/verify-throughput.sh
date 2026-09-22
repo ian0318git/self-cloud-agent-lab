@@ -47,7 +47,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) AS_JSON=yes; shift ;;
     --quick) QUICK=yes; shift ;;
-    -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # lib.sh 要到下面（`--json` 的轉向之後）才載入，所以這裡自己先載入一次
+    # —— source 兩次是幂等的，而把那一行往前搬會動到 --json 的轉向順序。
+    # 少了這一行的話，--help 會印出**空白**（`usage_text: command not found`）。
+    -h|--help) source "$SCRIPT_DIR/lib.sh"; usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; PASSTHRU=("$@"); break ;;
     *) echo "[3] 未知參數：$1（要傳給探針的參數請放在 -- 之後）" >&2; exit 3 ;;
   esac

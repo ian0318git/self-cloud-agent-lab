@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
     --json)  MODE="json" ;;
     --fix)   MODE="fix" ;;
     -h|--help)
-      sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) fail "未知的參數：$1"; exit 2 ;;
