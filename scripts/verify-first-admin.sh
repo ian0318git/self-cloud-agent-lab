@@ -61,7 +61,7 @@ for _ in $(seq 1 100); do
     ready=1
     break
   fi
-  if ! docker ps --filter "name=^${CONTAINER}$" --filter status=running -q | grep -q .; then
+  if ! container_running "$CONTAINER"; then
     fail "容器啟動失敗。最後 20 行日誌："
     docker logs --tail 20 "$CONTAINER" 2>&1 | sed 's/^/    /' >&2
     exit 1

@@ -43,7 +43,7 @@ READ_KEYS=(
   'rag.ollama.base_url'
 )
 
-if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx open-webui; then
+if ! service_running open-webui; then
   fail "open-webui 未在執行中。請先執行：bash scripts/up.sh"
   exit 1
 fi

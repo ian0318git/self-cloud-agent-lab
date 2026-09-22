@@ -25,6 +25,7 @@
 #         3 = 探針自己壞掉（D-018：這不是受測對象的問題，是這支腳本該修）
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/probe_traceability.sh"
 
 # SCRIPT_DIR 必須在 load_env 之前算：load_env 會 cd 到專案根目錄，
 # 之後再解析相對路徑就會指到錯的地方（而錯誤會延後到 docker build 才爆）。
@@ -59,7 +60,7 @@ MODEL="$(normalize_model "$MODEL")"
 ALT_MODEL="$(normalize_model "$ALT_MODEL")"
 
 # ── 前置：ollama 要在跑 ─────────────────────────────────
-if ! docker ps --format '{{.Names}}' | grep -qx "ollama"; then
+if ! container_running ollama; then
   fail "ollama 容器未在執行中 —— 先執行 bash scripts/up.sh"
   exit 2
 fi
@@ -69,8 +70,7 @@ fi
 # 「探針壞了」。而且 mem0 的 OllamaEmbedding 建構子遇到不存在的模型會
 # **自己 pull**（實測）—— 那會讓一次「驗證」變成一次數 GB 的下載。
 for NAME in "$MODEL" "$ALT_MODEL"; do
-  if ! $COMPOSE exec -T ollama ollama list 2>/dev/null \
-       | awk 'NR>1 {print $1}' | grep -qx -- "$NAME"; then
+  if ! model_in_ollama "$NAME"; then
     fail "ollama 裡沒有 $NAME —— 先下載："
     fail "  docker compose exec ollama ollama pull $NAME"
     exit 2
@@ -79,8 +79,8 @@ done
 
 # ── 前置：探針容器的網路 ────────────────────────────────
 # 這支只需要 ollama 一個容器，直接取它的網路即可。
-NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' ollama 2>/dev/null \
-       | grep -v '^$' | sort -u | head -1)"
+NET="$(first_line "$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' ollama 2>/dev/null \
+       | grep -v '^$' | sort -u)")"
 if [[ -z "$NET" ]]; then
   fail "取不到 ollama 的網路 —— 探針容器到不了它。"
   exit 2
@@ -127,6 +127,15 @@ echo
 
 # ── 跑探針 ──────────────────────────────────────────────
 # 探針原始碼用唯讀綁定掛進去，不烤進映像：改評分邏輯不必重建映像。
+#
+# 守衛的第三個基準，也在開跑**之前**取：探針自己的雜湊。它是唯一能證明
+# 「這一輪跑的是工作樹上那一版」的東西 —— 下面那行 -v 是**即時**掛載，
+# 映像標籤只涵蓋需求檔。
+# `|| true` 不是裝飾：lib.sh 開頭是 `set -euo pipefail`，少了它，sha256sum
+# 一失敗（讀不到檔）就會當場帶走整支腳本（rc=1，看起來像判準沒過），而
+# probe_stable_verdict 的第三態（unknown → 只警告）永遠走不到。
+PROBE_SHA_BEFORE="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+
 rc=0
 docker run --rm --network "$NET" \
   -v "$PROBE:/probe/chroma_dims_probe.py:ro" \
@@ -135,12 +144,30 @@ docker run --rm --network "$NET" \
     --model "$MODEL" --alt-model "$ALT_MODEL" --ollama-url "$OLLAMA_URL" \
     "${JSON_ARGS[@]}" || rc=$?
 
+# ── 探針修訂版的守衛（與 verify-mem0-add-cost.sh 同一套；D-036 第十一節）──
+# 跑完再算一次。不一樣就代表上面那一次的數字**對不上任何一個修訂版**：
+# 探針只在啟動時讀一次自己的雜湊，事後拿工作樹去比對，分不出「跑的是舊碼」
+# 與「跑完才被改」。那一輪的數字仍然印出來（它是真的量到的），但結束碼不可以
+# 是 0 —— 一份追不回修訂版的「通過」是假的通過。
+#
+# 判定在 scripts/probe_traceability.sh（可離線測試：18 條斷言 ＋ 2 個突變）。
+PROBE_SHA_AFTER="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+TRACE_VERDICT="$(probe_stable_verdict "$PROBE_SHA_BEFORE" "$PROBE_SHA_AFTER")"
+case "$TRACE_VERDICT" in
+  stable)  ;;
+  changed) fail "探針在這一輪執行期間被改動（${PROBE_SHA_BEFORE:0:16} → ${PROBE_SHA_AFTER:0:16}）—— 這一輪的數字對不上任何一個修訂版，不可追溯。"
+           warn "結束碼強制為 3：儀器被換掉不是「無法判定（2）」，是儀器壞了。" ;;
+  unknown) warn "算不出探針的雜湊（跑前=${PROBE_SHA_BEFORE:0:16}、跑後=${PROBE_SHA_AFTER:0:16}）—— 無法確認它整輪沒被換掉。"
+           warn "只警告不失敗：讀不到不等於它變了（D-016，假失敗比漏掉更糟）。" ;;
+esac
+rc="$(probe_guard_verdict "$rc" "$TRACE_VERDICT")"
+
 echo
 case $rc in
   0) ok "第三階段 item 2 通過：C1~C7 全過（見上方觀察段）" ;;
   1) fail "第三階段 item 2 未通過（見上方判準）—— 這通常代表上游變了，重讀 D-026"; exit 1 ;;
   2) fail "無法判定（見上方輸出）—— 這是環境問題，不是判準的問題"; exit 2 ;;
-  3) fail "探針自己壞掉（見上方輸出）—— 不是受測對象的問題，是這支腳本該修"; exit 3 ;;
+  3) fail "結束碼 3 —— 探針自己壞掉，**或**它在這一輪被改動（見上方輸出；守衛那一段會說是哪一種）"; exit 3 ;;
   *) fail "意外的結束碼 $rc"; exit 3 ;;
 esac
 

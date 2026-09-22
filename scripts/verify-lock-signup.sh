@@ -96,7 +96,7 @@ boot() {
     [[ -n "$value" ]] && return 0
 
     # 容器若已經死掉，就沒必要繼續等到逾時 —— 直接把它為什麼死講出來
-    if ! docker ps --filter "name=^${CONTAINER}$" --filter status=running -q | grep -q .; then
+    if ! container_running "$CONTAINER"; then
       fail "容器在啟動過程中停止。最後 20 行日誌："
       docker logs --tail 20 "$CONTAINER" 2>&1 | sed 's/^/    /' >&2
       return 1

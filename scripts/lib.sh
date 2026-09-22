@@ -74,6 +74,62 @@ wait_for_webui() {
   return 1
 }
 
+# ── 「這一行在不在這份清單裡」：不開子行程，所以結構上不可能踩到 SIGPIPE ──
+#
+# 為什麼要有這幾個函式：`docker … | grep -qx NAME` 這個形狀**會誤判**。
+# `grep -q` 一配對到就離開，生產者只要還會再寫一次（哪怕只多一行），那一次就
+# 吃 EPIPE → 生產者死於 141（SIGPIPE）→ 上面第 5 行的 pipefail 把整條管線變成
+# 非零 → 呼叫端的 `!` 就讀成「服務不在跑」。**判準是「讀者離開之後，生產者還會
+# 不會再寫」**，與「是不是內建」「有沒有超過 64 KiB」都無關：
+#
+#   · 實測 `docker compose ps --services`／`--format` 各寫 **2 次** → 會發作
+#   · 實測 `docker ps --format '{{.Names}}'`、`docker inspect` 各寫 **1 次**
+#     → 今天不發作，但那是**量出來的**，不是結構保證的（換一版 docker、
+#       多一行警告就可能變 2 次）
+#   · 測試裡的假 docker（一支外部 bash 行程、總共 18 位元組、2 次寫）實測讓
+#     同型的檢查誤判 88/1000 次；把兩次寫拉開 20 ms 是 100/100。確定性版本見
+#     test_lib_running.sh 的案例 D（新函式要答對）與 E（同一支假 docker，
+#     被取代的舊形狀必須答錯 —— 對照組）
+#
+# 所以這裡一律**先把輸出收下來**，再用 shell 自己的樣式整行比對：完全不開
+# 子行程，沒有任何行程會吃到 EPIPE。這是**結構上**不可能，不是量不到
+# （D-037 的規矩）。**新寫的前置檢查請用這幾個函式，不要再寫管線。**
+line_in_list() {   # <多行清單> <要比對的整行>；整行相等（＝ grep -x）
+  local list="$1" needle="$2"
+  # 空字串一律回「不在」。grep 會把它配對到空行，這裡嚴格一點 —— 我們的清單
+  # 不會有空行，而「把空的名稱讀成在跑」是更糟的那個方向。
+  [[ -n "$needle" ]] || return 1
+  [[ $'\n'"$list"$'\n' == *$'\n'"$needle"$'\n'* ]]
+}
+
+# ＝ `docker ps --format '{{.Names}}' | grep -qx <容器名>`
+container_running() {   # <容器名>
+  local names
+  names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  line_in_list "$names" "$1"
+}
+
+# ＝ `$COMPOSE ps --status running --services | grep -qx <服務名>`
+# 需要先呼叫 detect_compose（$COMPOSE 才會有值）。
+service_running() {   # <服務名>
+  local services
+  services="$($COMPOSE ps --status running --services 2>/dev/null || true)"
+  line_in_list "$services" "$1"
+}
+
+# ＝ `$COMPOSE exec -T ollama ollama list | awk 'NR>1 {print $1}' | grep -qx <模型名>`
+# NR>1 是濾掉表頭 —— 少了它，表頭那行 `NAME` 會被當成一個模型名。
+model_in_ollama() {   # <模型名>
+  local models
+  models="$($COMPOSE exec -T ollama ollama list 2>/dev/null | awk 'NR>1 {print $1}' || true)"
+  line_in_list "$models" "$1"
+}
+
+# 多行字串的第一行（＝ `… | head -1`，但讀者不會提早離開：這裡沒有子行程）
+first_line() {   # <多行字串>
+  printf '%s' "${1%%$'\n'*}"
+}
+
 # ── Docker daemon 檢查 ──────────────────────────────────
 require_docker() {
   if ! docker info >/dev/null 2>&1; then

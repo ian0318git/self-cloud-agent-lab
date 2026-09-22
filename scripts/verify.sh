@@ -28,16 +28,12 @@ MODEL="${MODEL_OVERRIDE:-${OLLAMA_MODEL:-qwen3:4b}}"
 REMOTE=/tmp/verify_api.py
 
 # ── 前置檢查 ────────────────────────────────────────────
-running_services() {
-  $COMPOSE ps --status running --services 2>/dev/null
-}
-
-if ! running_services | grep -qx ollama; then
+if ! service_running ollama; then
   fail "ollama 未在執行中。請先啟動堆疊：bash scripts/up.sh"
   exit 1
 fi
 
-if ! running_services | grep -qx open-webui; then
+if ! service_running open-webui; then
   fail "open-webui 未在執行中。請先啟動堆疊：bash scripts/up.sh"
   exit 1
 fi

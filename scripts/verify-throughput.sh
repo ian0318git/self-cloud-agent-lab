@@ -84,7 +84,7 @@ fi
 
 # ── 前提：ollama 必須在跑且在 listen ────────────────────────────────────
 section "前提"
-if ! $COMPOSE ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx ollama; then
+if ! service_running ollama; then
   fail "ollama 容器沒有在跑 —— 量不到速率（這不代表通過）"
   exit 2
 fi
@@ -145,7 +145,9 @@ PROBE_ARGS=()
 # 檔案**非空**，所以看起來一切正常，直到有人 `json.load` 它。
 # 那不是「缺了 JSON」，那是**一份假的 JSON**。
 #
-# 這一條在 D-030 已經修過一次，修在 verify-phase3-runtime.sh:220。
+# 這一條在 D-030 已經修過一次，修在 verify-phase3-runtime.sh 的
+# `[[ "$AS_JSON" == "yes" ]] && PROBE_ARGS+=(--json)`（引用寫內容不寫行號：
+# 行號會安靜地過期）。
 # 我寫這一支時又犯了一模一樣的錯 —— 同一個缺陷、換一支進入點，
 # 而兩支之間沒有任何共用的東西會把修正帶過去。
 [[ "$AS_JSON" == "yes" ]] && PROBE_ARGS+=(--json)

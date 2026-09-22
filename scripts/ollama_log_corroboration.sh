@@ -52,17 +52,29 @@ ollama_log_corroboration() {
   # 根本沒蓋到這一輪 —— 而那個結論會**正好相反**。
   #
   # **不可以用 `printf '%s\n' "$window" | grep -qF`。** lib.sh 開了
-  # `set -o pipefail`，而 `printf` 是 **bash 內建**：grep 一找到就結束，
-  # 但 printf 還在寫（視窗有 6000 行、遠超過 64 KiB 的管線緩衝）就會收到
-  # SIGPIPE → 141，pipefail 再把它提升成整條管線的結束碼，於是下面那個 `!`
-  # 把它讀成「涵蓋不到」。實測同一份視窗、同一個錨點：`set -o pipefail`
-  # 之下 rc=141，拿掉就 rc=0。（外部命令如 `seq` 重現不出來 —— 只有內建
-  # 會這樣死。所以這個 bug 不是「管線都有風險」，是「內建餵大輸入」才有。）
+  # `set -o pipefail`，而 `grep -q` 一配對到就離開：**生產者只要還會再寫一次**
+  # （哪怕只多一行），那一次就吃 EPIPE → 生產者死於 141（SIGPIPE）→ pipefail
+  # 把它提升成整條管線的結束碼，於是下面那個 `!` 把它讀成「涵蓋不到」。
+  # 實測同一份視窗、同一個錨點：`set -o pipefail` 之下 rc=141，拿掉就 rc=0。
+  #
+  # **判準是「讀者離開之後，生產者還會不會再寫」—— 不是「是不是內建」，也不是
+  # 「有沒有超過 64 KiB」。** 這兩句這裡原本都寫過，兩句都不對（2026-09-22 更正）：
+  # 用一支**外部**行程（測試裡假 docker 的 bash 腳本）實測，它總共只輸出 18
+  # 位元組、分成 2 次寫（strace：`write(1, "ollama\n", 7)` 接著
+  # `write(1, "open-webui\n", 11)`），照樣讓同型的檢查誤判 **88/1000** 次；
+  # 把兩次寫之間拉開 20 ms 之後是 **100/100** 全錯。
+  # 「視窗很大」只是**最容易撞到**的形狀（內建一次寫一大塊，緩衝滿了就得拆），
+  # 不是原因。所以「只有內建會這樣死」是**低估**：任何生產者都可能，判準看的是
+  # 它還會不會再寫，不是它是誰。
+  # 那個重現就在本樹裡，而且是可離線跑的：test_lib_running.sh 的案例 D
+  # （假 docker 分兩次寫、中間隔 50 ms，新的述詞要答對）與案例 E（**同一個假
+  # docker** 換回管線形式，必須答錯 —— 對照組，證明 D 有鑑別力）。
   #
   # 方向很壞：**只有錨點落在視窗前段時才發作**，而那正是涵蓋範圍最大的
   # 時候。錨點越早出現，儀器越會說「我沒看到」—— 而 ollama 的 stderr 行
   # （`srv update_slots` 之類）在一段視窗裡本來就會重複出現幾十次。
-  # 用 shell 自己的樣式比對，不開子行程就沒有這個問題。
+  # 用 shell 自己的樣式比對，不開子行程就沒有這個問題 —— **結構上**不可能，
+  # 不是量不到（D-037 的規矩）。
   covered=0
   if [[ -n "$pre_anchor" && -n "$window" ]]; then
     case "$window" in *"$pre_anchor"*) covered=1 ;; esac
@@ -76,7 +88,7 @@ ollama_log_corroboration() {
   fi
 
   printf '  視窗涵蓋：%s ～ %s\n' \
-    "$(printf '%s\n' "$window" | head -1 | cut -c1-26)" \
+    "$(first_line "$window" | cut -c1-26)" \
     "$(printf '%s\n' "$window" | tail -1 | cut -c1-26)"
 
   n_all="$(printf '%s\n' "$window" | grep -c 'truncating input prompt' || true)"

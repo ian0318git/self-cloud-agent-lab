@@ -47,14 +47,14 @@ done
 # 內建端點需要 ollama 在跑；外部端點不需要 —— 要求它反而會擋住
 # 「只想驗一顆遠端 runtime」這個正常用法。
 if [[ "$BASE_URL" == "$DEFAULT_URL" ]]; then
-  if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx ollama; then
+  if ! service_running ollama; then
     fail "ollama 未在執行中。請先啟動堆疊：bash scripts/up.sh"
     echo "  或指定一個外部端點：bash scripts/probe-openai.sh https://…/v1"
     exit 1
   fi
 fi
 
-if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx open-webui; then
+if ! service_running open-webui; then
   fail "open-webui 未在執行中 —— 探針是借用它的 Python 與網路。"
   echo "  請先啟動堆疊：bash scripts/up.sh"
   exit 1

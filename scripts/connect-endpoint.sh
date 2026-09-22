@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx open-webui; then
+if ! service_running open-webui; then
   fail "open-webui 未在執行中。請先啟動堆疊：bash scripts/up.sh"
   exit 2
 fi

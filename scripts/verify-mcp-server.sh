@@ -34,7 +34,7 @@ URL="${MCP_URL:-http://mcp-test-server:8000/mcp}"
 info "目標：$URL（從 open-webui 容器的視角）"
 
 for NAME in open-webui mcp-test-server; do
-  if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
+  if ! container_running "$NAME"; then
     fail "$NAME 容器未在執行中 —— 先執行 bash scripts/up.sh 與 docker compose up -d mcp-test-server"
     exit 2
   fi

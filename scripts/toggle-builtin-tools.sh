@@ -52,7 +52,7 @@ case "${1:-}" in
     ;;
 esac
 
-if ! docker ps --format '{{.Names}}' | grep -qx open-webui; then
+if ! container_running open-webui; then
   fail "open-webui 容器未在執行中 —— 先執行 bash scripts/up.sh"
   exit 2
 fi

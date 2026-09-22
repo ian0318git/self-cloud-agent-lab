@@ -59,7 +59,7 @@ if [[ ! -f "$PROBE" ]]; then
   exit 2
 fi
 
-if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx open-webui; then
+if ! service_running open-webui; then
   fail "open-webui 未在執行中 —— 探針要讀它的資料庫。"
   echo "  請先啟動堆疊：bash scripts/up.sh"
   exit 2

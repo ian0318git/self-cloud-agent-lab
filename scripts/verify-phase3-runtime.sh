@@ -53,6 +53,7 @@ fi
 
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/probe_traceability.sh"
 # shellcheck source=/dev/null
 source "$STORAGE_MODULE"
 
@@ -64,11 +65,12 @@ require_docker || exit 3
 detect_compose || exit 3
 # 網路名不要自己拼。compose 的專案名不一定是目錄名，而 `_default` 更是猜的
 # —— 這個堆疊的網路實際叫 `self-cloud-agent-lab_ai-net`（compose 檔有命名）。
-# 既有進入點的做法是問執行中的容器（verify-langgraph-tools.sh:90）。
+# 既有進入點的做法是問執行中的容器（verify-langgraph-tools.sh 的
+# `container_running` 迴圈）—— 引用寫內容不寫行號：行號會安靜地過期。
 networks_of() {
   docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$1" 2>/dev/null | grep -v '^$'
 }
-NET="$(networks_of ollama | head -1)"
+NET="$(first_line "$(networks_of ollama)")"
 if [[ -z "$NET" ]]; then
   fail "找不到 ollama 的網路 —— 容器沒在跑？先 bash scripts/up.sh"
   exit 2
@@ -221,11 +223,39 @@ PROBE_ARGS=()
 
 # 刻意**不用 `2>&1`**：探針在 --json 模式下把人看的報告寫到 stderr、把 JSON
 # 寫到 stdout，合併起來會讓人看的表格混進 JSON 裡。讓 stderr 自己流出去。
+#
+# 守衛的第三個基準，也在開跑**之前**取：探針自己的雜湊。它是唯一能證明
+# 「這一輪跑的是工作樹上那一版」的東西 —— 下面那行 -v 是**即時**掛載，
+# 映像標籤只涵蓋需求檔。
+# `|| true` 不是裝飾：lib.sh 開頭是 `set -euo pipefail`，少了它，sha256sum
+# 一失敗（讀不到檔）就會當場帶走整支腳本，而 probe_stable_verdict 的第三態
+# （unknown → 只警告）永遠走不到。
+PROBE_SHA_BEFORE="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+
 PROBE_OUT="$(docker run --rm --network "$NET" \
   -v "$PROBE:/probe/phase3_runtime_probe.py:ro" \
   -e PYTHONUNBUFFERED=1 \
   "$PROBE_IMAGE" python3 /probe/phase3_runtime_probe.py "${PROBE_ARGS[@]}")"
 PROBE_RC=$?
+
+# ── 探針修訂版的守衛（與 verify-mem0-add-cost.sh 同一套；D-036 第十一節）──
+# 跑完再算一次。不一樣就代表上面那一次的量測**對不上任何一個修訂版**：
+# 探針只在啟動時讀一次自己的雜湊，事後拿工作樹去比對，分不出「跑的是舊碼」
+# 與「跑完才被改」。量到的數字仍然印出來（它是真的量到的），但結束碼不可以
+# 是 0 —— 一份追不回修訂版的「通過」是假的通過。
+#
+# 判定在 scripts/probe_traceability.sh（可離線測試：18 條斷言 ＋ 2 個突變）。
+PROBE_SHA_AFTER="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+TRACE_VERDICT="$(probe_stable_verdict "$PROBE_SHA_BEFORE" "$PROBE_SHA_AFTER")"
+case "$TRACE_VERDICT" in
+  stable)  ;;
+  changed) fail "探針在這一輪執行期間被改動（${PROBE_SHA_BEFORE:0:16} → ${PROBE_SHA_AFTER:0:16}）—— 這一輪的量測對不上任何一個修訂版，不可追溯。"
+           warn "結束碼強制為 3：儀器被換掉不是「無法判定（2）」，是儀器壞了。" ;;
+  unknown) warn "算不出探針的雜湊（跑前=${PROBE_SHA_BEFORE:0:16}、跑後=${PROBE_SHA_AFTER:0:16}）—— 無法確認它整輪沒被換掉。"
+           warn "只警告不失敗：讀不到不等於它變了（D-016，假失敗比漏掉更糟）。" ;;
+esac
+PROBE_RC="$(probe_guard_verdict "$PROBE_RC" "$TRACE_VERDICT")"
+
 printf '%s\n' "$PROBE_OUT"
 
 # ── 綜合判定 ───────────────────────────────────────────────────────────────
@@ -235,7 +265,14 @@ case "$PROBE_RC" in
   0) ok "item 4／item 6 都符合判定" ;;
   1) fail "item 4／item 6 有判定不成立 —— 上游變了，或判定本身是錯的"; RC=1 ;;
   2) fail "item 4／item 6 量不到（環境不具備）—— **這不代表通過**"; [[ "$RC" -eq 0 ]] && RC=2 ;;
-  3) fail "探針自身損壞"; [[ "$RC" -eq 0 ]] && RC=3 ;;
+  3) if [[ "$TRACE_VERDICT" == "changed" ]]; then
+       # 兩種來源要分開講：探針自己壞掉 ≠ 儀器被換掉。訊息說錯會讓人往錯的
+       # 方向修（D-036 第七節的形狀）。
+       fail "探針在這一輪執行期間被改動 —— 判定不可追溯（見上方守衛那一段）"
+     else
+       fail "探針自身損壞"
+     fi
+     [[ "$RC" -eq 0 ]] && RC=3 ;;
   *) fail "探針以非預期結束碼 ${PROBE_RC} 結束"; [[ "$RC" -eq 0 ]] && RC=3 ;;
 esac
 

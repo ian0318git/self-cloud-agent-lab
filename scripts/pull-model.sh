@@ -18,7 +18,7 @@ load_env
 MODEL_OVERRIDE="${1:-}"
 MODEL="${MODEL_OVERRIDE:-${OLLAMA_MODEL:-qwen3:4b}}"
 
-if ! $COMPOSE ps --status running --services 2>/dev/null | grep -qx ollama; then
+if ! service_running ollama; then
   fail "ollama 容器未在執行中。請先執行：bash scripts/up.sh"
   exit 1
 fi

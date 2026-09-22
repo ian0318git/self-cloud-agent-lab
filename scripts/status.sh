@@ -28,7 +28,7 @@ $COMPOSE ps 2>/dev/null || warn "無法取得容器狀態（堆疊可能尚未�
 
 echo
 echo "── 已安裝模型 ────────────────────────────────"
-if $COMPOSE ps --status running --services 2>/dev/null | grep -qx ollama; then
+if service_running ollama; then
   $COMPOSE exec -T ollama ollama list 2>/dev/null || warn "無法列出模型"
 else
   warn "ollama 未在執行中"
@@ -52,7 +52,7 @@ if [[ ",${COMPOSE_PROFILES:-}," == *",tunnel,"* ]]; then
   TUNNEL_PROFILE=yes
 fi
 TUNNEL_RUNNING=no
-if $COMPOSE ps --status running --services 2>/dev/null | grep -qx cloudflared; then
+if service_running cloudflared; then
   TUNNEL_RUNNING=yes
 fi
 
@@ -63,7 +63,19 @@ case "$(tunnel_state_verdict "$TUNNEL_PROFILE" "$TUNNEL_RUNNING")" in
   active)
     ok "cloudflared 執行中 —— Open WebUI 可透過你的網域存取"
     # 連線是否真的建立要看日誌裡有沒有註冊成功的訊息，容器「跑著」不等於「通了」
-    if $COMPOSE logs --tail=50 cloudflared 2>/dev/null | grep -qiE 'Registered tunnel connection|Connection .* registered'; then
+    # 逐行比對（＝ 原本 grep -iE 的語意）：整份日誌當成一個字串比對會被
+    # `*` 跨越換行，於是「上一行有 connection、下一行有 registered」也算命中
+    # —— 那正是儀器說謊的方向。
+    TUNNEL_LOGS="$($COMPOSE logs --tail=50 cloudflared 2>/dev/null || true)"
+    TUNNEL_REGISTERED=no
+    while IFS= read -r _line; do
+      _lo="${_line,,}"   # 原本是 grep -i：用 ,, 保留「不分大小寫」的語意
+      if [[ "$_lo" == *"registered tunnel connection"* || "$_lo" == *"connection "*" registered"* ]]; then
+        TUNNEL_REGISTERED=yes
+        break
+      fi
+    done <<< "$TUNNEL_LOGS"
+    if [[ "$TUNNEL_REGISTERED" == "yes" ]]; then
       echo "   日誌顯示已向 Cloudflare 註冊連線"
     else
       warn "日誌未看到註冊成功的訊息，請確認：docker compose logs --tail=20 cloudflared"

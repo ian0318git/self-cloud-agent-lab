@@ -10,10 +10,14 @@
 #
 # 四支 verify-*.sh 都把探針**從工作樹即時 bind-mount** 進容器，不是烤進映像：
 #
-#   verify-mem0-add-cost.sh:298   -v "$PROBE:/probe/mem0_add_cost_probe.py:ro"
-#   verify-chroma-dims.sh:132     -v "$PROBE:/probe/chroma_dims_probe.py:ro"
-#   verify-langgraph-tools.sh:141 -v "$PROBE:/probe/langgraph_tools_probe.py:ro"
-#   verify-phase3-runtime.sh:225  -v "$PROBE:/probe/phase3_runtime_probe.py:ro"
+#   verify-mem0-add-cost.sh      -v "$PROBE:/probe/mem0_add_cost_probe.py:ro"
+#   verify-chroma-dims.sh        -v "$PROBE:/probe/chroma_dims_probe.py:ro"
+#   verify-langgraph-tools.sh    -v "$PROBE:/probe/langgraph_tools_probe.py:ro"
+#   verify-phase3-runtime.sh     -v "$PROBE:/probe/phase3_runtime_probe.py:ro"
+#
+# 這裡只寫檔名與那一行**字串**，不寫行號：行號會過期，而且會**安靜地**過期
+# （寫下這四行之後，mem0 那支的行號就從 298 漂到 385，另外三支各漂了 9~10 行
+# —— 正是這個檔案在防的那種失敗）。要定位就 grep 那個字串。
 #
 # 這樣設計是對的（改評分邏輯不必重建映像），但它有兩個後果：
 #

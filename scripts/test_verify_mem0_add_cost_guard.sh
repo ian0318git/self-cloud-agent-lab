@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# **整合**測試：scripts/verify-mem0-add-cost.sh 的探針修訂版守衛，接線對不對。
+# **整合**測試：四支腳本（verify-mem0-add-cost／verify-chroma-dims／
+# verify-langgraph-tools／verify-phase3-runtime）的探針修訂版守衛，接線對不對。
 #
 # 這支補的是 scripts/test_probe_traceability.sh 補不了的那一半：
 #
@@ -31,6 +32,34 @@
 #   · 任何真的 docker／ollama 互動（全部被假 docker 接掉了）
 #   · 前置檢查、映像建置、ollama 日誌旁證的**內容**（只確認它們不影響結論）
 #
+# 四支共用同一套守衛（scripts/probe_traceability.sh），接線也共用同一個形狀：
+# 跑前取雜湊 → 跑 → 跑後取雜湊 → 判定 → `probe_guard_verdict` 改結束碼。
+# 案例 A–H 走 mem0-add-cost（含 --ctx 推導那條線），L／M／N 走另外三支 ——
+# 每一支都測兩邊：沒被改動時**不誤報**、被改動時**必須變 3**。
+#
+# ── 這個假 docker 刻意**不**重現 #67 的形狀 ────────────────────────
+#
+# `ps` 預設一次寫完，不是分次。這是一個刻意的選擇，理由是量到的數字。
+#
+# 先是一個容易猜錯的事實：**bash 的 `printf` 與 `echo` 是逐行寫的**。三個名字
+# 就是三次 `write(2)`（strace：`printf '%s' "$(printf 'a\nb\nc')"` → `write(1,
+# "a\n", 2)`、`write(1, "b\n", 2)`、`write(1, "c", 1)`；`echo $'a\nb\nc'` 一樣
+# 三次）。所以「叫 bash 一次寫完」不是換個寫法就好 —— 那條路走不通。
+#
+# 於是 `verify-mem0-add-cost.sh:118`（`docker ps | grep -qx`）在**多次寫**的
+# 生產者面前是看運氣的。同一條管線 500 次，三種假 docker 的實測：
+#   `printf '%s' "$(…)"`（3 次寫）→ 誤判 20/500
+#   `echo $'…'`（3 次寫）        → 誤判 42/500
+#   `printf '%s\n' a b c`（3 次寫）→ 誤判 14/500
+#   `cat <<< $'…'`（**1 次寫**）  → 誤判 0/500
+# 整份測試跑起來則是 6 輪 × 8 個案例紅 6 次（約一成二），訊息固定是
+# 「ollama 容器未在執行中」。那確實是 #67 的證據。
+#
+# 但它不該讓一個「測守衛接線」的檔案靠運氣紅：一份會假紅的測試會訓練人重跑，
+# 而重跑正是 D-016 說的那種「被忽略的檢查」的起點。所以預設走 `cat`（唯一的
+# 一次寫形式），#67 的形狀交給 `STUB_PS_MODE=split`（案例 I／J，**確定性**重現：
+# 兩次寫之間隔 50 ms，不是碰運氣）。
+#
 # 用法：bash scripts/test_verify_mem0_add_cost_guard.sh
 # 結束碼：0 = 全過；1 = 有案例沒過；3 = 前置檔案不齊（跑不起來）
 
@@ -58,13 +87,24 @@ cp -r "$SCRIPT_DIR" "$WORK/scripts"
 printf 'WEBUI_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000000\n' \
   > "$WORK/.env"
 
+# 假 docker 沒預期到的呼叫會記到這裡（見 stub 的 fallback 與 check()）
+UNHANDLED="$WORK/unhandled.log"
+: > "$UNHANDLED"
+
 PROBE_COPY="$WORK/scripts/mem0_add_cost_probe.py"
 PRISTINE="$WORK/pristine-probe.py"
 cp "$PROBE_COPY" "$PRISTINE"
+# 四支腳本各有一個探針，每一個都要能還原 —— 案例 L／M／N 動的是另外三個。
+OTHER_PROBES=(chroma_dims_probe.py langgraph_tools_probe.py phase3_runtime_probe.py)
+for p in "${OTHER_PROBES[@]}"; do cp "$WORK/scripts/$p" "$WORK/pristine-$p"; done
 
 # 需求檔雜湊：用**真的** sha256sum 算（這支測試自己的 PATH 不動），
 # 讓假 docker 回的映像標籤與它相符 —— 否則會走到 docker build。
 REQ_HASH="$(sha256sum "$WORK/scripts/requirements-mem0.txt" | cut -d' ' -f1)"
+# 另外兩支接上守衛的腳本各有自己的需求檔（chroma-dims 也吃 mem0 那份）。
+# 假 docker 按映像名回對應的雜湊，否則它們會走到 build。
+REQ_HASH_LG="$(sha256sum "$WORK/scripts/requirements-langgraph.txt" | cut -d' ' -f1)"
+REQ_HASH_P3="$(sha256sum "$WORK/scripts/requirements-phase3.txt" | cut -d' ' -f1)"
 
 # ── 假的 docker ─────────────────────────────────────────
 mkdir -p "$WORK/bin"
@@ -73,14 +113,28 @@ cat > "$WORK/bin/docker" <<'STUB'
 set -u
 case "${1:-}" in
   info)  exit 0 ;;
-  ps)    printf 'ollama\nopen-webui\n' ; exit 0 ;;
+  # ps 的三種形狀由 STUB_PS_MODE 選（見檔頭「這個假 docker 刻意不重現 #67」）：
+  #   （空）    —— 一次寫完（`cat` 是全緩衝的外部行程：三行就是一次 write(2)）。
+  #   split     —— 分兩次寫、中間停 50 ms：會誘發 pipefail×SIGPIPE 的形狀。
+  #                這裡刻意用 bash 的 printf（逐行寫）—— 它不是「另一種極端」，
+  #                而是**最常見的形狀**：一支 bash 寫的生產者就是長這樣。
+  #   no-ollama —— 真的沒有 ollama（案例 J 的對照組）。
+  ps)
+    case "${STUB_PS_MODE:-}" in
+      split)     printf 'ollama\n'; sleep 0.05; printf 'open-webui\nmcp-test-server\n'; exit 0 ;;
+      no-ollama) cat <<< $'open-webui\nmcp-test-server'; exit 0 ;;
+    esac
+    cat <<< $'ollama\nopen-webui\nmcp-test-server'
+    exit 0 ;;
   compose)
     case "${2:-}" in
       version) exit 0 ;;
-      exec)    # `compose exec -T ollama ollama list` —— 表頭之後第一欄是模型名
-               printf 'NAME\tID\tSIZE\tMODIFIED\n'
-               printf 'qwen3:4b\tabc\t2.5 GB\t2 days ago\n'
-               printf 'qwen3-embedding:0.6b\tdef\t639 MB\t3 days ago\n'
+      exec)    # `compose exec -T ollama ollama list` —— 表頭之後第一欄是模型名。
+               # **四個都要有**，少一個就會有腳本停在前置檢查而不是走到守衛：
+               # chroma-dims 的 --alt-model 預設是 bge-m3、langgraph-tools 沒有
+               # .env 的 OLLAMA_MODEL 可用（這份測試的 .env 只有一把假金鑰），
+               # 於是它走自己的預設 qwen2.5:3b。也刻意一次寫完（理由同 ps）。
+               cat <<< $'NAME\tID\tSIZE\tMODIFIED\nqwen3:4b\tabc\t2.5 GB\t2 days ago\nqwen3-embedding:0.6b\tdef\t639 MB\t3 days ago\nbge-m3:latest\tghi\t1.2 GB\t5 days ago\nqwen2.5:3b\tjkl\t1.9 GB\t6 days ago'
                exit 0 ;;
       ps)      printf 'stub-container\n'; exit 0 ;;
     esac
@@ -106,12 +160,41 @@ case "${1:-}" in
         exit 0 ;;
     esac
     printf 'lab_default\n'; exit 0 ;;
-  image)   printf '%s\n' "${STUB_REQ_HASH:-}"; exit 0 ;;
+  # 需求檔雜湊。**每支腳本各自的需求檔不同**，所以按映像名分辨 —— 一律回同一個
+  # 值的話，另外三支的映像標籤會對不上、走到 docker build，而下面那個 build
+  # 是刻意失敗的，於是那三支會在守衛之前就先死掉（測到的就不是守衛了）。
+  image)
+    case "$*" in
+      *langgraph*) printf '%s\n' "${STUB_REQ_HASH_LG:-}" ;;
+      *phase3*)    printf '%s\n' "${STUB_REQ_HASH_P3:-}" ;;
+      *)           printf '%s\n' "${STUB_REQ_HASH:-}" ;;
+    esac
+    exit 0 ;;
+  # `docker system df --format '{{.Type}}\t{{.Reclaimable}}'` —— phase3-runtime
+  # 靠它算映像可回收量。少了這一段就會落到下面的 fallback（回非零），而呼叫端
+  # 是 `RECLAIM_BYTES="$(docker system df … | awk …)"`：pipefail 之下那個失敗被
+  # 提升成整條管線的結束碼，lib.sh 的 `set -e` 當場帶走腳本 —— 案例 N 就是
+  # 這樣變成 rc=1 的，而且因為呼叫端寫了 `2>/dev/null`，什麼訊息都看不到。
+  #
+  # 回的字串要帶 `(44%)`：那個百分比黏在同一個欄位裡，是這支腳本踩過兩次的
+  # 形狀（見 verify-phase3-runtime.sh 的 _reclaim_to_mb）。回一個乾淨的數字
+  # 等於替它把最難的那一半測掉。
+  system)
+    case "${2:-}" in
+      df) printf 'Images\t12.3GB (44%%)\n'; exit 0 ;;
+    esac
+    exit 0 ;;
+  # 這一輪不量 volume：回空清單。讓它落到 fallback 也「只是」一行噪音，但噪音
+  # 會進到 OUT，而 OUT 是要被斷言的東西 —— 假 docker 對每個**預期會出現**的
+  # 呼叫都該有答案，這一句與其說是給腳本，不如說是給斷言。
+  volume)  exit 0 ;;
   logs)    printf '[GIN] 2026/09/22 - 10:00:00 | 200 | 1.000000ms | 12\n'; exit 0 ;;
   build)   echo "假 docker：不該走到 build（映像標籤應該要對得上）" >&2; exit 1 ;;
   run)
     for a in "$@"; do
-      if [[ "$a" == "/probe/mem0_add_cost_probe.py" ]]; then
+      # 任何一支探針（四支腳本各有一個）——「執行期間被改動」動的是 STUB_PROBE
+      # 指向的那一個檔，所以四支都走得到同一條模擬路徑。
+      if [[ "$a" == /probe/*.py ]]; then
         # 「探針執行期間」被改動 —— 只有在 STUB_MUTATE 非空時才發生
         [[ -n "${STUB_MUTATE:-}" ]] && printf '\n# 假 docker：模擬執行期間被改動\n' >> "$STUB_PROBE"
         echo "假探針輸出（這一輪沒有真的跑 mem0）"
@@ -125,7 +208,11 @@ case "${1:-}" in
     printf '500\n'   # 忙碌探測：500 毫秒
     exit 0 ;;
 esac
+# 沒有預期到的呼叫：印出來**也留一份紀錄**。腳本常常把 stderr 丟掉
+# （`2>/dev/null`），所以光印在這裡可能誰都看不到 —— check() 失敗時會把
+# STUB_LOG 的內容一起印出來。
 echo "假 docker：沒有預期到的呼叫：$*" >&2
+printf '%s\n' "$*" >> "${STUB_LOG:-/dev/null}"
 exit 1
 STUB
 chmod +x "$WORK/bin/docker"
@@ -143,7 +230,7 @@ cat > "$WORK/bin-nohash/sha256sum" <<'NOHASH'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
-    *mem0_add_cost_probe.py) echo "sha256sum: 模擬讀不到探針" >&2; exit 1 ;;
+    *_probe.py) echo "sha256sum: 模擬讀不到探針" >&2; exit 1 ;;
   esac
 done
 exec /usr/bin/sha256sum "$@"
@@ -159,32 +246,69 @@ FAILED=0
 run() {
   local binprefix="$1" probe_rc="$2" mutate="$3" stub_ctx="$4"; shift 4
   local out rc=0
+  : > "$UNHANDLED"
   out="$(env PATH="${binprefix:+$binprefix:}$WORK/bin:$PATH" \
              STUB_PROBE_RC="$probe_rc" STUB_MUTATE="$mutate" STUB_CTX="$stub_ctx" \
-             STUB_REQ_HASH="$REQ_HASH" STUB_PROBE="$PROBE_COPY" \
+             STUB_REQ_HASH="$REQ_HASH" STUB_REQ_HASH_LG="$REQ_HASH_LG" \
+             STUB_REQ_HASH_P3="$REQ_HASH_P3" STUB_PROBE="$PROBE_COPY" \
+             STUB_PS_MODE="${STUB_PS_MODE:-}" STUB_LOG="$UNHANDLED" \
              bash "$WORK/scripts/verify-mem0-add-cost.sh" \
                --model qwen3:4b --embed-model qwen3-embedding:0.6b "$@" 2>&1)" || rc=$?
   RC="$rc"; OUT="$out"
 }
 
-# check <標籤> <期望結束碼> <輸出必須包含> <輸出必須不包含>
+# run_other <腳本> <探針檔名> <額外 PATH 前綴或空> <STUB_PROBE_RC> <STUB_MUTATE> <旗標...>
+#
+# 為什麼不共用 run()：那三支的參數不一樣（chroma-dims 不吃 --embed-model、
+# langgraph 吃 --num-ctx、phase3 吃 --json），而且探針檔各是一個 —— 硬塞進
+# run() 會讓既有九個呼叫端一起改。**這一支不傳 --model 那一組**：三支都有預設值。
+run_other() {
+  local script="$1" probe_name="$2" binprefix="$3" probe_rc="$4" mutate="$5"; shift 5
+  local out rc=0
+  : > "$UNHANDLED"
+  out="$(env PATH="${binprefix:+$binprefix:}$WORK/bin:$PATH" \
+             STUB_PROBE_RC="$probe_rc" STUB_MUTATE="$mutate" \
+             STUB_REQ_HASH="$REQ_HASH" STUB_REQ_HASH_LG="$REQ_HASH_LG" \
+             STUB_REQ_HASH_P3="$REQ_HASH_P3" \
+             STUB_PS_MODE="${STUB_PS_MODE:-}" STUB_LOG="$UNHANDLED" \
+             STUB_PROBE="$WORK/scripts/$probe_name" \
+             bash "$WORK/scripts/$script" "$@" 2>&1)" || rc=$?
+  RC="$rc"; OUT="$out"
+}
+
+# check <標籤> <期望結束碼> <輸出必須包含> <輸出必須不包含> [<輸出還必須包含>]
+#
+# 第五個參數是可選的。**它必須存在於這個檔案裡**（而不是只存在於從這裡
+# 衍生的版本）：少了它，多寫的那個斷言會被**靜默丟掉** —— bash 不會抱怨
+# 多出來的引數，而案例照樣回報「通過」。這正是這個專案最想避免的形狀
+# （一個看起來在做事的斷言），所以寧可讓它在這裡多一個參數。
 check() {
-  local label="$1" want_rc="$2" want="$3" wantnot="$4" bad=""
+  local label="$1" want_rc="$2" want="$3" wantnot="$4" want2="${5:-}" bad=""
+  # bad 的接法用 ${bad:+…}：直接寫 bad="$bad；…" 的話，第一個原因會帶著
+  # 一個開頭的「；」印出來（不好讀，而且看起來像少了什麼）。
   [[ "$RC" == "$want_rc" ]] || bad="結束碼 $RC（期望 $want_rc）"
-  [[ "$OUT" == *"$want"* ]] || bad="$bad；輸出裡沒有「$want」"
+  [[ "$OUT" == *"$want"* ]] || bad="${bad:+$bad；}輸出裡沒有「$want」"
   if [[ -n "$wantnot" && "$OUT" == *"$wantnot"* ]]; then
-    bad="$bad；輸出裡**不該**出現「$wantnot」"
+    bad="${bad:+$bad；}輸出裡**不該**出現「$wantnot」"
+  fi
+  if [[ -n "$want2" && "$OUT" != *"$want2"* ]]; then
+    bad="${bad:+$bad；}輸出裡沒有「$want2」"
   fi
   if [[ -n "$bad" ]]; then
     FAILED=$((FAILED + 1))
     fail "$label —— $bad"
     printf '%s\n' "$OUT" | tail -20 | sed 's/^/      | /'
+    if [[ -s "$UNHANDLED" ]]; then
+      echo "      | 假 docker 收到沒有預期到的呼叫（缺口可能就在這裡）："
+      sed 's/^/      |   /' "$UNHANDLED"
+    fi
   else
     PASS=$((PASS + 1))
     ok "$label"
   fi
-  # 每個案例之間把探針副本還原，案例才互相獨立
+  # 每個案例之間把**四個**探針副本都還原，案例才互相獨立
   cp "$PRISTINE" "$PROBE_COPY"
+  for p in "${OTHER_PROBES[@]}"; do cp "$WORK/pristine-$p" "$WORK/scripts/$p"; done
 }
 
 GUARD_MSG="探針在這一輪執行期間被改動"
@@ -255,6 +379,60 @@ echo "G：ollama 沒設 num_ctx（讀不到）→ **不送 --ctx**，而且明�
 # 抽取的極限，是預算被 thinking 吃光。
 run "" 2 "" "" --sections add
 check "G 沒送 --ctx，且說明講出來了" 2 "抽取**預期是空白的**" "--ctx"
+
+echo
+echo "H：推導那一層印的是 token 數，不是一個會被機器速率推翻的小時數"
+# 原本那句「預期 1~1.5 小時」是拿 D-036 的 **token 數**直接當成時間，沒有除以
+# 機器的生成速率。2026-09-22 實測本機是 1.25 t/s（5,605 個 token ≈ 75 分鐘），
+# 而同一個組合在本 repo 另有一份 0.18~0.26 tok/s 的量測（探針 `:163`／`:288`，
+# ~8k context）—— 兩者差 5 倍，於是「1~1.5 小時」當場低估了一倍以上。
+# **速率是環境的性質，不是這個組合的性質**，所以任何寫死的小時數都會在下一次
+# 換機器時變成錯的。這一條同時擋兩個方向：要印 token 數，不可以再承諾小時。
+#
+# 用整句當斷言（不是「小時」這種詞）—— 見上面 `:191-195` 那條規矩。
+run "" 2 "" "16384" --sections add
+check "H 印 token 數與速率相依，且不再承諾小時" 2 \
+  "預期 5,605 個 token（D-036）；時間要看本機速率，不是常數。" "預期 1~1.5 小時"
+
+echo
+echo "L：chroma-dims 接上守衛 —— 沒被改動時維持原本的結束碼，守衛沉默"
+# D-036 第十一節留下的缺口：守衛原本只接在 mem0-add-cost 上。另外三支有**同一個**
+# 性質 —— 探針是用 `-v` 從工作樹即時掛進去，映像標籤只涵蓋需求檔 —— 所以同一個
+# 守衛該有一樣的行為。L／M／N 各測兩邊：沒被改動時不誤報、被改動時必須變 3。
+run_other verify-chroma-dims.sh chroma_dims_probe.py "" 0 ""
+check "L1 探針沒被改 → 維持 0，且守衛沉默" 0 "item 2 通過" "$GUARD_MSG"
+
+echo
+echo "M：langgraph-tools 接上守衛 —— 同上"
+run_other verify-langgraph-tools.sh langgraph_tools_probe.py "" 0 ""
+check "M1 探針沒被改 → 維持 0，且守衛沉默" 0 "item 1 通過" "$GUARD_MSG"
+
+echo
+echo "N：phase3-runtime 接上守衛 —— 同上（它的結束碼是聚合出來的，最容易接錯）"
+run_other verify-phase3-runtime.sh phase3_runtime_probe.py "" 0 ""
+check "N1 探針沒被改 → 維持 0，且守衛沉默" 0 "item 4／item 6 都符合判定" "$GUARD_MSG"
+
+echo
+echo "L2／M2／N2：同一組輸入，但探針在執行期間被改動 → **三支都必須變成 3**"
+# 少了這三條，L1／M1／N1 只是「跑得起來」：守衛接上了卻沒接到結束碼
+# （忘了 probe_guard_verdict 那一步）照樣全綠 —— 那正是「守衛看起來在跑，
+# 實際上什麼都沒擋到」，也就是這個測試檔開頭寫的那個最糟的結果。
+run_other verify-chroma-dims.sh chroma_dims_probe.py "" 0 "1"
+check "L2 被改成 3，且不再宣稱通過" 3 "$GUARD_MSG" "item 2 通過"
+
+run_other verify-langgraph-tools.sh langgraph_tools_probe.py "" 0 "1"
+check "M2 被改成 3，且不再宣稱通過" 3 "$GUARD_MSG" "item 1 通過"
+
+run_other verify-phase3-runtime.sh phase3_runtime_probe.py "" 0 "1"
+check "N2 被改成 3，且不再宣稱通過" 3 "$GUARD_MSG" "item 4／item 6 都符合判定"
+
+echo
+echo "L3：算不出探針的雜湊 → 只警告，結束碼不變（三支共用同一條路徑）"
+# 這一條守「unknown 不可以變成 changed」：讀不到不等於它變了（D-016）。
+# 只挑 chroma-dims 當代表 —— 三支共用 probe_stable_verdict，判定本身在
+# test_probe_traceability.sh 有 18 條斷言；這裡要證的是**接線**上它是警告不是失敗。
+run_other verify-chroma-dims.sh chroma_dims_probe.py "$WORK/bin-nohash" 0 ""
+check "L3 維持 0 並發出警告" 0 "無法確認它整輪沒被換掉" "$GUARD_MSG"
 
 echo
 if [[ "$FAILED" -gt 0 ]]; then

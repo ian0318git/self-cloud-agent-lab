@@ -110,12 +110,8 @@ if [[ -z "${WEBUI_API_KEY:-}" ]]; then
 fi
 
 # ── 前置檢查 ────────────────────────────────────────────
-running_services() {
-  $COMPOSE ps --status running --services 2>/dev/null
-}
-
 for svc in ollama open-webui; do
-  if ! running_services | grep -qx "$svc"; then
+  if ! service_running "$svc"; then
     fail "$svc 未在執行中。請先啟動堆疊：bash scripts/up.sh"
     exit 1
   fi
