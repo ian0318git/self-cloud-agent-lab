@@ -339,7 +339,7 @@ change anything they cover.
 | `bash scripts/test_phase3_mutants.sh` | That the three graders above are actually exercised — 23 mutations of their own criteria, every one must be caught |
 | `python3 scripts/test_deploy_smoke_probe.py` | That the post-deploy smoke test's four assertions each bite, including the trap it exists to avoid: a generation cut off by the token cap reading as success |
 | `bash scripts/test_profile_lifecycle.sh` | That the stale-container **set difference** is wrong in neither direction — it must report a profile-disabled leftover *and* must not delete a container that is still in service — plus the empty-list guard and the tunnel's four states (D-029) |
-| `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the seven repeats disagree with each other (D-031, D-032). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s |
+| `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the seven repeats disagree with each other (D-031, D-032, D-033). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s. **As of D-033 the baseline is not merely unmeasured — it is unreachable:** the long-prompt arm is hardcoded to 2 samples while the stability rule needs ≥ 5, so the verdict is `unstable` for *every* possible run. Re-running before that is fixed cannot succeed |
 | `bash scripts/test_throughput_probe.py` | That the ceiling formula, the truncation verdict, the "does the ceiling move with `num_predict`" verdict and the KV grouping each bite — 247 assertions, no Docker. It includes a `num_keep` the project has never observed, because a simplification that is equivalent on every observed input cannot be killed by observation |
 | `bash scripts/test_throughput_probe_mutants.sh` | That the four graders above are actually exercised — 71 mutations of their own criteria, every one must be caught. A mutation harness's own output is a claim, so it is checked too: the criteria must not merely be *broken* by the substitution, they must be broken **in a way an assertion notices** — a no-op substitution, a mangled field or a syntax error all "fail the tests" without guarding anything (D-032) |
 
@@ -906,7 +906,8 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
    calls one at a time, not as a batch.** Open WebUI emitted 3 calls ~10 ms
    apart (one response); LangGraph emitted its 2 calls **7.4 s** apart — three
    separate LLM round trips. At the single-digit tok/s this machine decodes at
-   (D-031 measures 4.9–6.6 t/s; not yet a baseline), "one more step" on
+   (D-031 and D-033 both measure single-digit t/s and neither is a baseline —
+   D-033 found the baseline criterion is currently unreachable), "one more step" on
    LangGraph costs *one more LLM round trip*, not one more token. That bears
    directly on items 3 and 4. It is a single observation — not yet attributable
    to LangGraph, langchain, or sampling.
@@ -1155,7 +1156,7 @@ Verified issues that are easy to lose hours to:
 | Gotcha | Detail |
 |---|---|
 | **No GPU, ever** | The Codespaces GPU machine type was **deprecated 2025-08-29**. All inference is CPU-only. |
-| **Slow inference** | A 3B–4B Q4 model on 2 shared vCPUs runs at roughly single-digit tokens/sec. Open WebUI's default 300-second HTTP timeout can be hit by long completions. |
+| **Slow inference** | A 3B–4B Q4 model on shared vCPUs runs at roughly single-digit tokens/sec — measured on both the old 2-vCPU box and the current 4-vCPU one (D-014, D-031, D-033). Open WebUI's default 300-second HTTP timeout can be hit by long completions. |
 | **Pulls need ~2× disk** | Model downloads need space for the compressed *and* extracted forms at the same time, so a nearly-full volume fails pulls — sometimes silently. |
 | **Storage may run out first** | Sources disagree on whether storage counts disk *used* or the full 32GB volume allocation. If it is the allocation, one codespace alive for a month is 32 GB-month against a 15 GB-month allowance and runs out in ~2 weeks, before compute does. Watch the billing page. |
 | **`localhost` is not the host** | From inside a devcontainer, reach a host service via `host.docker.internal` (add `--add-host=host.docker.internal:host-gateway` on Linux), or — as this repo does — make Ollama a compose service reachable at `http://ollama:11434`. |

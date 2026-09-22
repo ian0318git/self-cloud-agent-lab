@@ -320,7 +320,7 @@ bash scripts/up.sh
 | `bash scripts/test_phase3_mutants.sh` | 上面三個評分器真的有在被執行 —— 對它們自己的 23 道判準做突變，每一個都必須被抓到 |
 | `python3 scripts/test_deploy_smoke_probe.py` | 佈署後煙霧測試的四條斷言各自會咬人，包含它存在的理由本身：被 token 上限切斷的生成讀起來像成功 |
 | `bash scripts/test_profile_lifecycle.sh` | 殘留容器的**差集**兩個方向都不能錯 —— 要回報被停用 profile 留下的那個，**且**不能砍掉還在服務的容器 —— 外加空清單守衛與對外連線的四態（D-029） |
-| `bash scripts/verify-throughput.sh` | 七個條件的解碼速率矩陣、**兩組** `num_ctx` 下的截斷上限實測、以及按模型分組的 KV cache 斜率 —— 而且當七次重複彼此不一致時，它**拒絕把任何數字叫做基準線**（D-031、D-032）。它的 prefill 欄是刻意標成不可引用的：探針控制不了 prefix cache 的重用，所以它報 306–14,710 t/s，而真實的冷 prefill 約 25 t/s |
+| `bash scripts/verify-throughput.sh` | 七個條件的解碼速率矩陣、**兩組** `num_ctx` 下的截斷上限實測、以及按模型分組的 KV cache 斜率 —— 而且當七次重複彼此不一致時，它**拒絕把任何數字叫做基準線**（D-031、D-032、D-033）。它的 prefill 欄是刻意標成不可引用的：探針控制不了 prefix cache 的重用，所以它報 306–14,710 t/s，而真實的冷 prefill 約 25 t/s。**D-033 之後，基準線不只是「還沒量到」，是「到不了」**：長 prompt 那一臂的取樣次數被寫死成 2，而穩定度規則要求 ≥ 5，所以判定對**任何**可能的執行都是 `unstable`。在修好之前重跑不可能成功 |
 | `bash scripts/test_throughput_probe.py` | 上限公式、截斷判定、「上限會不會隨 `num_predict` 移動」的判定、以及 KV 分組，每一個都會咬人 —— 247 項斷言，不碰 Docker。裡面有一條專案**從來沒觀測過**的 `num_keep`，因為一個在每個已觀測輸入上都等價的化簡，靠觀測是殺不掉的 |
 | `bash scripts/test_throughput_probe_mutants.sh` | 上面四個判定真的被操到 —— 71 條針對自身準則的突變，每一條都必須被抓到。突變台自己的輸出也是一句斷言，所以它也被檢查：準則不只要被取代**弄壞**，還要壞在**有斷言會叫**的地方 —— 一個 no-op 的取代、被切錯的欄位、或植入後語法就不合法，三者都會讓測試「失敗」，但什麼都沒守住（D-032） |
 
@@ -826,7 +826,8 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
    **一個要帶進後續設計的差異：這條路徑上一次只發一個工具呼叫，不是一批。**
    Open WebUI 那三次呼叫相隔約 10 ms（同一次回應）；LangGraph 的兩次
    相隔 **7.4 秒** —— 三次獨立的 LLM 往返。以這台機器解碼的個位數 tok/s
-   （D-031 量到 4.9–6.6 t/s，尚不是基準線）來看，
+   （D-031 與 D-033 都量到個位數，兩次都不是基準線 —— D-033 發現
+   基準線的判準目前**不可能被滿足**）來看，
    在 LangGraph 上「多一步」的代價是**多一次 LLM 往返**，不是多一個 token。
    這與 item 3、item 4 直接相關。這目前只有一次觀測 ——
    還不能歸因於是 LangGraph、langchain 或取樣的哪一個造成。
@@ -1044,7 +1045,7 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
 | 坑 | 說明 |
 |---|---|
 | **永遠沒有 GPU** | Codespaces 的 GPU 機器類型已於 **2025-08-29 下架**。所有推論都是 CPU-only。 |
-| **推論很慢** | 3B–4B Q4 模型在 2 個共享 vCPU 上約為個位數 tokens/sec。Open WebUI 預設的 300 秒 HTTP timeout 可能被長回答觸發。 |
+| **推論很慢** | 3B–4B Q4 模型在共享 vCPU 上約為個位數 tokens/sec —— 舊的 2 vCPU 機器與現在的 4 vCPU 機器都量到這個數量級（D-014、D-031、D-033）。Open WebUI 預設的 300 秒 HTTP timeout 可能被長回答觸發。 |
 | **下載需要約 2 倍磁碟** | 模型下載需要同時容納壓縮檔與解壓後的檔案，因此接近全滿的 volume 會下載失敗 —— 有時是靜默失敗。 |
 | **可能先耗盡的是儲存** | 各方說法不一致：儲存究竟計費「實際使用」還是「32GB 配置量」。若是後者，一個 codespace 存活一個月就是 32 GB-month，對上 15 GB-month 的額度，會在**約兩週**內耗盡 —— 比 compute 更早。請盯緊帳單頁面。 |
 | **`localhost` 不是主機** | 在 devcontainer 內，要連到主機服務需用 `host.docker.internal`（Linux 上需加 `--add-host=host.docker.internal:host-gateway`），或像本 repo 一樣把 Ollama 做成 compose 服務，以 `http://ollama:11434` 存取。 |
