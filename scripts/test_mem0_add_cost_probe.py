@@ -1814,6 +1814,84 @@ def test_grade_ignores_the_budget_criteria_on_a_bare_run():
     assert not [x for x in problems if x.startswith(("C6", "C7"))], problems
 
 
+def _evidence_segmented_add(**kw):
+    """`--sections add` 的形狀：add 跑了，C2／C3／C4 沒跑。
+
+    **這就是 D-037 的處方**（分段跑，因為跑滿要幾小時），所以 C6／C7 一定
+    要在這個形狀下判得出來 —— 見 test_budget_criteria_are_graded_even_in_a_
+    segmented_add_run()。
+    """
+    e = _evidence_derived(**kw)
+    e["sections_run"] = ["add"]
+    for key in ("truncation", "canary", "thinking"):
+        e.pop(key, None)
+    return e
+
+
+def test_budget_criteria_are_graded_even_in_a_segmented_add_run():
+    """**只跑 add 的那一輪也要判 C6／C7** —— 那正是 D-037 的處方。
+
+    這一條擋的是「哨兵在唯一會被用到的組態裡是安靜的」。原本那兩條寫在
+    grade() 的尾端，而 grade() 開頭「有整節沒量到就提早返回」會先把它們吞
+    掉：2026-09-22 真的跑了一次 `--sections add`（2.7 小時），C6／C7 一次都
+    沒有被判定 —— 兩個前提成不成立，只能靠人自己讀觀察段。
+    """
+    problems = _fails(_evidence_segmented_add(first={"prompt_eval_count": 8300}),
+                      "超過推導用的界 8192")
+    assert any(x.startswith("C6") for x in problems), problems
+    # 缺節那一句還是要在：它不是判準，是「這一輪不算一次完整的量測」。
+    assert any("缺少這幾節" in x for x in problems), problems
+
+
+def test_budget_criteria_report_a_cut_generation_in_a_segmented_add_run():
+    """同一件事的另一半：前提 2 掛掉時，分段輪次也要講出來。"""
+    problems = _fails(_evidence_segmented_add(
+        first={"eval_count": 8192, "done_reason": "length"}),
+        "不是模型自己停下來的")
+    assert any(x.startswith("C7") for x in problems), problems
+
+
+def test_a_segmented_add_run_stays_quiet_when_both_premises_hold():
+    """前提都成立時，分段輪次只該有一句「沒跑滿」—— 不要多話。
+
+    這一條是上兩條的**對照組**：少了它，一個「永遠喊 C6／C7」的實作也會
+    讓它們通過。
+    """
+    passed, problems = p.grade(_evidence_segmented_add())
+    assert not passed, "只跑一部分永遠不算通過（結束碼 2 是設計）"
+    assert len(problems) == 1 and "缺少這幾節" in problems[0], problems
+
+
+def test_budget_criteria_say_nothing_when_the_add_section_did_not_run():
+    """add 節自己都沒跑時，**不**逐條喊「讀不到 prompt_eval_count」。
+
+    那正是 grade() 開頭那個缺節檢查要防的「與事實相反的敘述」：沒量到 ≠ 沒
+    過。缺節訊息已經把 add() 列進去了，再多喊兩條只會讓輸出讀起來像判準
+    掛掉 —— 而實際上這一輪根本沒有結果。
+    """
+    e = _evidence_derived()
+    e["sections_run"] = ["C2"]
+    for key in ("calls", "first_add", "second_add", "truncation",
+                "canary", "thinking"):
+        e.pop(key, None)
+    passed, problems = p.grade(e)
+    assert not passed
+    assert not [x for x in problems if x.startswith(("C6", "C7"))], problems
+    assert any("C1／C5 add()" in x for x in problems), problems
+
+
+def test_a_failing_premise_in_a_segmented_run_is_still_indeterminate():
+    """沒跑滿 ＋ 前提掛掉 → 結束碼仍然是 2，不是 1。
+
+    `exit_code()` 的順序是「先問這一輪算不算一次完整的量測，再問判準」：
+    把一個只跑了一部分的輪次說成「上游變了」，就是 D-018 要防的那件事。
+    """
+    e = _evidence_segmented_add(first={"prompt_eval_count": 8300})
+    passed, problems = p.grade(e)
+    assert not passed and problems
+    assert p.exit_code(e, passed) == p.EXIT_INDETERMINATE == 2
+
+
 def test_observations_states_where_the_budget_came_from():
     """觀察段要能讓讀的人**自己驗算**那個數字是怎麼來的。"""
     notes = p.observations(_evidence_derived())

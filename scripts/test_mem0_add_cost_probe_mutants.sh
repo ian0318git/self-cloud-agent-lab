@@ -339,16 +339,22 @@ MUTANTS=(
   # 「太小」被當成用法錯誤＝把 D-027 的受控條件（4096）擋掉，而文件就叫
   # 人這樣跑 —— 那是一個假失敗（D-016）。
   "預算：太小也當成用法錯誤|    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:|    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= EXTRACTION_PROMPT_TOKENS_BOUND:"
-  "C6：不比對界（有讀到就放行）|        elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:|        elif False:"
-  "C6：讀不到界就放行|        if not pecs:|        if False:"
-  "C7：判準反過來|               for label, (v, s) in verdicts if v != \"stopped\"]|               for label, (v, s) in verdicts if v == \"stopped\"]"
+  "C6：不比對界（有讀到就放行）|    elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:|    elif False:"
+  "C6：讀不到界就放行|    if not pecs:|    if False:"
+  "C7：判準反過來|           for label, (v, s) in verdicts if v != \"stopped\"]|           for label, (v, s) in verdicts if v == \"stopped\"]"
   # 第二次 add 的 prompt 比較長（mem0 會帶上既有歷史）—— 它才是界與預算的
   # 真正壓力點，只看第一次就沒人守它。
-  $'C7：只看第一次 add|        adds = [("add() 第一次", evidence.get("first_add") or {}),\n                ("第二次", evidence.get("second_add") or {})]|        adds = [("add() 第一次", evidence.get("first_add") or {})]'
+  $'C7：只看第一次 add|    adds = [("add() 第一次", evidence.get("first_add") or {}),\n            ("第二次", evidence.get("second_add") or {})]|    adds = [("add() 第一次", evidence.get("first_add") or {})]'
   # **這一條是「把一個有用的對照組關掉」。** 覆寫（含 --quick 的 200）是
   # 重現 D-027 條件的受控實驗，那時預算太小是設計，不是缺陷。
-  "C6C7：覆寫時也判（關掉對照組）|    if meta.get(\"budget_source\") == \"derived_from_ctx\":|    if True:"
+  "C6C7：覆寫時也判（關掉對照組）|    if meta.get(\"budget_source\") != \"derived_from_ctx\":|    if False:"
   "觀察：不印預算的來源|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\"):|    if True:"
+  # **這一條盯的是「哨兵在唯一會被用到的組態裡是安靜的」**：拿掉缺節分支裡的
+  # 那一次呼叫，`--sections add`（D-037 的處方）就又變成一輪不判 C6／C7 的
+  # 量測 —— 而 2026-09-22 的 #66 正是那樣跑的。
+  "缺節時不判 C6／C7（哨兵在 --sections add 裡變安靜）|        ] + budget_premise_problems(evidence)|        ]"
+  # add 節自己沒跑時也照喊「讀不到」—— 那是與事實相反的敘述（沒量到 ≠ 沒過）。
+  $'add 沒跑也喊讀不到（相反敘述）|    if not evidence.get("calls"):\n        return []\n    meta = evidence.get("meta") or {}|    meta = evidence.get("meta") or {}'
   "觀察：推不出來時不講（靜默）|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\"):|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\", \"underivable\"):"
   "觀察：推導的 num_ctx 不一致不講|                and ctx_arg != live):|                and False):"
 )

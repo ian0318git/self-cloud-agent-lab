@@ -1067,6 +1067,87 @@ def cost_split(timings):
     return {"total": total, "shares": shares}
 
 
+def budget_premise_problems(evidence):
+    """C6／C7 —— 推導式生成預算的兩個前提（D-037）。回傳 problems 清單。
+
+    **只吃 add 節與 meta**，所以 add 跑了就判得出來，哪怕別的節沒跑 —— 而那
+    正是 D-037 的處方（`--sections add`）。這兩條原本寫在 `grade()` 的尾端，
+    於是 `grade()` 開頭那個「有整節沒量到就提早返回」會順手把它們一起吞掉：
+    **哨兵在唯一會被用到的那個組態裡是安靜的**。2026-09-22 的 #66 就是這樣跑
+    的 —— C6／C7 一次都沒有被判定，只有觀察段那幾行能看。原本那段註解寫著
+    「上面那個 missing 檢查（`calls` 缺席）已經先返回了，所以走到這裡一定拿
+    得到 first_add」：前半是對的，但它只說明了「這裡拿得到 first_add」，沒說
+    「這裡一定會被執行到」—— 提早返回不只發生在 add 缺席時。
+
+    add 節真的沒跑時回空清單，**不**逐條喊「讀不到」：那正是上面那個 missing
+    檢查要防的「與事實相反的敘述」（沒量到 ≠ 沒過）。缺節訊息已經講過了。
+
+    這兩條問的**不是**「上游變了沒」，而是「我們自己這條推導的前提還成不
+    成立」，所以它們是硬判準，而 `truncation_claim_verdict()` 那類 claim 判讀
+    只進觀察段：claim 問的是世界的變化（給人看的訊號），前提問的是**我們算出
+    來的數字對不對**。界過期 ＝ 預算沒有依據，而它的症狀是「安靜地抽出 0
+    筆」—— 靜默通過正是 D-036 花了四小時才買到的教訓。
+
+    **只在預算是推導來的時候成立。** `--add-max-tokens N`（含 `--quick` 翻出來
+    的 200）是重現 D-027 條件的受控實驗：那時「預算不夠」是**設計**，讓它失敗
+    會把一個有用的對照組關掉。
+    """
+    if not evidence.get("calls"):
+        return []
+    meta = evidence.get("meta") or {}
+    if meta.get("budget_source") != "derived_from_ctx":
+        return []
+
+    problems = []
+    cap = effective_num_predict(meta)
+    ctx_arg = meta.get("ctx_arg")
+    adds = [("add() 第一次", evidence.get("first_add") or {}),
+            ("第二次", evidence.get("second_add") or {})]
+    adds = [(label, a) for label, a in adds if a]
+
+    # C6：**界要成立** —— 這一輪的 prompt 沒有超過界。取兩次之中大的那一個：
+    # 第二次的 prompt 比較長（mem0 會把既有歷史一起送），界要蓋住的是最大的
+    # 那一份。
+    pecs = [(label, a["prompt_eval_count"]) for label, a in adds
+            if isinstance(a.get("prompt_eval_count"), int)
+            and not isinstance(a.get("prompt_eval_count"), bool)]
+    if not pecs:
+        problems.append(
+            "C6：讀不到 prompt_eval_count，無法確認推導用的界（%d）還成立。"
+            "這一條是那個界的哨兵，讀不到就不算過 —— 見 D-037。"
+            % EXTRACTION_PROMPT_TOKENS_BOUND)
+    elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:
+        worst_label, worst = max(pecs, key=lambda kv: kv[1])
+        problems.append(
+            "C6：抽取 prompt 量到 %r 個 token（%s，兩次是 %s），**超過推導用"
+            "的界 %d** —— 預算 %s 是用一個**過期的界**算出來的，所以它不再"
+            "保證不會觸發 context shift（不變式是 prompt ≤ 界 ⇒ "
+            "prompt + 預算 ≤ num_ctx=%s）。"
+            "處方是**更新界並記錄這次的觀測**（EXTRACTION_PROMPT_TOKENS_"
+            "BOUND），不是把預算調大 —— 調大就是把 D-036 第十節那條規矩"
+            "再犯一次。見 D-037。"
+            % (worst, worst_label,
+               "、".join("%s=%s" % kv for kv in pecs),
+               EXTRACTION_PROMPT_TOKENS_BOUND, cap, ctx_arg))
+
+    # C7：**預算要夠** —— 模型是自己停下來的，不是被這個上限切斷的。
+    verdicts = [(label, generation_stop_verdict(
+        a.get("eval_count"), cap, a.get("done_reason"))) for label, a in adds]
+    bad = [(label, s or "讀不到判準需要的觀測（eval_count／done_reason）")
+           for label, (v, s) in verdicts if v != "stopped"]
+    if not verdicts or bad:
+        readings = "、".join("%s：%s" % kv for kv in bad) or "兩次 add() 都沒有觀測"
+        problems.append(
+            "C7：預算是從 num_ctx=%s 推導出來的 %s，而生成**不是模型自己停"
+            "下來的**（%s）—— 也就是說模型需要的比我們允許的多。"
+            "處方是**把 num_ctx 開大**（預算 = num_ctx − %d 的 prompt 上界，"
+            "會自己跟著走），**不是把上限直接調大** —— 後者就是魔數，下一個"
+            "模型／下一份 prompt 會再犯一次。見 D-037。"
+            % (ctx_arg, cap, readings, EXTRACTION_PROMPT_TOKENS_BOUND))
+
+    return problems
+
+
 def grade(evidence):
     """純函式：證據 → (passed, problems)。
 
@@ -1091,10 +1172,14 @@ def grade(evidence):
                 ("C4 thinking", "thinking"), ("C1／C5 add()", "calls"))
                if not evidence.get(key)]
     if missing:
+        # **但 C6／C7 還是要判。** 它們只吃 add 節與 meta，而 add 節有跑的時候
+        # （`--sections add`，也就是 D-037 的處方）這一輪的 C2／C3／C4 缺席並
+        # 不影響那兩條能不能判。少了這一行，哨兵在唯一會被用到的組態裡是安靜
+        # 的 —— 見 budget_premise_problems() 的 docstring。
         return False, [
             "缺少這幾節的量測結果：%s —— 探針沒有跑到那裡，通常是環境問題"
             "（見上面的 fatal），**不是判準沒過**。" % "、".join(missing)
-        ]
+        ] + budget_premise_problems(evidence)
 
     calls = evidence.get("calls") or {}
     trunc = evidence.get("truncation") or {}
@@ -1202,65 +1287,10 @@ def grade(evidence):
         )
 
     # ── C6／C7：推導式生成預算的兩個前提 ─────────────────────
-    # 這兩條問的**不是**「上游變了沒」，而是「我們自己這條推導的前提還成不
-    # 成立」（D-037）。所以它們是硬判準，而 truncation_claim_verdict() 那類
-    # claim 判讀只進觀察段：claim 問的是世界的變化（給人看的訊號），前提問的
-    # 是**我們算出來的數字對不對**。界過期 ＝ 預算沒有依據，而它的症狀是
-    # 「安靜地抽出 0 筆」—— 靜默通過正是 D-036 花了四小時才買到的教訓。
-    #
-    # **只在預算是推導來的時候成立。** `--add-max-tokens N`（含 `--quick`
-    # 翻出來的 200）是重現 D-027 條件的受控實驗：那時「預算不夠」是**設計**，
-    # 讓它失敗會把一個有用的對照組關掉。
-    #
-    # add 節沒跑的時候，上面那個 missing 檢查（`calls` 缺席）已經先返回了，
-    # 所以走到這裡一定拿得到 first_add。
-    meta = evidence.get("meta") or {}
-    if meta.get("budget_source") == "derived_from_ctx":
-        cap = effective_num_predict(meta)
-        ctx_arg = meta.get("ctx_arg")
-        adds = [("add() 第一次", evidence.get("first_add") or {}),
-                ("第二次", evidence.get("second_add") or {})]
-        adds = [(label, a) for label, a in adds if a]
-
-        # C6：**界要成立** —— 這一輪的 prompt 沒有超過界。取兩次之中大的那
-        # 一個：第二次的 prompt 比較長（mem0 會把既有歷史一起送），界要蓋住
-        # 的是最大的那一份。
-        pecs = [(label, a["prompt_eval_count"]) for label, a in adds
-                if isinstance(a.get("prompt_eval_count"), int)
-                and not isinstance(a.get("prompt_eval_count"), bool)]
-        if not pecs:
-            problems.append(
-                "C6：讀不到 prompt_eval_count，無法確認推導用的界（%d）還成立。"
-                "這一條是那個界的哨兵，讀不到就不算過 —— 見 D-037。"
-                % EXTRACTION_PROMPT_TOKENS_BOUND)
-        elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:
-            worst_label, worst = max(pecs, key=lambda kv: kv[1])
-            problems.append(
-                "C6：抽取 prompt 量到 %r 個 token（%s，兩次是 %s），**超過推導用"
-                "的界 %d** —— 預算 %s 是用一個**過期的界**算出來的，所以它不再"
-                "保證不會觸發 context shift（不變式是 prompt ≤ 界 ⇒ "
-                "prompt + 預算 ≤ num_ctx=%s）。"
-                "處方是**更新界並記錄這次的觀測**（EXTRACTION_PROMPT_TOKENS_"
-                "BOUND），不是把預算調大 —— 調大就是把 D-036 第十節那條規矩"
-                "再犯一次。見 D-037。"
-                % (worst, worst_label,
-                   "、".join("%s=%s" % kv for kv in pecs),
-                   EXTRACTION_PROMPT_TOKENS_BOUND, cap, ctx_arg))
-
-        # C7：**預算要夠** —— 模型是自己停下來的，不是被這個上限切斷的。
-        verdicts = [(label, generation_stop_verdict(
-            a.get("eval_count"), cap, a.get("done_reason"))) for label, a in adds]
-        bad = [(label, s or "讀不到判準需要的觀測（eval_count／done_reason）")
-               for label, (v, s) in verdicts if v != "stopped"]
-        if not verdicts or bad:
-            readings = "、".join("%s：%s" % kv for kv in bad) or "兩次 add() 都沒有觀測"
-            problems.append(
-                "C7：預算是從 num_ctx=%s 推導出來的 %s，而生成**不是模型自己停"
-                "下來的**（%s）—— 也就是說模型需要的比我們允許的多。"
-                "處方是**把 num_ctx 開大**（預算 = num_ctx − %d 的 prompt 上界，"
-                "會自己跟著走），**不是把上限直接調大** —— 後者就是魔數，下一個"
-                "模型／下一份 prompt 會再犯一次。見 D-037。"
-                % (ctx_arg, cap, readings, EXTRACTION_PROMPT_TOKENS_BOUND))
+    # 這一輪跑滿了所有的節，所以上面那個 missing 檢查沒有提早返回 —— 兩條
+    # 哨兵照判。它們的實作與理由都在 budget_premise_problems()（分段輪次要
+    # 靠它才判得到，見那個函式的 docstring）。
+    problems.extend(budget_premise_problems(evidence))
 
     return (len(problems) == 0), problems
 
