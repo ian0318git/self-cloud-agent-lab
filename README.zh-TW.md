@@ -282,6 +282,10 @@ max_tokens = num_ctx − EXTRACTION_PROMPT_TOKENS_BOUND   # bound = 8192
 | **Open WebUI** | 聊天介面 + 內建 RAG + 原生 MCP 支援 |
 | **cloudflared** | *選用*，預設關閉。對外連線用的 outbound tunnel，見[對外連線的安全性](#對外連線的安全性) |
 
+> `docker compose up -d` 還會起**第三個**容器：`mcp-test-server`。它沒有宣告
+> profile，所以不像 `cloudflared` 那樣是選用的。它屬於第二階段的圖，見下面的
+> [東西跑在哪裡（第二階段）](#東西跑在哪裡第二階段)。
+
 ---
 
 ## 快速開始
@@ -753,6 +757,65 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在正被�
 > 沒有金鑰會在啟動時拋出 `INVALID_LICENSE`。**`langgraph` 函式庫本身是 MIT
 > 且免費** —— 請在你自己的服務中使用它，或使用 `langgraph dev`，
 > 避開商業版 server 映像檔。
+
+### 東西跑在哪裡（第二階段）
+
+第一階段的圖是兩個長時間執行的容器。第二階段加了第三個，以及一層**不是服務**的
+驗證層。下面這張圖是從 compose 檔與探針腳本讀出來的，不是憑印象畫的 —— 圖上
+每一句在項目符號裡都有出處：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Docker network: ai-net                                  │
+│                                                          │
+│  long-running (docker compose up -d):                    │
+│   ┌──────────┐         ┌───────────────┐                 │
+│   │  ollama  │◄────────│  open-webui   │                 │
+│   │  :11434  │         │ :8080 → :3000 │                 │
+│   └────▲─────┘         └───────┬───────┘                 │
+│        │                       │                         │
+│        │  MCP (Streamable HTTP)│                         │
+│        │                       ▼                         │
+│        │               ┌───────────────┐                 │
+│        │               │ mcp-test-srv  │                 │
+│        │               │   :8000/mcp   │                 │
+│        │               │ echo,roll_die │                 │
+│        │               └───────────────┘                 │
+│        │                                                 │
+│  one-off (docker run --rm, per experiment):              │
+│   ┌────┴─────────────────────┐                           │
+│   │    probe container       │                           │
+│   │    mem0 + ChromaDB       │                           │
+│   │    + history.db          │                           │
+│   └──────────────────────────┘                           │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **`mcp-test-server` 只為了一張清單而存在。** 它從 `./mcp-server` 建起來，用
+  Streamable HTTP 在 `http://mcp-test-server:8000/mcp` 提供兩個工具 —— `echo`
+  與 `roll_die`。它不發布任何埠，所以只有 `ai-net` 上的 `open-webui` 碰得到
+  （`docker-compose.yml:197-200`，與 ollama 不發布 `:11434` 同一個思路，D-003）。
+  compose 的註解寫著：驗證完第二階段 MCP 清單後，刪掉這個服務與 `mcp-server/`
+  目錄即可（`docker-compose.yml:196`）。
+- **它不是選用的；`cloudflared` 才是。** `mcp-test-server` 沒有宣告 profile，所以
+  `scripts/up.sh:76` 那句樸素的 `docker compose up -d --wait --remove-orphans`
+  會把它一起起起來，並且等它的 healthcheck。那個 healthcheck 只檢查「埠有在聽」
+  —— 這是刻意的：streamable-http 的 `GET /mcp` 不會回 `200`，用 HTTP 狀態碼去驗
+  會製造假失敗（`docker-compose.yml:202-204`）。
+- **MCP 連線本身是資料庫狀態，不是設定。** 它沒有環境變數，是在介面上新增、存進
+  Open WebUI 的資料庫 —— 見[啟用 MCP](#啟用-mcp)。
+- **`:8080 → :3000` 是唯一發布的埠。** Open WebUI 在容器內聽 `:8080`，compose 把
+  它發布到主機的 `:3000`，綁在 `${WEBUI_BIND_ADDR:-0.0.0.0}`（`docker-compose.yml:71`）。
+- **探針層不屬於佈署面上的一員。** 它是第二階段那些宣稱的查核方式：每個探針都是
+  `docker run --rm --network <project>_ai-net` 的一次性執行，映像檔當場用 heredoc
+  建起來（`docker build -t … -f -`，所以磁碟上沒有 `Dockerfile`），探針的 `.py`
+  以唯讀方式掛進去。目前兩個映像檔：`…-mem0-probe`（mem0 + ChromaDB）與
+  `…-langgraph-probe`（tool calling，以及第三階段那些執行期問題）。
+- **ChromaDB 與 `history.db` 就在探針容器裡面**（嵌入式），所以它們跟著 `--rm`
+  一起消失（D-027 第七節）。需要讀回前一次呼叫寫了什麼的實驗，得在一次執行內
+  完成。
+- **第二階段沒有改變的：** `qwen3-embedding:0.6b` 與聊天模型由同一個 `ollama`
+  容器提供，`:11434` 依然不發布，`cloudflared` 依然在 `tunnel` profile 後面。
 
 ### 啟用 MCP
 

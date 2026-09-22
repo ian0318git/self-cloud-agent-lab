@@ -308,6 +308,11 @@ Phase 1 (implemented in this repo):
 | **Open WebUI** | Chat UI + built-in RAG + native MCP support |
 | **cloudflared** | *Optional*, off by default. Outbound tunnel for remote access — see [Securing remote access](#securing-remote-access) |
 
+> `docker compose up -d` starts a **third** container as well: `mcp-test-server`.
+> It declares no profile, so unlike `cloudflared` it is not optional. It belongs
+> to Phase 2's picture — see [Where the pieces run](#where-the-pieces-run-phase-2)
+> below.
+
 ---
 
 ## Quick start
@@ -824,6 +829,73 @@ below and [`DECISIONS.md`](DECISIONS.md) D-005 for the full trade-off.
 > `LANGGRAPH_CLOUD_LICENSE_KEY`); without one it raises `INVALID_LICENSE` at
 > startup. The `langgraph` **library** is MIT and free — use it inside your own
 > service, or use `langgraph dev`, and avoid the commercial server image.
+
+### Where the pieces run (Phase 2)
+
+Phase 1's picture has two long-running containers. Phase 2 adds a third, plus a
+verification layer that is not a service at all. The diagram below is read off
+the compose file and the probe scripts rather than drawn from memory — each
+claim in it has a citation in the bullets:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Docker network: ai-net                                  │
+│                                                          │
+│  long-running (docker compose up -d):                    │
+│   ┌──────────┐         ┌───────────────┐                 │
+│   │  ollama  │◄────────│  open-webui   │                 │
+│   │  :11434  │         │ :8080 → :3000 │                 │
+│   └────▲─────┘         └───────┬───────┘                 │
+│        │                       │                         │
+│        │  MCP (Streamable HTTP)│                         │
+│        │                       ▼                         │
+│        │               ┌───────────────┐                 │
+│        │               │ mcp-test-srv  │                 │
+│        │               │   :8000/mcp   │                 │
+│        │               │ echo,roll_die │                 │
+│        │               └───────────────┘                 │
+│        │                                                 │
+│  one-off (docker run --rm, per experiment):              │
+│   ┌────┴─────────────────────┐                           │
+│   │    probe container       │                           │
+│   │    mem0 + ChromaDB       │                           │
+│   │    + history.db          │                           │
+│   └──────────────────────────┘                           │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **`mcp-test-server` exists for one checklist.** It is built from `./mcp-server`
+  and serves two tools — `echo` and `roll_die` — over Streamable HTTP at
+  `http://mcp-test-server:8000/mcp`. It publishes no port, so only `open-webui`
+  on `ai-net` can reach it (`docker-compose.yml:197-200`, same reasoning as
+  ollama's unpublished `:11434`, D-003). The compose comment says to delete the
+  service and the `mcp-server/` directory once the MCP checklist is verified
+  (`docker-compose.yml:196`).
+- **It is not optional; `cloudflared` is.** `mcp-test-server` declares no
+  profile, so the bare `docker compose up -d --wait --remove-orphans` in
+  `scripts/up.sh:76` starts it and waits on its healthcheck. That healthcheck
+  only checks that the port is listening — deliberately, because `GET /mcp` on a
+  streamable-http server does not answer `200`, so an HTTP status check would
+  report a false failure (`docker-compose.yml:202-204`).
+- **The MCP connection itself is database state, not configuration.** There is no
+  environment variable for it; it is added in the UI and stored in Open WebUI's
+  database — see [Enabling MCP](#enabling-mcp).
+- **`:8080 → :3000` is the one published port.** Open WebUI listens on `:8080`
+  inside the container; compose publishes it to the host on `:3000`, bound to
+  `${WEBUI_BIND_ADDR:-0.0.0.0}` (`docker-compose.yml:71`).
+- **The probe layer is not part of the deployed stack.** It is how Phase 2's
+  claims get checked: each probe is a `docker run --rm --network
+  <project>_ai-net` one-off, with the image built on the spot from an inline
+  heredoc (`docker build -t … -f -`, so no `Dockerfile` is on disk) and the
+  probe `.py` bind-mounted read-only. Two images exist: `…-mem0-probe` (mem0 +
+  ChromaDB) and `…-langgraph-probe` (tool calling, and the Phase 3 runtime
+  questions).
+- **ChromaDB and `history.db` live inside the probe container**, embedded, so
+  they die together with `--rm` (D-027 §7). An experiment that needs to read back
+  what an earlier call wrote has to finish inside one run.
+- **What Phase 2 does not change:** `qwen3-embedding:0.6b` is served by the same
+  `ollama` container as the chat model, `:11434` stays unpublished, and
+  `cloudflared` stays behind the `tunnel` profile.
 
 ### Enabling MCP
 
