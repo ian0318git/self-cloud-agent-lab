@@ -316,6 +316,41 @@ MUTANTS=(
   # 這一條對應 item 2 真的犯過的錯：observations() 無條件塞一則說明，
   # 空證據時回傳非空清單（D-026 第二節）。
   $'observations：空證據不早退|    if not evidence:\n        return notes|    if False:\n        return notes'
+  # ── 推導式生成預算（D-037）──
+  # 這一組守的是 D-036 第十節那條規矩：「不要把它寫成另一個魔數」。
+  # 魔數的症狀不是「數字不對」，是**它在下一個模型／下一份 prompt 上安靜地
+  # 不對** —— 所以下面每一條都是一種「安靜地不對」的寫法。
+  "預算：推導寫死成一個常數|    budget = num_ctx - bound|    budget = 8192"
+  # 回 0 是最惡的一種：0 在 mem0 的 config 裡會被 truthiness 吃掉，於是
+  # 「算不出來」會變成「用 mem0 的預設 2,000」—— 症狀與 D-036 一模一樣。
+  "預算：算不出來時回 0 而不是 None|    return budget if budget > 0 else None|    return budget if budget > 0 else 0"
+  # 覆寫是重現 D-027 條件的受控實驗（--quick 就是它）—— 讓推導蓋掉它，
+  # 會把一個已經文件化的旗標變成靜默失效。
+  "預算：推導蓋掉 --add-max-tokens|    if add_max_tokens:|    if add_max_tokens and ctx is None:"
+  # 「推不出來」與「本來就用預設」的 effective 都是 None，只有來源字串分得
+  # 開。混掉的話，推導失敗會偽裝成「這一輪刻意不覆寫」。
+  "預算：推不出來當成 mem0 預設|        return None, \"underivable\", (|        return None, \"mem0_default\", ("
+  # 三個使用點（config、輸出、判準）共用這支；漏掉推導值＝輸出與事實相反，
+  # 而 C7 會拿 2,000 當上限去判一個 8,192 的預算。
+  $'預算：有效值漏掉推導那一格|    return (meta.get("add_max_tokens_effective")\n            or (meta.get("mem0_options") or {}).get("num_predict"))|    return (meta.get("mem0_options") or {}).get("num_predict")'
+  # 入口守衛：不合法的 --ctx 若放行，會跑幾個小時才得到一份看起來正常、
+  # 其實沒有推導的結果（D-035 第七節教訓 3 的形狀）。
+  "預算：入口完全不管 --ctx|    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:|    if False:"
+  # 「太小」被當成用法錯誤＝把 D-027 的受控條件（4096）擋掉，而文件就叫
+  # 人這樣跑 —— 那是一個假失敗（D-016）。
+  "預算：太小也當成用法錯誤|    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:|    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= EXTRACTION_PROMPT_TOKENS_BOUND:"
+  "C6：不比對界（有讀到就放行）|        elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:|        elif False:"
+  "C6：讀不到界就放行|        if not pecs:|        if False:"
+  "C7：判準反過來|               for label, (v, s) in verdicts if v != \"stopped\"]|               for label, (v, s) in verdicts if v == \"stopped\"]"
+  # 第二次 add 的 prompt 比較長（mem0 會帶上既有歷史）—— 它才是界與預算的
+  # 真正壓力點，只看第一次就沒人守它。
+  $'C7：只看第一次 add|        adds = [("add() 第一次", evidence.get("first_add") or {}),\n                ("第二次", evidence.get("second_add") or {})]|        adds = [("add() 第一次", evidence.get("first_add") or {})]'
+  # **這一條是「把一個有用的對照組關掉」。** 覆寫（含 --quick 的 200）是
+  # 重現 D-027 條件的受控實驗，那時預算太小是設計，不是缺陷。
+  "C6C7：覆寫時也判（關掉對照組）|    if meta.get(\"budget_source\") == \"derived_from_ctx\":|    if True:"
+  "觀察：不印預算的來源|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\"):|    if True:"
+  "觀察：推不出來時不講（靜默）|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\"):|    if not meta or meta.get(\"budget_source\") in (None, \"mem0_default\", \"underivable\"):"
+  "觀察：推導的 num_ctx 不一致不講|                and ctx_arg != live):|                and False):"
 )
 
 caught=0

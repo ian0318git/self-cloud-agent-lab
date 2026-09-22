@@ -202,6 +202,31 @@ criterion is `done_reason == "stop"`; this model's natural length for this promp
 was 5,605 tokens, and any fixed cap below it truncates **silently**, in a way
 that reads as "there were no facts to extract".
 
+**The budget half is now written down — as a derivation, not a constant
+(D-037).** The probe derives it from the context it is given:
+
+```
+max_tokens = num_ctx − EXTRACTION_PROMPT_TOKENS_BOUND   # bound = 8192
+```
+
+The invariant is what separates it from 8,000-the-number: for any prompt at or
+below the bound, `prompt + budget ≤ num_ctx`, so a mid-generation **context shift
+is structurally impossible** — and raising `num_ctx` raises the budget with it.
+Two hard criteria guard the derivation's two premises, and they are the reason a
+stale derivation cannot pass quietly: **C6** fails if this round's measured
+`prompt_eval_count` exceeded the bound (the prescription is to *update the
+bound*), **C7** fails if generation did not end in `done_reason=stop` (the
+prescription is to *raise `num_ctx`*). Both are skipped when the budget was
+overridden on purpose (`--add-max-tokens`, `--quick`) — there a small budget is
+the experiment, not a defect.
+
+**This is not deployed, and the docs should not read as if it were.** Nothing in
+this repo calls mem0 in production: `grep -rn 'import mem0'` matches only the
+probe, `mcp-server/` has no memory tool, and Open WebUI's memory layer is off
+entirely. What exists is the derivation plus criteria that will shout — the
+fourth-phase agent inherits that config template, and the deploy path
+(`deploy-vps.sh`) still writes only the context half.
+
 **Verifying it took effect is not optional**, because the variable's *name* was
 verified in the binary long before anything proved it does anything (D-028). Read
 it back from the **loaded model**, not from the config: `curl` is unavailable on
@@ -358,11 +383,11 @@ change anything they cover.
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | That the grader above is actually exercised — 11 mutations of its own criteria, every one must be caught |
 | `bash scripts/verify-chroma-dims.sh` | That mem0 reuses a pre-created ChromaDB collection instead of fighting it, and which metadata key is authoritative for embedding dimensions (D-026) |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
-| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027). **Three control groups have since closed the question**: pre-generation truncation (D-034) and the mid-generation context shift (D-035) were *eliminated*, and the **generation budget** was **confirmed as the cause** (D-036) — at `num_ctx` held at 16,384, `num_predict` 2,000 → 8,000 extracts 2 memories where 0 were extracted, with `done_reason=stop` |
+| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027). **Three control groups have since closed the question**: pre-generation truncation (D-034) and the mid-generation context shift (D-035) were *eliminated*, and the **generation budget** was **confirmed as the cause** (D-036) — at `num_ctx` held at 16,384, `num_predict` 2,000 → 8,000 extracts 2 memories where 0 were extracted, with `done_reason=stop`. The script now reads the container's `OLLAMA_CONTEXT_LENGTH` and hands it to the probe as `--ctx`, so the budget is **derived** (`num_ctx − 8192`) rather than fixed, with C6/C7 as the sentinels on the derivation's two premises (D-037) |
 | `python3 scripts/test_mem0_add_cost_probe.py` | That the verdicts above have discriminating power offline — no Docker, no ollama — including the four-state truncation claim that `#58` replaced (D-036 §11.1) |
-| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 92 mutations of its own criteria, every one must be caught |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 107 mutations of its own criteria, every one must be caught |
 | `bash scripts/test_probe_traceability.sh` | That a probe **bind-mounted live** into its container can be proved to be the same file before and after the run — the probe is not baked into the image (four scripts mount it, e.g. `verify-mem0-add-cost.sh:298`), so the image label does not cover it and a pass it produced mid-change traces to no revision — recovering that once took a leftover `.pyc` (D-027 §10, D-036 §11.2) |
-| `bash scripts/test_verify_mem0_add_cost_guard.sh` | That the guard above is actually **wired in**: that `changed` overrides a `--sections` exit 2 while a genuine 2 is not misreported, that an unreadable hash warns instead of failing (D-016), and that 「結束碼 2 是預期的」 can no longer print at rc 3 |
+| `bash scripts/test_verify_mem0_add_cost_guard.sh` | That the guard above is actually **wired in**: that `changed` overrides a `--sections` exit 2 while a genuine 2 is not misreported, that an unreadable hash warns instead of failing (D-016), that 「結束碼 2 是預期的」 can no longer print at rc 3, and that a readable `OLLAMA_CONTEXT_LENGTH` reaches the probe as `--ctx` while an unreadable one reaches it as **no flag at all** plus a warning (D-037) |
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences — including the lie it tells in the worst direction: under `set -o pipefail` a `printf \| grep -q` coverage check dies of SIGPIPE, so it reports "coverage not established" *precisely when the window covers the most* (D-034) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |

@@ -184,6 +184,28 @@ token，兩次 `add()` 都撞到了（D-035）。真正該滿足的是
 prompt 的自然長度是 5,605 個 token，任何低於它的固定上限都會**靜默地**截斷，
 而截斷出來的結果讀起來像「沒有事實可抽」。
 
+**「預算」那一半現在寫下來了 —— 寫成推導，不是常數（D-037）。** 探針從它
+拿到的 context 推出預算：
+
+```
+max_tokens = num_ctx − EXTRACTION_PROMPT_TOKENS_BOUND   # bound = 8192
+```
+
+不變式就是它與「8,000 這個數字」的差別：只要 prompt 不超過上界，
+`prompt + 預算 ≤ num_ctx`，所以生成期間的 **context shift 結構上不可能發生**
+—— 而且 `num_ctx` 調大時預算自己跟著變大。兩條硬判準盯著這條推導的兩個前提，
+它們是「過期的推導不能靜默通過」的理由：**C6** 在這一輪實測的
+`prompt_eval_count` 超過上界時失敗（處方是**更新上界**），**C7** 在生成不是以
+`done_reason=stop` 結束時失敗（處方是**把 `num_ctx` 開大**）。預算是被刻意
+覆寫時（`--add-max-tokens`、`--quick`）兩條都不判 —— 那時預算小是**實驗**，
+不是缺陷。
+
+**這件事沒有佈署，文件也不該讀起來像佈署了。** 這個 repo 裡沒有任何地方在
+生產環境呼叫 mem0：`grep -rn 'import mem0'` 只命中探針，`mcp-server/` 沒有
+記憶工具，open-webui 的 memory 層整個沒開。存在的是**推導 ＋ 會叫的判準** ——
+第四階段的 agent 會沿用那份 config 樣板，而佈署路徑（`deploy-vps.sh`）仍然
+只寫 context 那一半。
+
 **驗證它有生效不是可有可無的步驟**，因為這個變數的**名字**在二進位檔裡被
 驗證過，遠早於有任何東西證明它真的有用（D-028）。要從**已載入的模型**讀
 回來，不是從設定檔：主機上沒有 `curl`（ollama 刻意不發布任何埠），所以要在
@@ -335,9 +357,9 @@ bash scripts/up.sh
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 11 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/verify-chroma-dims.sh` | mem0 會沿用預先建立的 ChromaDB 集合，而不是跟它對抗；以及 embedding 維度以哪個 metadata 鍵為準（D-026） |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 24 道判準做突變，每一個都必須被抓到 |
-| `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027）。**此後三組對照組把這個問題收掉了**：生成之前的截斷（D-034）與生成期間的 context shift（D-035）都被**排除**，而**生成預算被正面確認就是成因**（D-036）—— `num_ctx` 維持 16,384，`num_predict` 由 2,000 開到 8,000 之後抽出 2 則記憶，原本是 0 則，且 `done_reason=stop` |
+| `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027）。**此後三組對照組把這個問題收掉了**：生成之前的截斷（D-034）與生成期間的 context shift（D-035）都被**排除**，而**生成預算被正面確認就是成因**（D-036）—— `num_ctx` 維持 16,384，`num_predict` 由 2,000 開到 8,000 之後抽出 2 則記憶，原本是 0 則，且 `done_reason=stop`。這支腳本現在會讀容器的 `OLLAMA_CONTEXT_LENGTH` 並以 `--ctx` 交給探針，所以預算是**推導**出來的（`num_ctx − 8192`）而不是寫死的，C6／C7 則是那條推導兩個前提的哨兵（D-037） |
 | `python3 scripts/test_mem0_add_cost_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 ollama —— 包括 `#58` 換掉的那個四態截斷主張（D-036 第 11.1 節） |
-| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 92 道判準做突變，每一個都必須被抓到 |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 107 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/test_probe_traceability.sh` | **即時 bind-mount** 進容器的探針，可以被證明在執行前後是同一個檔案 —— 探針沒有烤進映像（四個腳本都這樣掛它，例如 `verify-mem0-add-cost.sh:298`），所以映像標籤不涵蓋它，而它中途被換掉時產出的「通過」追不回任何一個修訂版 —— 追回那件事曾經只能靠一個殘留的 `.pyc`（D-027 第十節、D-036 第 11.2 節） |
 | `bash scripts/test_verify_mem0_add_cost_guard.sh` | 上面那個守衛真的**接上去了**：`changed` 蓋得過 `--sections` 的結束碼 2，而真正的 2 不會被誤報；雜湊讀不到時只警告不失敗（D-016）；以及「結束碼 2 是預期的」這句在 rc=3 時不會再印出來 |
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 —— 也測它在**最壞的方向**上說的謊：`set -o pipefail` 之下 `printf \| grep -q` 的涵蓋檢查會死於 SIGPIPE，於是**偏偏在涵蓋範圍最大的時候**回報「涵蓋不到」（D-034） |

@@ -1232,7 +1232,7 @@ def test_environment_records_the_probe_revision():
         ev = {}
         args = type("A", (), {"model": "qwen3:4b",
                               "embed_model": "qwen3-embedding:0.6b",
-                              "add_max_tokens": None})()
+                              "add_max_tokens": None, "ctx": None})()
         ok = p.measure_environment(ev, args)
     finally:
         p._client, p._ps_context_length = saved
@@ -1560,6 +1560,310 @@ def test_observations_keeps_the_truncation_claim_when_ctx_is_small():
     second = [n for n in notes if "第二次 add（內容相同）" in n]
     assert len(second) == 1, notes
     assert "都被截斷到同一個上限" in second[0], second[0]
+
+
+# ── 推導式生成預算（D-037）──────────────────────────────
+#
+# 這一組盯的是 D-036 第十節立的規矩：「不要把它寫成另一個魔數」。
+# 魔數的症狀不是「數字不對」，而是**它在下一個模型／下一份 prompt 上安靜地
+# 不對** —— 所以這裡驗的是「值的來歷」（推導 vs 覆寫 vs 預設）與「前提被違反
+# 時會不會叫」，不只是數字本身。
+
+
+def _evidence_derived(ctx=16384, first=None, second=None):
+    """D-036 第三輪的形狀：預算由 num_ctx 推導，兩次 add() 都自己停下來。"""
+    e = _evidence_ok()
+    _, source, note = p.budget_resolution(None, ctx)
+    e["meta"].update({
+        "budget_source": source,
+        "ctx_arg": ctx,
+        "budget_note": note,
+        "add_max_tokens_effective": p.extraction_budget(ctx),
+        "context_length_before": ctx,
+    })
+    e["first_add"].update({"prompt_eval_count": 8052, "eval_count": 5605,
+                           "done_reason": "stop"})
+    e["second_add"].update({"prompt_eval_count": 8167, "eval_count": 1236,
+                            "done_reason": "stop"})
+    if first:
+        e["first_add"].update(first)
+    if second:
+        e["second_add"].update(second)
+    return e
+
+
+def test_extraction_budget_derives_and_follows_num_ctx():
+    """預算是**算**出來的：num_ctx 變大，它跟著變大。
+
+    這一條是「推導」與「魔數」的分界線。魔數在任何 num_ctx 下都回同一個
+    值，於是 num_ctx 一大，它就變成新的 2,000（D-036 第十節）。
+    """
+    assert p.extraction_budget(16384) == 8192, p.extraction_budget(16384)
+    assert p.extraction_budget(32768) == 24576, p.extraction_budget(32768)
+    assert p.extraction_budget(32768) > p.extraction_budget(16384)
+    # 界線：剛好多 1 個 token 就推得出 1，等於界則推不出來。
+    assert p.extraction_budget(8193) == 1, p.extraction_budget(8193)
+    assert p.extraction_budget(8192) is None, p.extraction_budget(8192)
+
+
+def test_extraction_budget_refuses_instead_of_returning_zero():
+    """推不出來時回 **None，不是 0**。
+
+    0 在 mem0 的 config 裡會被 truthiness 吃掉（`--add-max-tokens 0` 現行
+    就是靜默地什麼都不做），所以「算不出來」若寫成 0，會變成「用 mem0 的
+    預設 2,000」—— 「安靜地不對」正是這一整條線要消滅的失敗方式。
+
+    `True` 是刻意的案例：`isinstance(True, int)` 是 True，但它是旗標不是
+    大小 —— 與 `generation_stop_verdict()` 的同一個慣例（那裡也擋 bool）。
+    """
+    for bad in (None, 0, -1, -8192, True, False, 1.5, "16384", 8191, 8101, []):
+        got = p.extraction_budget(bad)
+        assert got is None, "extraction_budget(%r) 回了 %r，應該是 None" % (bad, got)
+        assert got != 0, bad
+
+
+def test_budget_resolution_precedence():
+    """優先序：`--add-max-tokens` > `--ctx` 推導 > mem0 的預設。
+
+    第一條不是形式主義：`--quick` 就是翻譯成 `--add-max-tokens 200`，它是
+    重現 D-027 條件的受控實驗。推導值若蓋掉它，一個已文件化的旗標會變成
+    沒作用 —— 而且是靜默的。
+    """
+    eff, src, _ = p.budget_resolution(2000, 16384)
+    assert (eff, src) == (2000, "overridden"), (eff, src)
+    eff, src, note = p.budget_resolution(None, 16384)
+    assert (eff, src) == (8192, "derived_from_ctx"), (eff, src)
+    assert "16384" in note and "8192" in note, note
+    eff, src, _ = p.budget_resolution(None, None)
+    assert (eff, src) == (None, "mem0_default"), (eff, src)
+
+
+def test_budget_resolution_underivable_is_not_filed_as_the_default():
+    """推不出來與「本來就用預設」**不可以混成同一格**。
+
+    兩者的 `effective` 都是 None，但只有後者是承諾（量 mem0 的實況）。
+    來源字串是唯一分得開它們的地方 —— 混掉的話，「推導失敗」會偽裝成
+    「這一輪刻意不覆寫」。`main()` 會在更前面就擋掉，這裡驗的是這條界線
+    本身存在。
+    """
+    eff, src, note = p.budget_resolution(None, 0)
+    assert eff is None and src == "underivable", (eff, src)
+    assert src != "mem0_default", src
+    assert "推不出" in note, note
+
+
+def test_ctx_arg_error_blocks_a_value_that_is_not_a_num_ctx():
+    """**根本不像 num_ctx 的值**要當場擋下來（用法錯誤 → 結束碼 3）。
+
+    擋的是「0 或負數」這種不是 context 的值，不是「太小」—— 見下一條。
+    """
+    assert p.ctx_arg_error(None) is None, "沒給 --ctx 不是錯誤"
+    assert p.ctx_arg_error(16384) is None, "推得出來就不是錯誤"
+
+    for bad in (0, -1, -8192, True):
+        msg = p.ctx_arg_error(bad)
+        assert msg, "--ctx %r 應該被擋下來" % (bad,)
+        assert "--ctx" in msg, msg
+
+
+def test_ctx_arg_error_allows_a_ctx_that_is_merely_too_small():
+    """**「太小、推不出預算」不是用法錯誤** —— 它是 D-027 的受控條件。
+
+    這一條守著一個**文件化的流程**：C2／C3 的前提是「伺服器預設值小到會
+    截斷」，而 `verify-mem0-add-cost.sh` 的訊息就叫使用者把
+    `OLLAMA_CONTEXT_LENGTH` 調回 4096 再跑。那時 4096 會被腳本當成合法的
+    num_ctx 傳進來（`num_ctx_verdict` 說 ok），若這裡把它擋成 3，照著文件
+    做的人會被告知儀器壞了 —— 一個**假失敗**，而 D-016 說假失敗比漏報更糟。
+
+    推不出預算是**事實**：探針照跑、記成 `budget_source=underivable`、
+    不覆寫（量 mem0 的實況），並且在輸出裡講出來。
+    """
+    for small in (4096, 8192, 8101, 512):
+        assert p.ctx_arg_error(small) is None, (
+            "--ctx %r 不該被當成用法錯誤 —— 那是受控條件的形狀" % (small,))
+        # 但預算仍然推不出來，而且來源要分得出來（不是 mem0_default）。
+        eff, src, note = p.budget_resolution(None, small)
+        assert eff is None and src == "underivable", (small, eff, src)
+        assert "沒有推導" in note, note
+
+
+def test_budget_note_is_printed_for_every_state_except_the_plain_default():
+    """要講出來的狀態有三種（覆寫／推導／推不出來），只有預設不講。"""
+    derived = {"budget_source": "derived_from_ctx", "budget_note": "由 num_ctx 推導…"}
+    assert p.budget_note_to_print(derived) == "由 num_ctx 推導…"
+    assert p.budget_note_to_print({"budget_source": "overridden",
+                                   "budget_note": "覆寫…"}) == "覆寫…"
+    assert p.budget_note_to_print({"budget_source": "underivable",
+                                   "budget_note": "沒有推導…"}) == "沒有推導…"
+    assert p.budget_note_to_print({"budget_source": "mem0_default"}) is None
+    # 來歷不明（舊 evidence 沒有這個鍵）就不要替它講話。
+    assert p.budget_note_to_print({}) is None
+    assert p.budget_note_to_print(None) is None
+
+
+def test_effective_num_predict_prefers_the_resolved_value():
+    """解析出來的值蓋過 mem0 的 options —— config、輸出、判準吃同一個數字。
+
+    這一條擋的是「輸出與事實相反」：D-035 第七節教訓 3 的形狀（三處各自
+    讀一次來源，遲早會漂移）。
+    """
+    meta = {"add_max_tokens_effective": 8192,
+            "mem0_options": {"num_predict": 2000}}
+    assert p.effective_num_predict(meta) == 8192, p.effective_num_predict(meta)
+
+
+def test_effective_num_predict_falls_back_to_mem0s_default():
+    """沒有覆寫也沒有推導時，回的是 mem0 的預設（不是 None）。"""
+    assert p.effective_num_predict({"mem0_options": {"num_predict": 2000}}) == 2000
+    assert p.effective_num_predict({}) is None, "沒有 mem0_options 時應該回 None"
+    assert p.effective_num_predict(None) is None
+
+
+def test_grade_passes_when_the_derived_budget_held():
+    """D-036 第三輪的實測形狀：兩個前提都成立 → 放行。"""
+    passed, problems = p.grade(_evidence_derived())
+    assert passed, problems
+
+
+def test_grade_blocks_when_the_bound_went_stale():
+    """前提 1（界要成立）：prompt 超過推導用的界 → C6，而且處方是**更新界**。
+
+    這一條是那個界（8192）的哨兵。沒有它，界過期會表現成「預算看起來還是
+    算出來的」—— 而不變式已經不成立了（prompt + 預算 > num_ctx）。
+    """
+    problems = _fails(_evidence_derived(first={"prompt_eval_count": 8300}),
+                      "超過推導用的界 8192")
+    c6 = [x for x in problems if x.startswith("C6")]
+    assert len(c6) == 1, problems
+    assert "8300" in c6[0], c6[0]
+    assert "更新界" in c6[0], c6[0]
+    # 處方不可以是「把預算調大」—— 那正是 D-036 第十節禁止的那件事。
+    assert "不是把預算調大" in c6[0], c6[0]
+
+
+def test_grade_blocks_when_the_bound_cannot_be_checked():
+    """讀不到 prompt_eval_count → C6 不算過（fail-closed）。
+
+    「讀不到」與「沒超過」在輸出上長得一樣，而這一條是界的哨兵 ——
+    讀不到就放行，等於把哨兵撤掉。
+    """
+    e = _evidence_derived()
+    del e["first_add"]["prompt_eval_count"]
+    del e["second_add"]["prompt_eval_count"]
+    problems = _fails(e, "讀不到 prompt_eval_count")
+    assert any(x.startswith("C6") for x in problems), problems
+
+
+def test_grade_blocks_when_generation_was_cut_by_the_derived_budget():
+    """前提 2（預算要夠）：撞到上限 → C7，而且處方是**開大 num_ctx**。
+
+    這是這一整條線的核心症狀（D-036：`eval_count=2,000` 讀起來像「講完了」，
+    其實是被切斷）。預算是由 num_ctx 推導的，所以「不夠」的意思是
+    num_ctx 不夠 —— 把上限直接調大就是把界調鬆，下一個模型再犯一次。
+    """
+    problems = _fails(_evidence_derived(first={"eval_count": 8192,
+                                               "done_reason": "length"}),
+                      "不是模型自己停下來的")
+    c7 = [x for x in problems if x.startswith("C7")]
+    assert len(c7) == 1, problems
+    assert "把 num_ctx 開大" in c7[0], c7[0]
+    assert "不是把上限直接調大" in c7[0], c7[0]
+
+
+def test_grade_blocks_when_the_second_add_was_cut():
+    """**兩次 add() 都算** —— 第二次的 prompt 比較長（mem0 會帶上既有歷史）。
+
+    只看第一次的話，最長的那一份 prompt 沒人守 —— 而它才是界與預算的
+    真正壓力點。
+    """
+    problems = _fails(_evidence_derived(second={"eval_count": 8192,
+                                                "done_reason": "length"}),
+                      "第二次")
+    assert any(x.startswith("C7") for x in problems), problems
+
+
+def test_grade_ignores_the_budget_criteria_when_overridden():
+    """`--add-max-tokens`（含 `--quick`）是受控實驗：那時預算太小是**設計**。
+
+    這一條擋的是「把一個有用的對照組關掉」—— D-027 的比對條件就是靠它
+    重現的（`num_predict=2000`）。
+    """
+    e = _evidence_ok()
+    e["meta"]["add_max_tokens_effective"] = 200
+    e["meta"]["budget_source"] = "overridden"
+    e["first_add"].update({"prompt_eval_count": 8052, "eval_count": 200,
+                           "done_reason": "length"})
+    e["second_add"].update({"prompt_eval_count": 8167, "eval_count": 200,
+                            "done_reason": "length"})
+    passed, problems = p.grade(e)
+    assert passed, problems
+    assert not [x for x in problems if x.startswith(("C6", "C7"))], problems
+
+
+def test_grade_ignores_the_budget_criteria_on_a_bare_run():
+    """裸跑探針（沒有覆寫、沒有 `--ctx`）也不判那兩條。
+
+    那一輪量的是 mem0 的實況 —— 抽取回傳 0 筆是**預期結果**，不是缺陷。
+    """
+    e = _evidence_ok()
+    e["meta"]["budget_source"] = "mem0_default"
+    e["first_add"].update({"prompt_eval_count": 8052, "eval_count": 2000,
+                           "done_reason": "length"})
+    passed, problems = p.grade(e)
+    assert passed, problems
+    assert not [x for x in problems if x.startswith(("C6", "C7"))], problems
+
+
+def test_observations_states_where_the_budget_came_from():
+    """觀察段要能讓讀的人**自己驗算**那個數字是怎麼來的。"""
+    notes = p.observations(_evidence_derived())
+    line = [n for n in notes if n.startswith("生成預算 num_predict=")]
+    assert len(line) == 1, notes
+    assert "8192" in line[0], line[0]
+    assert "16384" in line[0], line[0]
+
+
+def test_observations_stays_quiet_about_the_default_budget():
+    """用 mem0 預設的那一輪沒有別的話要說 —— 不印那一行。
+
+    （印「num_predict=2000（來源：mem0_default）」會讓每一輪都多一行解釋
+    一個沒有改變的東西，而真正要看的那一輪反而被稀釋。）
+    """
+    e = _evidence_ok()
+    e["meta"]["budget_source"] = "mem0_default"
+    notes = p.observations(e)
+    assert not [n for n in notes if n.startswith("生成預算 num_predict=")], notes
+
+
+def test_observations_says_out_loud_when_no_budget_could_be_derived():
+    """推不出來的那一輪**要講** —— 不然「沒有推導」與「有推導」長得一樣。
+
+    這一條就是「不靜默」在輸出端的那一半：ctx 太小時不會有 C6／C7 盯著
+    （那兩條只在推導成立時判），所以觀察段是唯一會講話的地方。
+    """
+    e = _evidence_ok()
+    _, src, note = p.budget_resolution(None, 4096)
+    e["meta"].update({"budget_source": src, "ctx_arg": 4096, "budget_note": note})
+    lines = [n for n in p.observations(e) if n.startswith("生成預算 num_predict=")]
+    assert len(lines) == 1, p.observations(e)
+    assert "沒有推導" in lines[0] and "2000" in lines[0], lines[0]
+
+
+def test_observations_flags_a_ctx_mismatch():
+    """推導用的 num_ctx 與 ollama 當下生效的值不一致時要講。
+
+    不一致＝這個預算不是用生效的值算的（常見成因：改過 .env 但沒重啟），
+    而不變式是**對生效的那個 num_ctx** 說的。
+    """
+    e = _evidence_derived()
+    e["meta"]["context_length_before"] = 4096      # 生效的是 4096
+    notes = p.observations(e)
+    mismatch = [n for n in notes if "不一致" in n]
+    assert len(mismatch) == 1, notes
+    assert "16384" in mismatch[0] and "4096" in mismatch[0], mismatch[0]
+
+    # 相同時不印（上面 _evidence_derived() 的預設就是相同）。
+    assert not [n for n in p.observations(_evidence_derived()) if "不一致" in n]
 
 
 def main():

@@ -36,7 +36,20 @@
 #            只想重跑那一節 —— C1／C5 那兩次是真的 add()，一小時以上。
 #            沒跑滿全部時結束碼是 2，**不會是 0**：只跑一部分永遠不算通過。
 #
-# 結束碼：0 = 通過（C1~C5 全過）
+# **生成預算是由 num_ctx 推導的（D-037，不必給旗標）。** mem0 的 OllamaLLM
+# 固定送 num_predict=2000，而 D-036 證明那就是「抽取回傳 0 筆」的成因。所以
+# 這支腳本會讀 ollama 的 OLLAMA_CONTEXT_LENGTH 並傳給探針（--ctx N），由探針
+# 推導 `max_tokens = num_ctx − 抽取 prompt 的上界`：
+#   · 這個組合**不會觸發 context shift**（不變式：prompt ≤ 界 ⇒
+#     prompt + 預算 ≤ num_ctx），而且 num_ctx 變大時預算自己跟著變大
+#   · 兩個前提各有判準盯著（C6：界還成立、C7：預算真的夠）
+#   · 覆寫（--add-max-tokens／--quick）永遠贏 —— 那是重現 D-027 條件的
+#     受控實驗，那時預算太小是**設計**，C6／C7 不判
+#   · num_ctx 小到推不出預算（例如 C2／C3 用的 4096）時**不覆寫**，量的
+#     就是 mem0 的實況（2000），而且輸出會明講「沒有推導」
+#   · 讀不到 num_ctx 時也一樣，並警告「抽取預期是空白的」（D-036）
+#
+# 結束碼：0 = 通過（C1~C7 全過）
 #         1 = 未通過（判準沒過 —— 通常代表上游變了，重讀 D-027）
 #         2 = 無法判定（容器未執行、模型沒下載、連不上 —— 不是判準的問題）
 #         3 = 探針自己壞掉，**或探針在這一輪執行期間被換掉**（見下面「探針修訂版
@@ -107,6 +120,53 @@ if ! docker ps --format '{{.Names}}' | grep -qx "ollama"; then
   exit 2
 fi
 
+# ── ollama 生效的 num_ctx：**無條件先讀**（D-037）────────
+#
+# 讀的是容器啟動時的環境（Config.Env）—— 那是 ollama **實際讀到**的值。
+# 注意這仍然是「設定值」而不是「生效值」，本專案對這兩者的差別吃過虧
+# （D-028 記了 OLLAMA_CONTEXT_LENGTH 只被證明過名字存在）。所以探針那邊
+# 自己會讀 /api/ps 的生效值，並在兩者不一致時講出來（觀察段，不是判準）
+# —— 推導的**輸入**與生效的值都會被記下來，不是二選一。
+#
+# 這個值要用來**推導生成預算**（`max_tokens = num_ctx − 抽取 prompt 的上界`）。
+# mem0 送死 `num_predict=2000`，而 D-036 證明那就是「抽取回傳 0 筆」的成因。
+#
+# 讀不到、或讀到的不是可用的 num_ctx：**不擋**（無知不是缺陷，D-016），
+# 但**要講清楚這一輪沒有預算可推** —— 那時的抽取預期是空白的（D-036）。
+# 也不傳 `--ctx`：不覆寫，量到的就是 mem0 的實況。
+#
+# 這裡先讀、下面 C2／C3 的前提檢查沿用**同一個讀數** —— 同一件事不讀兩次，
+# 免得兩處對同一個容器給出不同的答案。
+CTX_CONFIGURED="$(docker inspect \
+    -f '{{range .Config.Env}}{{println .}}{{end}}' \
+    "$($COMPOSE ps -q ollama 2>/dev/null || true)" 2>/dev/null \
+  | sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' | tail -1 || true)"
+CTX_ARGS=()
+CTX_VERDICT="$(num_ctx_verdict "${CTX_CONFIGURED:-}")"
+case "$CTX_VERDICT" in
+  ok\ *)
+    CTX_ARGS=(--ctx "${CTX_VERDICT#ok }")
+    info "ollama 的 OLLAMA_CONTEXT_LENGTH（容器設定）：$CTX_CONFIGURED"
+    info "  生成預算：由 num_ctx=${CTX_ARGS[1]} 推導（--ctx，D-037）—— 真實 add() 不再用 mem0 的 2000"
+    ;;
+  not_integer)
+    if [[ -n "$CTX_CONFIGURED" ]]; then
+      info "ollama 的 OLLAMA_CONTEXT_LENGTH（容器設定）：$CTX_CONFIGURED"
+      warn "它不是整數、不能當 num_ctx 用 —— 這一輪**不推導生成預算**"
+    else
+      info "ollama 沒有設 OLLAMA_CONTEXT_LENGTH —— 用 ollama 自己的預設"
+      warn "讀不到 num_ctx ⇒ 這一輪**不推導生成預算**"
+    fi
+    warn "會用 mem0 的預設 num_predict=2000 ⇒ ⚠ 抽取**預期是空白的**（D-036："
+    warn "2,000 個 token 會被 thinking 吃光）—— 這一輪的量測不代表抽取的極限"
+    ;;
+  *)
+    info "ollama 的 OLLAMA_CONTEXT_LENGTH（容器設定）：$CTX_CONFIGURED"
+    warn "這個值不能當 num_ctx 用（$CTX_VERDICT，只在 512~1048576 之間有定義）——"
+    warn "這一輪**不推導生成預算**，會用 mem0 的預設 2000 ⇒ ⚠ 抽取預期是空白的（D-036）"
+    ;;
+esac
+
 # ── 前置：兩個模型都要真的在 ollama 裡 ──────────────────
 # mem0 的 OllamaEmbedding 建構子遇到不存在的嵌入模型會**自己 pull**
 # （實測，見 verify-chroma-dims.sh 的同一段）—— 那會讓一次「驗證」變成
@@ -134,27 +194,13 @@ done
 # 於是去查一個不存在的問題。這就是 D-016 說的假失敗（比漏報更糟）。
 # 所以這裡回 2「無法判定」，不是 1。
 #
-# 讀的是容器啟動時的環境（Config.Env）—— 那是 ollama **實際讀到**的值。
-# 注意這仍然是「設定值」而不是「生效值」，本專案對這兩者的差別吃過虧
-# （D-028 記了 OLLAMA_CONTEXT_LENGTH 只被證明過名字存在）。所以它只用來
-# **擋住一個已知會造成假失敗的設定**，不用來證明判準成立。
-# 讀不到就當成沒有這回事（不擋）—— 無知不是缺陷（D-016）。
+# `CTX_CONFIGURED` 是在上面**無條件**讀的（那份註解也解釋了「設定值 vs 生效
+# 值」）。這裡只是把**同一個讀數**拿去擋一個已知會造成假失敗的設定。
 #
-# 只在真的會跑到 C2 或 C3 時檢查。--sections add 這種分段重跑與這條前提
-# 無關，不該被它擋下來。
+# 只在真的會跑到 C2 或 C3 時擋。--sections add 這種分段重跑與這條前提無關，
+# 不該被它擋下來（讀取本身則不受此限 —— 推導生成預算要用它）。
 SECTIONS_STR="${SECTION_ARGS[1]:-C2,C2b,C3,C4,add}"
 if [[ ",$SECTIONS_STR," == *",C2,"* || ",$SECTIONS_STR," == *",C3,"* ]]; then
-  CTX_CONFIGURED="$(docker inspect \
-      -f '{{range .Config.Env}}{{println .}}{{end}}' \
-      "$($COMPOSE ps -q ollama 2>/dev/null || true)" 2>/dev/null \
-    | sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' | tail -1 || true)"
-
-  if [[ -n "$CTX_CONFIGURED" ]]; then
-    info "ollama 的 OLLAMA_CONTEXT_LENGTH（容器設定）：$CTX_CONFIGURED"
-  else
-    info "ollama 沒有設 OLLAMA_CONTEXT_LENGTH —— 用 ollama 自己的預設 4096"
-  fi
-
   if [[ "$(ctx_meets_mem0 "${CTX_CONFIGURED:-0}")" == "yes" ]]; then
     fail "OLLAMA_CONTEXT_LENGTH=${CTX_CONFIGURED} 已經 >= $MEM0_ADD_MIN_CTX —— **無法判定**。"
     echo "  C2／C3 問的是「prompt 有沒有被伺服器預設的 num_ctx 截斷」，而這個"
@@ -253,9 +299,15 @@ else
 fi
 echo
 
-# 生成上限只有一個地方決定：`--add-max-tokens` 有給就用它，否則 --quick 用
-# 200，都沒有就交給 mem0 的預設（2,000）。**兩個都給時明講以哪個為準** ——
-# 一個被靜默忽略的旗標，正好是這支腳本最不該有的東西。
+# 生成上限只有一個地方決定，優先序是**四層**（D-037）：
+#
+#   --add-max-tokens N  >  --quick（200）  >  由 num_ctx 推導  >  mem0 的預設 2000
+#
+# 前三層是「這一輪要用什麼」，第四層是「mem0 出貨值，實測抽不出東西」。
+# 給定的永遠贏過推導的 —— 覆寫是**重現 D-027 條件的受控實驗**，那時預算太
+# 小是設計，不是缺陷（探針也因此不在覆寫時判 C6／C7）。
+#
+# **被誰蓋掉就明講** —— 一個被靜默忽略的旗標，正好是這支腳本最不該有的東西。
 QUICK_ARGS=()
 if [[ -n "$ADD_MAX_TOKENS" ]]; then
   QUICK_ARGS=(--add-max-tokens "$ADD_MAX_TOKENS")
@@ -264,6 +316,11 @@ if [[ -n "$ADD_MAX_TOKENS" ]]; then
     warn "--quick 的 200 被忽略（--quick 其餘行為不變）。"
   fi
   warn "真實 add() 的生成上限設為 num_predict=$ADD_MAX_TOKENS。"
+  if [[ "${#CTX_ARGS[@]}" -gt 0 ]]; then
+    warn "  （--add-max-tokens 覆寫 ⇒ 這一輪**不用推導值** —— 沒送 --ctx ${CTX_ARGS[1]}，"
+    warn "   C6／C7 也不判：這是重現 D-027 條件的受控實驗，預算小是設計。）"
+    CTX_ARGS=()
+  fi
   # **放大預算之前先看餘裕**，因為那正是 D-035 第三節的機制：生成一旦超過
   # `num_ctx − prompt_tokens`，llama-server 會從 prompt 中段丟掉一整塊再繼續
   # —— prompt 完整這件事就不成立了，而那一輪量到的東西分不出成因。
@@ -274,6 +331,11 @@ if [[ -n "$ADD_MAX_TOKENS" ]]; then
 elif [[ "$QUICK" == "1" ]]; then
   QUICK_ARGS=(--add-max-tokens 200)
   warn "--quick：真實 add() 的 max_tokens 壓到 200。"
+  if [[ "${#CTX_ARGS[@]}" -gt 0 ]]; then
+    warn "  （--quick 覆寫 ⇒ 這一輪**不用推導值** —— 沒送 --ctx ${CTX_ARGS[1]}，"
+    warn "   而且 --quick 的意義正是「快」，推導值會讓那兩次 add() 變回一小時以上。）"
+    CTX_ARGS=()
+  fi
   warn "機制判準 C2~C4 不受影響（它們不經過 mem0 的 Memory），"
   warn "而 --quick 只會讓生成變短 —— 截斷上限只看 num_ctx，不看 num_predict"
   warn "（D-027，讀 llama_server.go 確認、並用固定 num_ctx 變 num_predict 實測），"
@@ -281,6 +343,16 @@ elif [[ "$QUICK" == "1" ]]; then
   warn "**但「進得去」不等於「待得住」**：壓短不會有壞處，放大才有 —— 見"
   warn "  --add-max-tokens 的說明與 D-035 第三節。"
   warn "成本觀察的秒數仍然不要跟 D-027 的數字比：那兩次的生成被壓短了。"
+elif [[ "${#CTX_ARGS[@]}" -gt 0 ]]; then
+  # 推導那一層。**要把生效的值在跑之前講出來**（D-035 第七節教訓 3），
+  # 所以這裡印的不只是「有推導」，是那個數字本身 —— 探針也會再印一次
+  # （`num_predict=…（來源：derived_from_ctx）`），兩邊要一致。
+  info "真實 add() 的生成上限：由 num_ctx=${CTX_ARGS[1]} 推導（--ctx，D-037）。"
+  info "  不變式：prompt ≤ 抽取 prompt 的上界 8192 ⇒ prompt + 預算 ≤ num_ctx，"
+  info "  所以**這個組合不會觸發 context shift**（D-035 第三節的機制）。"
+  info "  C6 盯著「界還成立」、C7 盯著「預算真的夠（done_reason=stop）」——"
+  info "  界過期時的處方是更新界，預算不夠時的處方是把 num_ctx 開大。"
+  info "  預期 1~1.5 小時（D-036 用 8,000 量到自然長度 5,605 個 token）。"
 fi
 
 # ── 跑探針 ──────────────────────────────────────────────
@@ -314,7 +386,7 @@ docker run --rm --network "$NET" \
   -e PYTHONUNBUFFERED=1 \
   "$IMAGE" python3 -u /probe/mem0_add_cost_probe.py \
     --model "$MODEL" --embed-model "$EMBED_MODEL" --ollama-url "$OLLAMA_URL" \
-    "${QUICK_ARGS[@]}" "${JSON_ARGS[@]}" "${SECTION_ARGS[@]}" || rc=$?
+    "${QUICK_ARGS[@]}" "${CTX_ARGS[@]}" "${JSON_ARGS[@]}" "${SECTION_ARGS[@]}" || rc=$?
 
 # ── 探針修訂版的守衛 ────────────────────────────────────
 # 跑完再算一次。不一樣就代表上面那幾小時的數字**對不上任何一個修訂版**：
@@ -366,7 +438,7 @@ if [[ "$rc" == "2" && ${#SECTION_ARGS[@]} -gt 0 ]]; then
   warn "要判定整個 item 3，要跑滿 C2、C2b、C3、C4、add。"
 fi
 case $rc in
-  0) ok "第三階段 item 3 通過：C1~C5 全過（見上方觀察段）" ;;
+  0) ok "第三階段 item 3 通過：C1~C7 全過（見上方觀察段）" ;;
   1) fail "第三階段 item 3 未通過（見上方判準）—— 這通常代表上游變了，重讀 D-027"; exit 1 ;;
   2) fail "無法判定（見上方輸出）—— 環境問題或分段重跑，不是判準的問題"; exit 2 ;;
   3) fail "探針自己壞掉（見上方輸出）—— 不是受測對象的問題，是這支腳本該修"; exit 3 ;;

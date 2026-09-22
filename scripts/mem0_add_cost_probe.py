@@ -94,9 +94,9 @@ procedural memory（要明示 `memory_type` 才會走）與非同步版本的鏡
 `llm.client.chat` 拿到的是**同一個 dict**：同樣的 messages、同樣的 options，
 連 `format=json` 時追加的那句 `Please respond with valid JSON only.` 都在裡面。
 
-### 判準（C1~C5）與觀察
+### 判準（C1~C7）與觀察
 
-C1~C5 全部是**無閾值的機械判準** —— 不是「時間有沒有超過幾秒」這種會隨機器
+C1~C7 全部是**無閾值的機械判準** —— 不是「時間有沒有超過幾秒」這種會隨機器
 飄移的門檻，而是兩個量之間的序關係或計數：
 
   C1  一次 add() 只發出一次 chat 呼叫（README 的「一次」在結構上成立）
@@ -111,6 +111,12 @@ C1~C5 全部是**無閾值的機械判準** —— 不是「時間有沒有超�
       thinking 非空，且關掉 think 之後 eval_count 明顯下降
   C5  Phase 5 的雜湊去重發生在 Phase 2 的 LLM 呼叫**之後**，所以同樣的內容
       寫兩次仍然付兩次 LLM 呼叫 —— 去重省不到那個呼叫
+  C6  抽取 prompt 沒有超過推導用的上界（`EXTRACTION_PROMPT_TOKENS_BOUND`）
+  C7  生成是模型**自己停下來的**（`done_reason=stop`），不是被預算切斷的
+
+**C6／C7 只在預算是推導來的時候成立**（`--ctx`，見 D-037）：它們盯的是那條
+推導的兩個前提，不是上游的行為。`--add-max-tokens`（含 `--quick` 翻出來的
+200）是重現 D-027 條件的受控實驗，那時預算太小是設計，不判。
 
 C2b 不是判準，是 C2 問完之後必然接著要問的問題：**那要開多大才不截斷？**
 
@@ -185,12 +191,19 @@ prompt_eval_count 都是 2050 —— **斜率 0** —— 那也正是拆穿舊�
 
 用法（通常由 scripts/verify-mem0-add-cost.sh 呼叫）：
     python3 -u mem0_add_cost_probe.py --model qwen3:4b \
-        --embed-model qwen3-embedding:0.6b --ollama-url http://ollama:11434
+        --embed-model qwen3-embedding:0.6b --ollama-url http://ollama:11434 \
+        --ctx 16384
 
-結束碼：0 = 通過（C1~C5 全過）
+`--ctx` 是 ollama 生效的 num_ctx：給了它就**推導**真實 add() 的生成預算
+（`max_tokens = num_ctx − 抽取 prompt 的上界`），而不是挑一個數字 —— 這個
+組合不會觸發 context shift，而且 num_ctx 變大時預算自己跟著變大（D-037）。
+不給它就是 mem0 的實況（`num_predict=2000`，抽取很可能回傳 0 筆）。
+
+結束碼：0 = 通過（C1~C7 全過）
         1 = 未通過（某一條判準沒過 —— 見輸出，通常是上游變了）
-        2 = 無法判定（連不上、模型沒下載 —— 不是判準的問題）
-        3 = 探針自己壞掉（D-018：這不是受測對象的問題）
+        2 = 無法判定（連不上、模型沒下載、**沒跑滿全部** —— 不是判準的問題）
+        3 = 探針自己壞掉（D-018：這不是受測對象的問題；`--ctx` 推不出預算
+            也是走這個碼，那是用法問題，不是判準也不是環境）
 
 ⚠ **這支探針會跑好幾分鐘的生成。** 在沒有 GPU 的 VM 上，qwen3:4b 的生成速率
 是每秒數個 token 的等級，而 mem0 的 `num_predict` 預設是 2000。用
@@ -220,6 +233,37 @@ EXIT_BROKEN = 3
 # 數字就不能跟 D-027 的比。top_k 不在裡面 —— mem0 的 config 有 top_k 欄位，
 # 但 build options 時漏掉沒送，所以它對 ollama 是死的。
 MEM0_LLM_OPTIONS = {"temperature": 0.1, "num_predict": 2000, "top_p": 0.1}
+
+# 抽取 prompt 的 token 數**上界** —— 拿它把生成預算從 num_ctx 推導出來
+# （D-036 第十節立的規矩、D-037 的實作）。
+#
+# mem0 的 OllamaLLM 只送上面那份 options，**不送 num_ctx**。後果有兩層，
+# 第二層是 D-036 才量出來的：
+#
+#   1. context 由 ollama 的預設決定 → 抽取 prompt 可能被截斷（D-027）
+#   2. **生成預算固定 2,000** → 模型話沒講完就被切斷，抽取回傳 0 筆。
+#      D-036：num_ctx 不動、只把預算開到 8,000，同一份 prompt 就抽出
+#      2 則記憶（`done_reason=stop`、`eval_count=5,605`）。
+#
+# 第 2 層的處方**不是「換一個比較大的數字」**——那只是把 2,000 的錯換成下
+# 一個數字，下一個模型／下一份 prompt 會再犯一次（D-036 第十節）。真正的
+# 條件是「大到模型自己停」，而在 num_ctx 有限之下，能給的最大值是**算**得
+# 出來的：
+#
+#     預算 = num_ctx −（抽取 prompt 最多佔多少）
+#
+# 只要實測的 prompt 不超過這個界，`prompt + 預算 ≤ num_ctx` 就恆成立 ——
+# **context shift 在結構上不可能發生**（D-035 第三節：生成超過
+# `num_ctx − prompt_tokens` 會讓 llama-server 從 prompt 中段丟掉一整塊）。
+# num_ctx 調大，預算自己跟著變大。這是**不變式**，不是一個挑出來的值 ——
+# 也就是它與魔數的差別。
+#
+# 8,192 是**界，不是量測值**：抽取 prompt 實測 8,052（D-027）、8,100
+# （D-034）、8,167（D-036 的 add 2），取到下一個 2 的次方。取大是安全方向
+# ——界太小會讓預算太大（可能 shift，由判準 C6 擋），界太大只會讓預算偏小
+# （生成被切斷，由判準 C7 擋）。**界過期的那一天，處方是更新這個界並記錄
+# 新的觀測，不是把判準放寬。**
+EXTRACTION_PROMPT_TOKENS_BOUND = 8192
 
 # 「明確給足」的對照組 context 大小。要大到讓 33,653 字元的系統提示詞加
 # 使用者訊息都進得去（約 9~10k token），所以 16384 有餘。
@@ -501,6 +545,125 @@ def min_ctx_required(prompt_tokens):
     留給生成的空間不會從 prompt 的預算裡扣。
     """
     return prompt_tokens + 1
+
+
+def extraction_budget(num_ctx, bound=EXTRACTION_PROMPT_TOKENS_BOUND):
+    """在這個 num_ctx 之下、**不會觸發 context shift** 的生成預算 → int 或 None。
+
+    回 None 的情況（三種，全部都是「推導不出來」，**不是「0」**）：
+      · num_ctx 不是整數（None、字串、浮點數）
+      · num_ctx 是 bool —— `True` 會被 isinstance 放行，但它是旗標不是大小
+      · num_ctx ≤ 界 —— 連 prompt 自己佔的空間都不夠，推不出正的預算
+
+    **回 None 時不可以當 0 用。** 0 在 mem0 的 config 裡會被 truthiness 吃掉
+    （`--add-max-tokens 0` 現行就是這樣：它靜默地什麼都不做），於是「算不出
+    來」會變成「用 mem0 的預設 2,000」—— 那正是這一整條線要消滅的失敗方式。
+
+    這支與 `min_ctx_required()` 是同一組的兩面：
+      · `min_ctx_required(prompt)` —— prompt 要多大才進得去
+      · `extraction_budget(ctx)` —— 這個 ctx 留給生成多少才不會 shift
+    """
+    if isinstance(num_ctx, bool) or not isinstance(num_ctx, int):
+        return None
+    if num_ctx <= 0:
+        return None
+    budget = num_ctx - bound
+    return budget if budget > 0 else None
+
+
+def budget_resolution(add_max_tokens, ctx):
+    """(`--add-max-tokens`, `--ctx`) → `(生效的預算或 None, 來源, 給人看的說明)`。
+
+    純函式：吃兩個數字，不吃 args —— 所以可以離線測試（與 `parse_sections`
+    同樣的分工）。**優先序就是這個函式的分支順序**：
+
+      `--add-max-tokens N`  →  N                 `overridden`
+      `--ctx N`             →  `num_ctx − 界`    `derived_from_ctx`
+      都沒有                →  None（不寫 config）`mem0_default`
+
+    `--add-max-tokens` 永遠贏，而且**刻意不讓推導值從同一條通道進來** ——
+    腳本的 `--quick` 就是翻譯成 `--add-max-tokens 200`，若推導值也走那裡，
+    `--quick` 會被靜默吃掉（一個已經文件化的旗標變成沒作用）。它是重現
+    D-027 條件的**受控實驗**，不可以被蓋掉。
+
+    `mem0_default` 那一格回 None 是**有意義的**：不寫 config ＝ 讓 mem0
+    用它自己的 2,000，那才是「mem0 的實況」（裸跑探針時的承諾）。
+    """
+    if add_max_tokens:
+        return add_max_tokens, "overridden", "--add-max-tokens %s 覆寫" % add_max_tokens
+    if ctx is None:
+        return None, "mem0_default", "沒有覆寫、也沒有給 --ctx → 用 mem0 自己的預設"
+    derived = extraction_budget(ctx)
+    if derived is None:
+        # **不是錯誤，是一個要講出來的結果。** ctx 小到 prompt 上界就吃掉
+        # 全部空間（D-027 的受控條件：4096）。這時不覆寫、量 mem0 的實況，
+        # 而來源字串與這一句話就是「有沒有推導」的證據。
+        return None, "underivable", (
+            "num_ctx=%s 推不出正的預算（抽取 prompt 的上界 %d 就吃掉全部）——"
+            "**這一輪沒有推導，不覆寫，量的是 mem0 的實況 num_predict=2000**"
+            % (ctx, EXTRACTION_PROMPT_TOKENS_BOUND))
+    return derived, "derived_from_ctx", (
+        "由 num_ctx=%s 推導（%s − %d 的 prompt 上界）—— 這個組合不會觸發 "
+        "context shift" % (ctx, ctx, EXTRACTION_PROMPT_TOKENS_BOUND))
+
+
+def ctx_arg_error(ctx):
+    """`--ctx` 的值**根本不像一個 num_ctx** 時回一句話，否則回 None。
+
+    抽成純函式是為了讓「用法錯誤要擋下來」可以被離線測試 —— `main()` 那一行
+    只負責印出來（與 `parse_sections` 同樣的分工）。
+
+    **只擋「不是 context 的值」**（非正整數）。「太小、推不出預算」（≤ 界）
+    **不算用法錯誤** —— 那正是 D-027 那個受控條件的形狀
+    （`OLLAMA_CONTEXT_LENGTH=4096`，prompt 本來就會被截斷），而腳本自己就叫人
+    這樣跑（`verify-mem0-add-cost.sh` 的 C2／C3 訊息）。那時推不出預算是
+    **事實**，不是錯誤：探針照跑、老實記成 `budget_source=underivable`、並且
+    在輸出裡講出來 —— 不覆寫，量的就是 mem0 的實況。
+
+    把它擋成 3 會製造一個**假失敗**：照著文件把 num_ctx 調回 4096 驗截斷的
+    人，會被告知儀器壞了（D-016：假失敗比漏報更糟）。
+    """
+    if ctx is None:
+        return None
+    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+        return "--ctx 必須是正整數：%r" % (ctx,)
+    return None
+
+
+def budget_note_to_print(meta):
+    """要印給人看的預算說明 → 字串；沒有話要說時回 None。
+
+    三種狀態都要講：覆寫與推導要讓人**驗算**那個數字，而**推不出來**
+    （ctx 太小）要讓人知道**這一輪沒有推導**（不覆寫 ＝ 量 mem0 的實況，
+    抽取預期是空的）。只有「本來就用 mem0 的預設」那一格沒有別的話要說 ——
+    每一輪都多一行解釋一個沒有改變的東西，會把真正要看的那一輪稀釋掉。
+
+    `budget_source` 缺席（舊 evidence）時也回 None：不知道來歷就不要替它講話。
+    """
+    if not meta or meta.get("budget_source") in (None, "mem0_default"):
+        return None
+    return meta.get("budget_note")
+
+
+def effective_num_predict(meta):
+    """這一輪**真正送進 mem0** 的生成上限 → int 或 None。
+
+    None ＝ 沒有覆寫，用 mem0 自己的預設（`meta.mem0_options.num_predict`）。
+
+    為什麼要有這支：**三個地方要同一個數字** —— `measure_add()` 寫 config、
+    `observations()` 印生效值、`grade()` 的 C7 拿它當判準的 `cap`。先前有兩
+    處各自 `or` 一次，那是因為當時只有一個來源（`--add-max-tokens`）；推導
+    進來之後它們就會漂移，而漂移的症狀正是 D-035 第七節教訓 3：輸出印著
+    「mem0 預設，沒有覆寫」，而 mem0 其實收到 8,192。**config 與判準由同一個
+    函式餵，是結構上不可能漂移，不是靠自律。**
+
+    `or` 是刻意的：0 在這裡不是合法的上限（`extraction_budget()` 不會回 0，
+    `--add-max-tokens 0` 現行也已經被忽略）。
+    """
+    if not meta:
+        return None
+    return (meta.get("add_max_tokens_effective")
+            or (meta.get("mem0_options") or {}).get("num_predict"))
 
 
 def truncation_limit_verdict(num_ctx, measured_pec, num_keep=4):
@@ -1038,6 +1201,67 @@ def grade(evidence):
             % (second_add_chat,)
         )
 
+    # ── C6／C7：推導式生成預算的兩個前提 ─────────────────────
+    # 這兩條問的**不是**「上游變了沒」，而是「我們自己這條推導的前提還成不
+    # 成立」（D-037）。所以它們是硬判準，而 truncation_claim_verdict() 那類
+    # claim 判讀只進觀察段：claim 問的是世界的變化（給人看的訊號），前提問的
+    # 是**我們算出來的數字對不對**。界過期 ＝ 預算沒有依據，而它的症狀是
+    # 「安靜地抽出 0 筆」—— 靜默通過正是 D-036 花了四小時才買到的教訓。
+    #
+    # **只在預算是推導來的時候成立。** `--add-max-tokens N`（含 `--quick`
+    # 翻出來的 200）是重現 D-027 條件的受控實驗：那時「預算不夠」是**設計**，
+    # 讓它失敗會把一個有用的對照組關掉。
+    #
+    # add 節沒跑的時候，上面那個 missing 檢查（`calls` 缺席）已經先返回了，
+    # 所以走到這裡一定拿得到 first_add。
+    meta = evidence.get("meta") or {}
+    if meta.get("budget_source") == "derived_from_ctx":
+        cap = effective_num_predict(meta)
+        ctx_arg = meta.get("ctx_arg")
+        adds = [("add() 第一次", evidence.get("first_add") or {}),
+                ("第二次", evidence.get("second_add") or {})]
+        adds = [(label, a) for label, a in adds if a]
+
+        # C6：**界要成立** —— 這一輪的 prompt 沒有超過界。取兩次之中大的那
+        # 一個：第二次的 prompt 比較長（mem0 會把既有歷史一起送），界要蓋住
+        # 的是最大的那一份。
+        pecs = [(label, a["prompt_eval_count"]) for label, a in adds
+                if isinstance(a.get("prompt_eval_count"), int)
+                and not isinstance(a.get("prompt_eval_count"), bool)]
+        if not pecs:
+            problems.append(
+                "C6：讀不到 prompt_eval_count，無法確認推導用的界（%d）還成立。"
+                "這一條是那個界的哨兵，讀不到就不算過 —— 見 D-037。"
+                % EXTRACTION_PROMPT_TOKENS_BOUND)
+        elif max(v for _, v in pecs) > EXTRACTION_PROMPT_TOKENS_BOUND:
+            worst_label, worst = max(pecs, key=lambda kv: kv[1])
+            problems.append(
+                "C6：抽取 prompt 量到 %r 個 token（%s，兩次是 %s），**超過推導用"
+                "的界 %d** —— 預算 %s 是用一個**過期的界**算出來的，所以它不再"
+                "保證不會觸發 context shift（不變式是 prompt ≤ 界 ⇒ "
+                "prompt + 預算 ≤ num_ctx=%s）。"
+                "處方是**更新界並記錄這次的觀測**（EXTRACTION_PROMPT_TOKENS_"
+                "BOUND），不是把預算調大 —— 調大就是把 D-036 第十節那條規矩"
+                "再犯一次。見 D-037。"
+                % (worst, worst_label,
+                   "、".join("%s=%s" % kv for kv in pecs),
+                   EXTRACTION_PROMPT_TOKENS_BOUND, cap, ctx_arg))
+
+        # C7：**預算要夠** —— 模型是自己停下來的，不是被這個上限切斷的。
+        verdicts = [(label, generation_stop_verdict(
+            a.get("eval_count"), cap, a.get("done_reason"))) for label, a in adds]
+        bad = [(label, s or "讀不到判準需要的觀測（eval_count／done_reason）")
+               for label, (v, s) in verdicts if v != "stopped"]
+        if not verdicts or bad:
+            readings = "、".join("%s：%s" % kv for kv in bad) or "兩次 add() 都沒有觀測"
+            problems.append(
+                "C7：預算是從 num_ctx=%s 推導出來的 %s，而生成**不是模型自己停"
+                "下來的**（%s）—— 也就是說模型需要的比我們允許的多。"
+                "處方是**把 num_ctx 開大**（預算 = num_ctx − %d 的 prompt 上界，"
+                "會自己跟著走），**不是把上限直接調大** —— 後者就是魔數，下一個"
+                "模型／下一份 prompt 會再犯一次。見 D-037。"
+                % (ctx_arg, cap, readings, EXTRACTION_PROMPT_TOKENS_BOUND))
+
     return (len(problems) == 0), problems
 
 
@@ -1251,6 +1475,26 @@ def observations(evidence):
         % (calls.get("first_add_chat"), calls.get("first_add_embed"))
     )
     if add1:
+        # **生成預算從哪裡來的** —— D-036 第十節：「不要把它寫成另一個魔數」。
+        # 所以這一行要讓讀的人自己驗算得出來：推導式（附 num_ctx 與界）、
+        # 覆寫、還是 mem0 的預設。預設那一輪沒有別的話要說，不印。
+        budget_note = budget_note_to_print(meta)
+        if budget_note:
+            notes.append("生成預算 num_predict=%s —— %s"
+                         % (effective_num_predict(meta), budget_note))
+        # 推導的**輸入**與 ollama 實際生效的值是不是同一個。只在不同時印：
+        # 不一致就代表「推導用的 num_ctx 不是生效的 num_ctx」，那個預算就
+        # 沒有依據（常見成因：改過 .env 但 ollama 沒重啟）。
+        # **這是觀察，不是判準** —— 純 `--sections add` 的環境段跑在模型載入
+        # **之前**，`/api/ps` 常常是空的，設成判準會製造假失敗。
+        ctx_arg = meta.get("ctx_arg")
+        live = meta.get("context_length_before")
+        if (isinstance(ctx_arg, int) and not isinstance(ctx_arg, bool)
+                and isinstance(live, int) and not isinstance(live, bool)
+                and ctx_arg != live):
+            notes.append(
+                "⚠ 推導用的 num_ctx=%s 與 ollama 當下生效的 %s **不一致** —— "
+                "這個預算不是用生效的值算出來的。" % (ctx_arg, live))
         # **撞到 num_predict 要當場講。** 這一行是最常被讀的輸出，而
         # `eval_count=2000` 在沒有註記時讀起來像「模型生成完了」。它其實
         # 是「被預算切斷」，也就是說「一次抽取要多久」在這裡是下界
@@ -1259,8 +1503,7 @@ def observations(evidence):
         # 判準放在 generation_stop_verdict 裡（可離線測試），這裡只負責印。
         # **不要在這裡另外寫一份「有沒有撞到上限」的判斷** —— 兩份判斷會漂移，
         # 而漂移的那一天，輸出與判準會各說各話（D-035 第六節就是這種病）。
-        cap = (meta.get("add_max_tokens_overridden")
-               or (meta.get("mem0_options") or {}).get("num_predict"))
+        cap = effective_num_predict(meta)
         stop_verdict, capped = generation_stop_verdict(
             add1.get("eval_count"), cap, add1.get("done_reason"))
         notes.append(
@@ -1844,6 +2087,16 @@ def measure_environment(evidence, args):
     if args.add_max_tokens:
         meta["add_max_tokens_overridden"] = args.add_max_tokens
 
+    # **生成上限只解析這一次**，三個使用點（config、輸出、判準）都讀 meta。
+    # 放在連線檢查之前，理由與 probe 修訂版相同：連不上的那一輪也該留下
+    # 「這一輪本來要用什麼預算跑」。細節與優先序見 budget_resolution()。
+    effective, source, why = budget_resolution(args.add_max_tokens, args.ctx)
+    meta["budget_source"] = source
+    meta["budget_note"] = why
+    meta["ctx_arg"] = args.ctx
+    if effective is not None:
+        meta["add_max_tokens_effective"] = effective
+
     try:
         names = [m.get("model") or m.get("name") for m in client.list().get("models", [])]
     except Exception as e:
@@ -2079,6 +2332,12 @@ def measure_add(evidence, args, workdir):
     真正的 num_predict —— 它改變的是生成段，不是截斷上限（後者只看
     num_ctx）。但預設（不給這個參數）仍然是 mem0 的實況，成本數字要跟
     D-027 比就只能用預設的那一輪。
+
+    **`--ctx` 走同一條 config 路徑，但值是用 `extraction_budget()` 從
+    num_ctx 推導出來的**（D-037）：`max_tokens = num_ctx − prompt 上界`，
+    所以它「大到模型自己停」而不會大到觸發 context shift。兩個前提各有一
+    條判準盯著（C6：界還成立、C7：預算真的夠 —— 見 `grade()`），而那兩條
+    **只在預算是推導來的時候成立**，覆寫是受控實驗，不判。
     """
     from mem0 import Memory
 
@@ -2095,8 +2354,14 @@ def measure_add(evidence, args, workdir):
             "path": str(Path(workdir) / "chroma")}},
         "history_db_path": str(Path(workdir) / "history.db"),
     }
-    if args.add_max_tokens:
-        cfg["llm"]["config"]["max_tokens"] = args.add_max_tokens
+    # 寫進 config 的只有「明確指定」的那兩種（--add-max-tokens 覆寫、或
+    # --ctx 推導）；`mem0_default` **不寫**，讓 mem0 用它自己的值 —— 那是
+    # 裸跑探針時的承諾（量 mem0 的實況）。判斷讀的是 meta 而不是 args：
+    # 解析只在 measure_environment 做一次，這裡跟著同一個來源，就不會出現
+    # 「config 寫了 8,192、輸出卻印『mem0 預設，沒有覆寫』」。
+    effective = (evidence.get("meta") or {}).get("add_max_tokens_effective")
+    if effective:
+        cfg["llm"]["config"]["max_tokens"] = effective
 
     memory = Memory.from_config(cfg)
     calls = _install_recorder(memory)
@@ -2240,12 +2505,12 @@ def run_probe(args, want=None):
     # 生成上限若沒送到，整輪會用 mem0 的預設值跑完幾個小時，而輸出裡沒有
     # 任何一行長得不一樣 —— 那正是 D-035 第七節教訓 3 的形狀（第一次跑忘了
     # --json，重跑 11 分鐘才換到一個欄位）。寧可開跑前十秒發現。
-    eff_cap = (meta.get("add_max_tokens_overridden")
-               or (meta.get("mem0_options") or {}).get("num_predict"))
-    print("  真實 add() 的生成上限 num_predict=%s%s"
-          % (eff_cap,
-             "（--add-max-tokens 覆寫）" if meta.get("add_max_tokens_overridden")
-             else "（mem0 預設，沒有覆寫）"), flush=True)
+    eff_cap = effective_num_predict(meta)
+    print("  真實 add() 的生成上限 num_predict=%s（來源：%s）"
+          % (eff_cap, meta.get("budget_source")), flush=True)
+    budget_note = budget_note_to_print(meta)
+    if budget_note:
+        print("    %s" % budget_note, flush=True)
 
     if "C2" in want:
         print("\n── C2：抽取 prompt 是否被截斷 ─────────────", flush=True)
@@ -2288,6 +2553,14 @@ def parse_args(argv=None):
                    help="覆寫 mem0 的 max_tokens（預設 2000）。縮小可以讓"
                         "真實 add() 快很多；機制判準 C2~C4 不受影響"
                         "（截斷只看 num_ctx，不看 num_predict，見 D-027）")
+    p.add_argument("--ctx", type=int, default=None,
+                   help="ollama 生效的 num_ctx。給了就**推導**真實 add() 的生成"
+                        "預算（max_tokens = num_ctx − %d 的 prompt 上界），"
+                        "而不是挑一個數字 —— 這個組合不會觸發 context shift，"
+                        "而且 num_ctx 變大時預算自己跟著變大（D-037）。"
+                        "推導只在 --add-max-tokens 沒給的時候生效；"
+                        "num_ctx ≤ 界時推不出正的預算，直接以 3 結束。"
+                        % EXTRACTION_PROMPT_TOKENS_BOUND)
     p.add_argument("--json", action="store_true", help="額外輸出 JSON")
     p.add_argument("--sections", default=None,
                    help="只跑這幾節（逗號分隔，全部＝%s）。**分段重跑用**："
@@ -2306,6 +2579,12 @@ def main(argv=None):
         # 而 2 在這支探針的意思是「無法判定（環境）」—— 那會誤導。
         print("--sections：%s" % err, file=sys.stderr)
         return EXIT_BROKEN
+    ctx_err = ctx_arg_error(args.ctx)
+    if ctx_err:
+        # 同一個原則：用法錯誤 → 3。判斷本身在純函式裡（可離線測試），
+        # 這裡只負責印。
+        print(ctx_err, file=sys.stderr)
+        return EXIT_BROKEN
     try:
         evidence = run_probe(args, want)
     except Exception as e:
@@ -2319,7 +2598,7 @@ def main(argv=None):
     for p in problems:
         print("  ✗ %s" % p, flush=True)
     if passed:
-        print("  ✓ C1~C5 全過", flush=True)
+        print("  ✓ C1~C7 全過", flush=True)
 
     print("\n── 觀察 ─────────────────────────────────", flush=True)
     for n in observations(evidence):
