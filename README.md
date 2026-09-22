@@ -93,7 +93,7 @@ Open WebUI database already has accounts or chats, and it never migrates data
 
 | Thing | Why it survives |
 |---|---|
-| `docker-compose.yml` | Two containers and a bridge network. Nothing Codespaces-specific. |
+| `docker-compose.yml` | Three containers and a bridge network — nothing Codespaces-specific. The third, `mcp-test-server`, is a Phase 2 fixture and is deleted once its checklist is verified (`docker-compose.yml:196`). |
 | Open WebUI state | Chats, Knowledge, MCP connections, users, settings all live in the `open_webui_storage` volume. Copy the volume, keep the data. |
 | Model choice | `OLLAMA_MODEL` in `.env` is where the chat model is named, and `EMBEDDING_MODEL` is where the embedding model is named — those two are the only places. Scripts and compose read those variables. Swapping to a larger model is a one-line change. |
 | MCP / RAG / Memory / Agents | All Open WebUI features configured in its database, not in this repo. They move with the volume. |
@@ -590,8 +590,8 @@ factual correctness — that is what `scripts/ask_probe.sh` is for.
 
 ### Phase 1: base stack
 
-- [ ] **Containers healthy** — `bash scripts/status.sh` shows both containers
-      `running` and `open-webui` as `healthy`
+- [ ] **Containers healthy** — `bash scripts/status.sh` shows all three containers
+      `running` and `healthy` (`ollama`, `open-webui`, `mcp-test-server`)
 - [ ] **Model ready** — `qwen3:4b` appears in the model list
 - [ ] **Inference works** — ask a question whose answer you can check by eye.
       Ask about **HTTP, not MCP**: this item used to say "explain MCP", and

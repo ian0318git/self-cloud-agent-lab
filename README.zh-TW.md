@@ -87,7 +87,7 @@ VPS 上則是 fail-open。底下每一段都是因為這個差別才存在。
 
 | 項目 | 為什麼能存活 |
 |---|---|
-| `docker-compose.yml` | 兩個容器加一個 bridge 網路，沒有任何 Codespaces 專屬的東西。 |
+| `docker-compose.yml` | 三個容器加一個 bridge 網路 —— 沒有任何 Codespaces 專屬的東西。第三個 `mcp-test-server` 是第二階段的臨時設施，清單驗完就刪（`docker-compose.yml:196`）。 |
 | Open WebUI 的狀態 | 對話、Knowledge、MCP 連線、使用者、設定全都存在 `open_webui_storage` volume 裡。複製 volume，資料就過去了。 |
 | 模型選擇 | `.env` 的 `OLLAMA_MODEL` 是對話模型的名字，`EMBEDDING_MODEL` 是嵌入模型的名字 —— 這兩個是**唯一**的地方，腳本與 compose 都讀這些變數。換更大的模型是一行的事。 |
 | MCP / RAG / Memory / Agent | 全都是 Open WebUI 在資料庫裡的設定，不在本專案裡。跟著 volume 走。 |
@@ -542,8 +542,8 @@ MCP 是什麼，卻只檢查**形式** —— 回應非空、未洩漏提示、�
 
 ### 第一階段：基礎堆疊
 
-- [ ] **容器健康** —— `bash scripts/status.sh` 顯示兩個容器皆為 `running`，
-      且 `open-webui` 為 `healthy`
+- [ ] **容器健康** —— `bash scripts/status.sh` 顯示三個容器皆為 `running` 且
+      `healthy`（`ollama`、`open-webui`、`mcp-test-server`）
 - [ ] **模型就緒** —— 模型清單中出現 `qwen3:4b`
 - [ ] **推論正常** —— 送出一道你能用眼睛核對答案的題目。
       問 **HTTP，不要問 MCP**：本項原本寫「用三句話解釋什麼是 MCP」，
