@@ -90,6 +90,23 @@ check "D 找不到 time= 欄位 → 講「格式變了」，不是「沒有截�
 FAKE_LOGS="$ANCHOR"$'\n'"$(trunc '2026-09-20T09:00:00.000Z' 4444 8047)"$'\n'"$(gin '2026/09/20 - 10:05:01')"
 check "E 有截斷行但全在開跑前 → 這一輪沒有截斷" 1 "沒有截斷紀錄" "4444"
 
+# ── F：大視窗 ＋ 錨點落在**前段** ────────────────────────
+# 這一條不是想出來的，是 2026-09-22 那一輪 `verify-mem0-add-cost.sh` 跑出來
+# 的：它的 PRE_ANCHOR 是一行 `srv  update_slots: all slots are idle`，那一行
+# 在 6000 行的視窗裡出現 74 次（含前段），於是涵蓋檢查回報「涵蓋不到」——
+# 而實際上涵蓋得好好的（視窗第一行是 23:21:14，開跑是 00:05:25）。
+#
+# 成因是 lib.sh 的 `set -o pipefail` ＋ `printf` 是**內建**：grep 一找到就
+# 結束，printf 還在寫（視窗遠超過 64 KiB 的管線緩衝）就收到 SIGPIPE →
+# 141，pipefail 把它提升成整條管線的結束碼，`!` 再讀成「沒涵蓋」。
+# 修法是不開子行程、用 shell 自己的樣式比對（見 helper 裡的註解）。
+#
+# **視窗必須夠大**，否則 printf 會搶在 grep 之前寫完，這個 bug 根本不出現
+# —— 那正是它活過上面 A~E 五個案例的原因（D-033 的同一種病：測的是法官，
+# 不是法官實際拿到的那個案子）。8000 行 × 約 50 B 遠超過管線緩衝。
+FAKE_LOGS="$ANCHOR"$'\n'"$(for _ in $(seq 1 8000); do gin '2026/09/20 - 10:00:01'; done)"
+check "F 大視窗、錨點在前段 → 涵蓋成立（不是「涵蓋不到」）" 1 "沒有截斷紀錄" "涵蓋不到"
+
 # ── 突變：把時間戳篩選拿掉，上面的 E 必須失效 ────────────
 # 「測試全綠」本身不證明測試有在檢查東西（D-024 第八節）。
 sed 's/if (ts >= t) print/if (1) print/' "$HELPER" > "$WORK/mutated.sh"
@@ -107,6 +124,33 @@ else
   else
     FAILED=$((FAILED + 1))
     fail "突變沒被抓到 —— 拿掉時間戳篩選，測試還是通過，代表 E 沒有真的在檢查篩選"
+  fi
+fi
+
+# ── 突變：把涵蓋檢查改回 `printf | grep -q`（pipefail × SIGPIPE）──
+# 這一條證明的是「這個檢查有鑑別力」：把它改壞，測試會紅。
+#
+# **它沒有證明的事，也講清楚**（實測過，不是推論）：把上面的 F 停掉，這一條
+# 照樣抓得到 —— 因為它自己造了一份大 fixture，不靠 F。所以**不可以**把
+# 「突變被抓到」講成「F 是必要的」。兩者守的是不同的東西：
+#   · F        → 守**真實的 helper**（回歸測試：真的被改回管線形式就會紅）
+#   · 這一條   → 守「改壞了會被發現」（鑑別力）
+# 分開講，因為「測試有鑑別力」與「測試盯的是實際的程式碼」是兩件事。
+sed 's|case "\$window" in \*"\$pre_anchor"\*) covered=1 ;; esac|printf "%s\\n" "\$window" \| grep -qF -- "\$pre_anchor" \&\& covered=1|' "$HELPER" > "$WORK/mutated-pipe.sh"
+if ! grep -q 'grep -qF -- "\$pre_anchor" && covered=1' "$WORK/mutated-pipe.sh"; then
+  fail "突變植入失敗 —— sed 的目標字串不在 $HELPER 裡（改了原始碼就要更新這支腳本）"
+  FAILED=$((FAILED + 1))
+else
+  # shellcheck disable=SC1090
+  source "$WORK/mutated-pipe.sh"
+  FAKE_LOGS="$ANCHOR"$'\n'"$(for _ in $(seq 1 8000); do gin '2026/09/20 - 10:00:01'; done)"
+  mut_out="$(ollama_log_corroboration "$ANCHOR" "$RUN_START" 6000 2>&1)" || true
+  if [[ "$mut_out" == *"涵蓋不到"* ]]; then
+    PASS=$((PASS + 1))
+    ok "突變被抓到（改回管線形式後，涵蓋檢查被 SIGPIPE 誤判成「涵蓋不到」）"
+  else
+    FAILED=$((FAILED + 1))
+    fail "突變沒被抓到 —— 改回 printf|grep -q 還是全綠，代表 F 沒有真的在守這個"
   fi
 fi
 

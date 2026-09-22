@@ -152,10 +152,16 @@ OLLAMA_KEEP_ALIVE=-1            # 常駐；重載一次要數十秒
 由 Qwen2.5-3B 的架構推得的**估算值，本堆疊未實測**，而且會隨模型的層數／
 head 數變動）。儘管如此，預設值仍然值得調高的理由：**記憶抽取會被無聲截斷。**
 一次 `mem0` 的 `add()` 送出的抽取 prompt 實測是 8,052 與 8,100 個 token，
-而 ollama 的 4096 預設會把它砍到 2,050 —— prompt 尾端的指示被丟掉，於是抽取
-回傳零筆事實，而且**不報錯**。操作準則是 `num_ctx >= prompt token 數 + 1`，
+而 ollama 的 4096 預設會把它砍到 2,050 —— prompt 尾端的指示被丟掉，抽取回傳
+零筆事實，而且**不報錯**。操作準則是 `num_ctx >= prompt token 數 + 1`，
 所以任何 ≥ 8,101 的值都能保住那個 prompt（D-027）。`deploy-vps.sh` 會在
 相關的那一步解釋這件事，並把 `--num-ctx` 預設為 8192。
+
+**但調高是必要、不是充分。** 對照組在 2026-09-22 跑完了：`num_ctx=8192`
+之下 prompt 是完整的 —— 8,052 與 8,100 都在 8,191 的觸發門檻之下 —— 而抽取
+**仍然回傳零筆**，生成也**仍然停在 `num_predict=2000`**。所以截斷不是把抽取
+清空的原因；它是兩個候選之一，而這個候選現在被排除了。另一個 —— 生成預算
+在 mem0 拿到可用 JSON 之前就用完 —— **還沒測**（D-034）。
 
 **驗證它有生效不是可有可無的步驟**，因為這個變數的**名字**在二進位檔裡被
 驗證過，遠早於有任何東西證明它真的有用（D-028）。要從**已載入的模型**讀
@@ -310,7 +316,7 @@ bash scripts/up.sh
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 24 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027） |
 | `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 78 道判準做突變，每一個都必須被抓到 |
-| `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 |
+| `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 —— 也測它在**最壞的方向**上說的謊：`set -o pipefail` 之下 `printf \| grep -q` 的涵蓋檢查會死於 SIGPIPE，於是**偏偏在涵蓋範圍最大的時候**回報「涵蓋不到」（D-034） |
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
 | `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
 | `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 62 道突變，每一個都必須被抓到 |

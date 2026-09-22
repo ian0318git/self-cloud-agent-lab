@@ -166,10 +166,18 @@ on this stack, and it scales with the model's layer/head count). The reason the
 default is worth raising anyway: **memory extraction silently truncates.** A
 `mem0` `add()` call sends an extraction prompt measured at 8,052 and 8,100 tokens,
 and ollama's 4096 default cuts it to 2,050 — dropping the instructions at the end
-of the prompt, so extraction returns zero facts with no error. The operating rule
-is `num_ctx >= prompt_tokens + 1`, so anything ≥ 8,101 preserves that prompt
-(D-027). `deploy-vps.sh` explains this at the point it matters and defaults
-`--num-ctx` to 8192.
+of the prompt, with no error — extraction returns zero facts and says nothing.
+The operating rule is `num_ctx >= prompt_tokens + 1`, so anything ≥ 8,101
+preserves that prompt (D-027). `deploy-vps.sh` explains this at the point it
+matters and defaults `--num-ctx` to 8192.
+
+**Raising it turned out to be necessary but not sufficient.** The control group
+ran on 2026-09-22: with `num_ctx=8192` the prompt is intact — 8,052 and 8,100,
+both below the 8,191 trigger — and extraction *still* returns zero facts, with
+generation *still* stopping at `num_predict=2000`. So truncation is not what
+emptied the extraction; it was one of two candidates, and it is now eliminated.
+The other one — the generation budget running out before mem0 gets usable JSON —
+is **not yet tested** (D-034).
 
 **Verifying it took effect is not optional**, because the variable's *name* was
 verified in the binary long before anything proved it does anything (D-028). Read
@@ -329,7 +337,7 @@ change anything they cover.
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
 | `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027) |
 | `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 78 mutations of its own criteria, every one must be caught |
-| `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences |
+| `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences — including the lie it tells in the worst direction: under `set -o pipefail` a `printf \| grep -q` coverage check dies of SIGPIPE, so it reports "coverage not established" *precisely when the window covers the most* (D-034) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
 | `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 62 mutations across the three bash modules and the smoke probe, every one must be caught |

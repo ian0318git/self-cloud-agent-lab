@@ -44,14 +44,30 @@
 
 ollama_log_corroboration() {
   local pre_anchor="$1" run_start="$2" tail_n="${3:-6000}"
-  local window n_all n_ts run_trunc
+  local window n_all n_ts run_trunc covered
 
   window="$(docker logs --tail "$tail_n" ollama 2>&1 || true)"
 
   # 涵蓋範圍的證明。少了這道，下面「沒有截斷紀錄」可能只是因為視窗
   # 根本沒蓋到這一輪 —— 而那個結論會**正好相反**。
-  if [[ -z "$pre_anchor" || -z "$window" ]] \
-     || ! printf '%s\n' "$window" | grep -qF -- "$pre_anchor"; then
+  #
+  # **不可以用 `printf '%s\n' "$window" | grep -qF`。** lib.sh 開了
+  # `set -o pipefail`，而 `printf` 是 **bash 內建**：grep 一找到就結束，
+  # 但 printf 還在寫（視窗有 6000 行、遠超過 64 KiB 的管線緩衝）就會收到
+  # SIGPIPE → 141，pipefail 再把它提升成整條管線的結束碼，於是下面那個 `!`
+  # 把它讀成「涵蓋不到」。實測同一份視窗、同一個錨點：`set -o pipefail`
+  # 之下 rc=141，拿掉就 rc=0。（外部命令如 `seq` 重現不出來 —— 只有內建
+  # 會這樣死。所以這個 bug 不是「管線都有風險」，是「內建餵大輸入」才有。）
+  #
+  # 方向很壞：**只有錨點落在視窗前段時才發作**，而那正是涵蓋範圍最大的
+  # 時候。錨點越早出現，儀器越會說「我沒看到」—— 而 ollama 的 stderr 行
+  # （`srv update_slots` 之類）在一段視窗裡本來就會重複出現幾十次。
+  # 用 shell 自己的樣式比對，不開子行程就沒有這個問題。
+  covered=0
+  if [[ -n "$pre_anchor" && -n "$window" ]]; then
+    case "$window" in *"$pre_anchor"*) covered=1 ;; esac
+  fi
+  if [[ "$covered" -eq 0 ]]; then
     warn "旁證不可用 —— 讀到的日誌區段涵蓋不到開跑的時間點（見這支腳本開頭的兩個坑）。"
     warn "  讀到的最後一行：$(printf '%s\n' "$window" | tail -1 | cut -c1-60)"
     warn "  開跑前最後一行：$(printf '%s' "$pre_anchor" | cut -c1-60)"
