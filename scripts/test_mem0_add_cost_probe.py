@@ -1328,6 +1328,117 @@ def test_exit_code_broken_when_the_control_was_cut_off():
     assert p.exit_code(e, False) == p.EXIT_BROKEN, e["canary"]
 
 
+def _fake_memory(resp):
+    """攔截層只碰這四個屬性 —— 用 stub 就測得起來，不必連 ollama。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        llm=SimpleNamespace(client=SimpleNamespace(chat=lambda **kw: resp)),
+        embedding_model=SimpleNamespace(
+            client=SimpleNamespace(embed=lambda **kw: None)),
+    )
+
+
+def _fake_response(**over):
+    from types import SimpleNamespace
+    base = dict(
+        message=SimpleNamespace(thinking="想", content="[]"),
+        prompt_eval_count=8100, eval_count=8000,
+        prompt_eval_duration=6.057e11, eval_duration=1.7446e12,
+        load_duration=1.02e10, done_reason="length",
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_recorder_captures_ollamas_done_reason():
+    """**這一輪的判準就繫在這一格上。**
+
+    「生成 8,000 個 token」與「被預算切在 8,000」在輸出上長得一樣，分開它們
+    的只有 done_reason。攔截層漏掉它，整輪就只能靠 eval_count 推論 —— 而
+    推論與觀測的差別正是這一節在爭的東西。
+    """
+    memory = _fake_memory(_fake_response(done_reason="length"))
+    calls = p._install_recorder(memory)
+    memory.llm.client.chat(model="m", messages=[], options={})
+    assert len(calls) == 1, calls
+    assert calls[0]["done_reason"] == "length", calls[0]
+    assert calls[0]["eval_count"] == 8000, calls[0]
+    assert calls[0]["content_chars"] == 2, calls[0]
+
+
+def test_recorder_survives_a_response_without_done_reason():
+    """舊版 client 沒有這個欄位時要記成 None 而**不是爆掉**。
+
+    爆掉的那一輪會什麼都量不到（而且是在跑了幾小時之後才發現）；記成 None
+    的那一輪至少量得到 token 數，generation_stop_verdict 也會明講它是推的。
+    """
+    memory = _fake_memory(_fake_response(done_reason=None))
+    calls = p._install_recorder(memory)
+    memory.llm.client.chat(model="m", messages=[], options={})
+    assert calls[0]["done_reason"] is None, calls[0]
+    # 而且這個時候 verdict 要落在「推論」那一支，不可以宣稱是 ollama 說的。
+    v, s = p.generation_stop_verdict(calls[0]["eval_count"], 8000,
+                                     calls[0]["done_reason"])
+    assert v == "capped", (v, s)
+    assert "從 eval_count 推的" in s, s
+
+
+def test_generation_stop_verdict_prefers_ollamas_own_statement():
+    """done_reason 是觀測，eval_count 是推論 —— 兩個都在時以觀測為準。"""
+    v, s = p.generation_stop_verdict(8000, 8000, "stop")
+    # eval_count == cap 看起來像撞到上限，但 ollama 說它自己停了 → 矛盾。
+    # **這一格不挑一個相信**：那是有話要說的情況。
+    assert v == "disagree", (v, s)
+    assert "對不起來" in s, s
+
+    v, s = p.generation_stop_verdict(7999, 8000, "stop")
+    assert v == "stopped", (v, s)
+    assert "done_reason=stop" in s and "自己停下來" in s, s
+
+    v, s = p.generation_stop_verdict(8000, 8000, "length")
+    assert v == "capped", (v, s)
+    assert "撞到 num_predict" in s, s
+
+
+def test_generation_stop_verdict_falls_back_to_inference_and_says_so():
+    """沒有 done_reason 時只能推論 —— 而**推論要標成推論**。"""
+    v, s = p.generation_stop_verdict(8000, 8000, None)
+    assert v == "capped", (v, s)
+    assert "從 eval_count 推的" in s, s
+
+    v, s = p.generation_stop_verdict(1234, 8000, None)
+    assert v == "stopped", (v, s)
+    assert "推得沒有撞到上限" in s, s
+
+
+def test_generation_stop_verdict_refuses_to_guess_without_a_cap():
+    """沒有上限可比就沒有推論可言 —— 回 unknown，不是回「沒撞到」。
+
+    這一格是這支函式的 fail-closed 面：`cap` 讀不到時說「沒有撞到上限」，
+    等於把「不知道」講成「好消息」，而這一整條線的病都是這一種。
+    """
+    v, s = p.generation_stop_verdict(2000, None, None)
+    assert v == "unknown", (v, s)
+    assert s == "", s
+
+    v, s = p.generation_stop_verdict(None, 2000, None)
+    assert v == "unknown", (v, s)
+
+    # bool 是 int 的子類別 —— 不可以被當成 token 數收下。
+    v, _ = p.generation_stop_verdict(True, 1, None)
+    assert v == "unknown", v
+
+
+def test_generation_stop_verdict_ignores_a_done_reason_it_does_not_know():
+    """ollama 還有別種 done_reason（load／unload）—— 不認識的就不要假裝懂。"""
+    v, s = p.generation_stop_verdict(500, 8000, "load")
+    # 推論還在，所以仍然給得出答案，但**不可以**宣稱那是 ollama 說的。
+    assert v == "stopped", (v, s)
+    assert "done_reason=stop" not in s, s
+    v, s = p.generation_stop_verdict(None, None, "load")
+    assert v == "unknown", (v, s)
+
+
 def test_observations_says_when_the_add_generation_hit_the_cap():
     """觀察段也不可以把被切斷的生成講成生成完了。
 

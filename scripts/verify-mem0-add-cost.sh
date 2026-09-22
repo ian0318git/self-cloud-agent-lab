@@ -17,12 +17,20 @@
 #    分鐘才停。所以這裡在開跑前先做一次「ollama 有沒有在忙」的探測。
 #
 # 用法：bash scripts/verify-mem0-add-cost.sh [--model NAME] [--embed-model NAME]
-#                                            [--quick] [--rebuild] [--json]
+#                                            [--quick] [--add-max-tokens N]
+#                                            [--rebuild] [--json]
 #                                            [--sections C2,C2b,C3,C4,add]
 #
 # --quick 把真實 add() 那兩次的 max_tokens 壓到 200，讓整輪快很多。
 #         **機制判準 C2~C4 不受影響**（它們量的是 prompt 處理，不是生成），
 #         但成本觀察的秒數就只是下限，不要拿去跟 D-027 的數字比。
+#
+# --add-max-tokens N 把真實 add() 那兩次的生成上限**放大**（或縮小）到 N。
+#         這是 D-035 第八節那個對照組用的旋鈕：`num_predict` 是「預算」這個
+#         候選唯一可以直接動的變數，而它必須與 `num_ctx` 一起看 —— 生成超過
+#         `num_ctx − prompt_tokens` 就會觸發 llama-server 的 context shift
+#         （D-035 第三節），所以放大它之前先確認餘裕夠。
+#         與 --quick 同時給時以這裡為準（並警告）。
 #
 # --sections 只跑指定的幾節。**分段重跑用**：某一節的儀器壞掉、修好之後
 #            只想重跑那一節 —— C1／C5 那兩次是真的 add()，一小時以上。
@@ -58,6 +66,7 @@ EMBED_MODEL="${MEM0_COST_PROBE_EMBED_MODEL:-${EMBEDDING_MODEL:-qwen3-embedding:0
 OLLAMA_URL="http://ollama:11434"
 REBUILD=0
 QUICK=0
+ADD_MAX_TOKENS=""
 JSON_ARGS=()
 SECTION_ARGS=()
 
@@ -67,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --embed-model) EMBED_MODEL="$2"; shift 2 ;;
     --rebuild)     REBUILD=1; shift ;;
     --quick)       QUICK=1; shift ;;
+    --add-max-tokens) ADD_MAX_TOKENS="$2"; shift 2 ;;
     --json)        JSON_ARGS+=(--json); shift ;;
     --sections)    SECTION_ARGS+=(--sections "$2"); shift 2 ;;
     # 註解的結尾用「第一個空行」找，不用寫死的行號 —— 寫死的話每次改上面
@@ -78,6 +88,15 @@ done
 
 MODEL="$(normalize_model "$MODEL")"
 EMBED_MODEL="$(normalize_model "$EMBED_MODEL")"
+
+# 參數值在這裡就驗掉，**不要留到後面才擋** —— 後面幾百行有前置檢查、映像
+# 建置、模型下載，把「打錯字的旗標」留到那裡才講，等於讓一個純粹的輸入
+# 錯誤先去付那些成本。
+if [[ -n "$ADD_MAX_TOKENS" ]] \
+   && { [[ ! "$ADD_MAX_TOKENS" =~ ^[0-9]+$ ]] || (( ADD_MAX_TOKENS < 1 )); }; then
+  fail "--add-max-tokens 必須是正整數：$ADD_MAX_TOKENS"
+  exit 3
+fi
 
 # ── 前置：ollama 要在跑 ─────────────────────────────────
 if ! docker ps --format '{{.Names}}' | grep -qx "ollama"; then
@@ -144,8 +163,14 @@ if [[ ",$SECTIONS_STR," == *",C2,"* || ",$SECTIONS_STR," == *",C3,"* ]]; then
     echo "    · 要驗證「截斷」這件事本身 → 把 num_ctx 調回 4096 再跑："
     echo "        OLLAMA_CONTEXT_LENGTH=4096 docker compose up -d ollama"
     echo "      （或改 .env 後重啟 ollama；這是**暫時**的，驗完再調回去）"
-    echo "    · 只是想確認堆疊在 8192 下正常 → 那要跑的是 scripts/deploy-vps.sh"
-    echo "      的煙霧測試，不是這支探針。"
+    echo "    · 只是想確認堆疊正常 → 那要跑的是 scripts/deploy-vps.sh 的煙霧"
+    echo "      測試，或是這支探針的 --sections add。"
+    echo
+    echo "  ⚠ **在正確設定的堆疊上，C2／C3 已經是不可滿足的判準。** .env.example"
+    echo "    現在出貨 16384（D-035 的第二個門檻），而 C2／C3 的前提是「伺服器"
+    echo "    預設值小到會截斷」。所以照著文件佈署的機器跑這支不帶 --sections 的"
+    echo "    指令，**每次都會拿到這個 2**。要跑 C2／C3 就得刻意把 num_ctx 調到"
+    echo "    8101 以下 —— 也就是說，那兩個判準只在受控的對照實驗裡還有定義。"
     exit 2
   fi
 fi
@@ -225,14 +250,33 @@ else
 fi
 echo
 
+# 生成上限只有一個地方決定：`--add-max-tokens` 有給就用它，否則 --quick 用
+# 200，都沒有就交給 mem0 的預設（2,000）。**兩個都給時明講以哪個為準** ——
+# 一個被靜默忽略的旗標，正好是這支腳本最不該有的東西。
 QUICK_ARGS=()
-if [[ "$QUICK" == "1" ]]; then
+if [[ -n "$ADD_MAX_TOKENS" ]]; then
+  QUICK_ARGS=(--add-max-tokens "$ADD_MAX_TOKENS")
+  if [[ "$QUICK" == "1" ]]; then
+    warn "--quick 與 --add-max-tokens 同時給了 —— **以 --add-max-tokens $ADD_MAX_TOKENS 為準**，"
+    warn "--quick 的 200 被忽略（--quick 其餘行為不變）。"
+  fi
+  warn "真實 add() 的生成上限設為 num_predict=$ADD_MAX_TOKENS。"
+  # **放大預算之前先看餘裕**，因為那正是 D-035 第三節的機制：生成一旦超過
+  # `num_ctx − prompt_tokens`，llama-server 會從 prompt 中段丟掉一整塊再繼續
+  # —— prompt 完整這件事就不成立了，而那一輪量到的東西分不出成因。
+  # 這裡只提醒，不代擋：探針自己會讀 /api/ps 把生效的 num_ctx 記下來，
+  # 判斷留給讀的人（也留給旁證的日誌切片去對）。
+  warn "  提醒：生成超過 num_ctx − prompt_tokens 會觸發 context shift（D-035）。"
+  warn "  以 prompt 8,100、num_ctx 16,384 為例，餘裕是 8,284 —— 超過就 shift。"
+elif [[ "$QUICK" == "1" ]]; then
   QUICK_ARGS=(--add-max-tokens 200)
   warn "--quick：真實 add() 的 max_tokens 壓到 200。"
   warn "機制判準 C2~C4 不受影響（它們不經過 mem0 的 Memory），"
   warn "而 --quick 只會讓生成變短 —— 截斷上限只看 num_ctx，不看 num_predict"
   warn "（D-027，讀 llama_server.go 確認、並用固定 num_ctx 變 num_predict 實測），"
   warn "所以進得去的 prompt 一個 token 都不會多。"
+  warn "**但「進得去」不等於「待得住」**：壓短不會有壞處，放大才有 —— 見"
+  warn "  --add-max-tokens 的說明與 D-035 第三節。"
   warn "成本觀察的秒數仍然不要跟 D-027 的數字比：那兩次的生成被壓短了。"
 fi
 

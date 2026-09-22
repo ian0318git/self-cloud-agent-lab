@@ -189,7 +189,23 @@ MUTANTS=(
   "thinking：切斷了卻不講下界|            reason += (\" 但**開著 thinking 的那一次停在 num_predict 上限（%d）**\"|            reason += (\"\""
   "thinking：被切斷的沒下降當成反例|        if cut_on or cut_off:|        if False:"
   # ── observations：最常被讀的那一行也不能留同樣的陷阱 ──
-  "觀察：撞到上限不講|            capped = \"（**撞到 num_predict=%s 的上限，是被切斷的**）\" % cap|            capped = \"\""
+  #
+  # **這一條原本指的字串在 D-035 第三輪被搬進 generation_stop_verdict 了。**
+  # 搬動時它會以 NOT_FOUND 回報 —— 那是harness 在說「你指的判準不見了」，
+  # 不是「這個突變沒被抓到」。兩者要分清楚，所以下面這一組直接指新住址。
+  "觀察：撞到上限不講|                    \"（**ollama 回的 done_reason=length —— 撞到 num_predict=%s \"|                    \"（**ollama 回報 done_reason=length** \""
+  # ── generation_stop_verdict：這一輪真正要問的問題（D-035 第八節）──
+  # 「生成 8,000 個 token」與「被預算切在 8,000」在輸出上長得一樣。這一組
+  # 守的就是那個差別 —— 而它是這一輪唯一的判準。
+  "停的判定：done_reason 不看，一律用推論|    if done_reason in (\"stop\", \"length\"):|    if False:"
+  "停的判定：矛盾時挑一個相信|            return \"disagree\", (|            return stated, ("
+  "停的判定：沒有上限可比也講成沒撞到|    return \"unknown\", \"\"|    return \"stopped\", \"（沒撞到上限）\""
+  "停的判定：把 length 講成自己停的|        stated = \"capped\" if done_reason == \"length\" else \"stopped\"|        stated = \"stopped\""
+  "停的判定：推論不標成推論|；這是從 eval_count 推的，這一輪沒有讀到 done_reason）\" % c|）\" % c"
+  # 攔截層漏掉 done_reason —— 判準本身還在，但整輪只剩推論可用。這是
+  # 「儀器少收一格」的病：它不會讓任何判準變紅，只會讓結論變弱，而變弱的
+  # 結論讀起來與強的一模一樣。
+  "攔截：done_reason 不收|            \"done_reason\": getattr(resp, \"done_reason\", None),|            \"done_reason\": None,"
   # ── call_summary（C1／C5 的依據）──
   "呼叫計數：chat 最多算一次|            summary[\"chat\"] += 1|            summary[\"chat\"] = 1"
   "呼叫計數：token 只留最後一次|            summary[\"chat_eval_tokens\"] += c.get(\"eval_count\") or 0|            summary[\"chat_eval_tokens\"] = c.get(\"eval_count\") or 0"

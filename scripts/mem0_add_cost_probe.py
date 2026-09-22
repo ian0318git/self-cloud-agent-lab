@@ -1067,6 +1067,68 @@ def exit_code(evidence, passed):
     return EXIT_PASS if passed else EXIT_FAIL
 
 
+def generation_stop_verdict(eval_count, cap, done_reason):
+    """這次生成是**模型自己停下來的**，還是**被 num_predict 切斷的**？
+
+    回 `(verdict, sentence)`，verdict ∈ `{"stopped", "capped", "disagree",
+    "unknown"}`。
+
+    為什麼要有這支：「生成 8,000 個 token」與「被預算切在 8,000」是兩件完全
+    不同的事，而**它們在輸出上長得一模一樣**。這一條是 D-027 第七節那個陷阱
+    的同一種病，只是換了一個欄位。
+
+    兩個來源，強度不同，所以**分開講**：
+      · `done_reason` —— ollama 自己的陳述（`"stop"` 自己停、`"length"` 撞到
+        上限）。這是觀測。
+      · `eval_count >= cap` —— 我們的推論。`cap` 缺席時它無從推起。
+    兩者都在而且**互相矛盾**時回 `"disagree"`：那是有話要說的情況，不是
+    挑一個相信的時候。
+    """
+    n = eval_count if isinstance(eval_count, int) and not isinstance(eval_count, bool) \
+        else None
+    c = cap if isinstance(cap, int) and not isinstance(cap, bool) else None
+
+    inferred = None
+    if n is not None and c is not None:
+        inferred = "capped" if n >= c else "stopped"
+
+    if done_reason in ("stop", "length"):
+        stated = "capped" if done_reason == "length" else "stopped"
+        if inferred is not None and inferred != stated:
+            return "disagree", (
+                "**ollama 與 token 數對不起來**：done_reason=%r 說「%s」，"
+                "但 eval_count=%s 對 num_predict=%s 推得「%s」。"
+                "兩個都不採信 —— 這一格要人工看。"
+                % (done_reason,
+                   "撞到上限" if stated == "capped" else "自己停的",
+                   n, c,
+                   "撞到上限" if inferred == "capped" else "自己停的")
+            )
+        if stated == "capped":
+            if c is not None:
+                return "capped", (
+                    "（**ollama 回的 done_reason=length —— 撞到 num_predict=%s "
+                    "的上限，是被切斷的**）" % c
+                )
+            return "capped", "（**ollama 回的 done_reason=length —— 是被切斷的**）"
+        return "stopped", (
+            "（ollama 回的 done_reason=stop —— 模型**自己停下來的**，"
+            "不是被預算切斷的）"
+        )
+
+    if inferred == "capped":
+        return "capped", (
+            "（**撞到 num_predict=%s 的上限，是被切斷的**"
+            "；這是從 eval_count 推的，這一輪沒有讀到 done_reason）" % c
+        )
+    if inferred == "stopped":
+        return "stopped", (
+            "（eval_count=%s < num_predict=%s，**推得沒有撞到上限**"
+            "；這一輪沒有讀到 done_reason）" % (n, c)
+        )
+    return "unknown", ""
+
+
 def observations(evidence):
     """非致命觀察 —— 印給人看，不影響通過與否。
 
@@ -1116,17 +1178,26 @@ def observations(evidence):
         # 是「被預算切斷」，也就是說「一次抽取要多久」在這裡是下界
         # （D-027 第七節）。既然這一條的判準都在防「拿被切斷的生成當完整
         # 量測」，輸出本身也不該留一個同樣的陷阱。
-        capped = ""
+        # 判準放在 generation_stop_verdict 裡（可離線測試），這裡只負責印。
+        # **不要在這裡另外寫一份「有沒有撞到上限」的判斷** —— 兩份判斷會漂移，
+        # 而漂移的那一天，輸出與判準會各說各話（D-035 第六節就是這種病）。
         cap = (meta.get("add_max_tokens_overridden")
                or (meta.get("mem0_options") or {}).get("num_predict"))
-        if cap and add1.get("eval_count") is not None \
-                and add1["eval_count"] >= cap:
-            capped = "（**撞到 num_predict=%s 的上限，是被切斷的**）" % cap
+        stop_verdict, capped = generation_stop_verdict(
+            add1.get("eval_count"), cap, add1.get("done_reason"))
         notes.append(
             "第一次 add：llm 生成的 token=%s、prompt token=%s、牆上=%.1f 秒%s"
             % (add1.get("eval_count"), add1.get("prompt_eval_count"),
-               add1.get("wall") or 0.0, capped)
+               add1.get("wall") or 0.0, (" " + capped) if capped else "")
         )
+        if stop_verdict == "stopped" and add1.get("done_reason") == "stop":
+            # 這一則只在**有觀測**時印：模型自己停下來是這一輪最想知道的事，
+            # 而它同時也是「預算假設」的否證條件 —— 值得單獨一行。
+            notes.append(
+                "**生成沒有被預算切斷**（done_reason=stop）—— 也就是說，"
+                "%s 個 token 是模型自己認為講完了，不是我們叫它停的。"
+                % add1.get("eval_count")
+            )
     if add1 and add1.get("eval_count") and add1.get("eval_duration"):
         notes.append(
             "生成速率（ollama 自己算的，不含載入）：%.2f tok/s"
@@ -1258,6 +1329,11 @@ def _install_recorder(memory):
             "thinking_chars": len(getattr(message, "thinking", None) or ""),
             "content_chars": len(getattr(message, "content", None) or ""),
             "content": getattr(message, "content", None),
+            # **ollama 自己說它為什麼停的。** 少了這一格，「生成 2,000 個
+            # token」只能靠 `eval_count == num_predict` **推論**是不是撞到
+            # 上限；有了它，那是 ollama 的陳述而不是我們的推論，而且兩者
+            # 不一致時可以當場看出來（見 generation_stop_verdict）。
+            "done_reason": getattr(resp, "done_reason", None),
         })
         return resp
 
@@ -1963,6 +2039,8 @@ def measure_add(evidence, args, workdir):
         "prompt_eval_duration": a1.get("prompt_eval_duration"),
         "load_duration": a1.get("load_duration"),
         "thinking_chars": a1.get("thinking_chars"),
+        "content_chars": a1.get("content_chars"),
+        "done_reason": a1.get("done_reason"),
     }
     evidence["calls"] = {
         "first_add_chat": n_chat1,
@@ -1996,6 +2074,8 @@ def measure_add(evidence, args, workdir):
         "wall": wall2,
         "eval_count": b1.get("eval_count"),
         "prompt_eval_count": b1.get("prompt_eval_count"),
+        "content_chars": b1.get("content_chars"),
+        "done_reason": b1.get("done_reason"),
     }
     evidence["duplicate"] = {"second_add_chat": len(chat2)}
 
@@ -2059,6 +2139,16 @@ def run_probe(args, want=None):
     print("  探針修訂版：sha256[:16]=%s、%s 位元組、mtime %s"
           % (probe.get("sha256_16", probe.get("error", "?")), probe.get("bytes", "?"),
              probe.get("mtime", "?")), flush=True)
+    # **這一輪真正要動的變數，在跑那兩次 add() 之前就印出來。** 真實 add() 的
+    # 生成上限若沒送到，整輪會用 mem0 的預設值跑完幾個小時，而輸出裡沒有
+    # 任何一行長得不一樣 —— 那正是 D-035 第七節教訓 3 的形狀（第一次跑忘了
+    # --json，重跑 11 分鐘才換到一個欄位）。寧可開跑前十秒發現。
+    eff_cap = (meta.get("add_max_tokens_overridden")
+               or (meta.get("mem0_options") or {}).get("num_predict"))
+    print("  真實 add() 的生成上限 num_predict=%s%s"
+          % (eff_cap,
+             "（--add-max-tokens 覆寫）" if meta.get("add_max_tokens_overridden")
+             else "（mem0 預設，沒有覆寫）"), flush=True)
 
     if "C2" in want:
         print("\n── C2：抽取 prompt 是否被截斷 ─────────────", flush=True)
