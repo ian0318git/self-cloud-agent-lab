@@ -391,11 +391,18 @@ def memories_written(add_result):
 def prompt_chars(call):
     """這一次呼叫送出的 messages 共幾個字元（讀不到就 None）。
 
-    **為什麼要有這一支：** 兩次 `add()` 的 `prompt_eval_count` 都是 2050 ——
-    因為兩次都被截斷到**同一個上限**，所以那個欄位看不出兩份 prompt 的長度
-    差。截斷前的差別只留在被攔截下來的 `params["messages"]` 裡（那是 mem0
-    送出的同一個 dict，見 `_install_recorder()`）。run2 的日誌則從另一側
-    顯示同一個事實：兩次真實的 add() prompt 是 8052 與 8100 個 token。
+    **為什麼要有這一支：** 在 num_ctx=4096 的年代，兩次 `add()` 的
+    `prompt_eval_count` 都是 2050 —— 因為兩次都被截斷到**同一個上限**，所以
+    那個欄位看不出兩份 prompt 的長度差。截斷前的差別只留在被攔截下來的
+    `params["messages"]` 裡（那是 mem0 送出的同一個 dict，見
+    `_install_recorder()`）。run2 的日誌則從另一側顯示同一件事：兩次真實的
+    add() prompt 是 8052 與 8100 個 token。
+
+    **但那個理由只在會被截斷的 ctx 下成立。** ctx 夠大時 prompt 完整進去，
+    `prompt_eval_count` 反而**看得出**差別（D-036 量到 8,052 與 8,167）。
+    所以這一支的用途從「唯一能看出差別的管道」變成「與 prompt_eval_count
+    互相印證的獨立管道」—— 兩個都印，讓它們彼此對照，見
+    `truncation_claim_verdict()`。
 
     **它量的是字元數，不是 token 數** —— 這支探針沒有 tokenizer。所以它
     證明的是「第二份比較長」，不是「長了幾個 token」。
@@ -422,10 +429,16 @@ def prompt_chars(call):
 def duplicate_evidence(chat1, chat2):
     """兩次 add() 的 prompt 長度對照 —— **只從攔截到的 messages 量**。
 
-    `prompt_eval_count` 不可以拿來相減：兩次都被截斷到**同一個上限**，那個
-    差值永遠是 0，而那個 0 是儀器的天花板，不是量測結果（見 prompt_chars()）。
-    run2 的 ollama 日誌從另一側顯示同一件事：兩次真實的 add() prompt 是
-    8052 與 8100 個 token，差了 48 —— 而 `prompt_eval_count` 兩次都報 2050。
+    **在會被截斷的 ctx 下**，`prompt_eval_count` 不可以拿來相減：兩次都被截斷
+    到**同一個上限**，那個差值永遠是 0，而那個 0 是儀器的天花板，不是量測結果
+    （見 prompt_chars()）。run2 的 ollama 日誌從另一側顯示同一件事：兩次真實的
+    add() prompt 是 8052 與 8100 個 token，差了 48 —— 而 `prompt_eval_count`
+    兩次都報 2050。
+
+    **在不會被截斷的 ctx 下這個理由消失**，`prompt_eval_count` 反而看得出差別
+    （D-036：8,052 與 8,167）。所以這一支不是「唯一」的管道，而是**與它獨立的
+    第二個管道** —— 兩者互相印證。它們一致時結論更強；不一致時
+    `truncation_claim_verdict()` 會回 `disagree`，那是要人工看的訊號。
 
     **讀不到就整格不放**（不是放 0）。在 JSON 裡「沒有這一格」與「這一格是
     0」必須長得不一樣，否則讀的人分不出「沒有變長」與「沒有量」。
@@ -1129,6 +1142,71 @@ def generation_stop_verdict(eval_count, cap, done_reason):
     return "unknown", ""
 
 
+def truncation_claim_verdict(ctx, min_ctx_for_extraction, pec_first, pec_second):
+    """「兩次都被截斷到同一個上限，所以 prompt_eval_count 看不出差別」——
+    **這一輪**這句話成立嗎？
+
+    回 (verdict, sentence)，verdict ∈ {"truncated", "not_truncated", "disagree",
+    "unknown"}。
+
+    為什麼要問：那句話寫於 num_ctx=4096 的年代。當時兩次 add 的 prompt 都被砍到
+    2050，所以相減永遠是 0，那句話是真的。但在 num_ctx=16384 之下 prompt
+    8,052／8,167 完整進去，`prompt_eval_count` 反而**看得出**那個差別 ——
+    同一句話從真變成假，而它印在輸出裡最常被讀的那一行（D-035 第六節；D-036
+    第七節拿到了觀測實例：那句話在同一行裡被自己的 8,167 反駁）。
+
+    判準用既有的 evidence，不新增管線：
+
+      ctx                      meta.context_length_before（/api/ps 讀到的生效值）
+      min_ctx_for_extraction   ctx_law.min_ctx_for_extraction（= prompt_tokens + 1）
+                               只在門檻夾準（consistent）時才有 —— 沒有就回 unknown
+
+    **內在一致性檢查**：兩次都被截斷到同一個上限，那兩個 prompt_eval_count 就
+    **必須相等**（同一個 num_ctx 下 truncated_length() 是同一個數）。不相等而
+    判準說「有截斷」，那就是判準與觀測打架 —— 回 disagree，不挑一個相信。
+    """
+    def _int(x):
+        return x if isinstance(x, int) and not isinstance(x, bool) else None
+
+    c = _int(ctx)
+    need = _int(min_ctx_for_extraction)
+    p1 = _int(pec_first)
+    p2 = _int(pec_second)
+
+    if c is None or need is None:
+        return "unknown", (
+            "（**沒有主張「有沒有被截斷」**：生效的 num_ctx=%r、不被截斷的下限=%r "
+            "—— 兩者都要有才推得出來，缺一個就什麼都不說。"
+            "讀不到不等於沒有截斷。）" % (ctx, min_ctx_for_extraction))
+
+    truncated = c < need
+
+    if truncated:
+        if p1 is not None and p2 is not None and p1 != p2:
+            return "disagree", (
+                "（**判準與觀測打架**：num_ctx=%d < 不被截斷的下限 %d，所以兩次"
+                "應該都被砍到同一個長度；但 prompt_eval_count 是 %d 與 %d，"
+                "不相等。同一組算式不會給兩個答案 —— 要人工看。）"
+                % (c, need, p1, p2))
+        return "truncated", (
+            "—— num_ctx=%d 小於不被截斷的下限 %d，所以兩次都被截斷到同一個"
+            "上限（%s），prompt_eval_count 看不出這個差別。"
+            % (c, need, "兩次相同" if p1 == p2 else "見上"))
+
+    # `not_truncated` 這一句**不可以引用那句話來說它錯了**。
+    # 「原本那句『兩次都被截斷到同一個上限，所以看不出差別』是不成立的」讀起來
+    # 像是在更正，但它把假話**原封不動印在輸出裡** —— 而這一行的讀者是用眼睛
+    # 掃、用 grep 找的（D-036 教訓 5 就是 grep 被關鍵字騙）。更正留在 docstring
+    # 與 DECISIONS.md，輸出只講成立的東西。
+    if p1 is not None and p2 is not None:
+        detail = "prompt_eval_count = %s 與 %s，差別看得出來" % (p1, p2)
+    else:
+        detail = "（沒有讀到 prompt_eval_count，所以無從比對）"
+    return "not_truncated", (
+        "—— **這兩次都沒有被截斷**（num_ctx=%d ≥ 下限 %d）：%s。"
+        % (c, need, detail))
+
+
 def observations(evidence):
     """非致命觀察 —— 印給人看，不影響通過與否。
 
@@ -1257,19 +1335,29 @@ def observations(evidence):
     # （mem0 把上一次的訊息寫進 history DB，第二次 add() 再讀回來）—— 但那是
     # **預測，不是這支探針的觀測**，所以它不寫進這一則。
     #
-    # 這裡只印量得到的：被攔截下來的 messages 有幾個字元。兩次都被截斷到同一
-    # 個上限，所以 prompt_eval_count 看不出這個差別（見 prompt_chars()）。
+    # 這裡只印量得到的：被攔截下來的 messages 有幾個字元。
+    #
+    # **「兩次都被截斷到同一個上限」不可以寫死。** 那句話在 num_ctx=4096 的
+    # 年代是真的，但 ctx 夠大時 prompt 完整進去，prompt_eval_count 反而**看
+    # 得出**差別 —— 同一個字串從真變成假（D-035 第六節發現，D-036 第七節拿到
+    # 觀測實例：那句話在同一行裡被它自己的 8,167 反駁）。判準在
+    # truncation_claim_verdict()（可離線測試），這裡只負責印。
     if add2:
         grew = ""
         c1, c2 = dup.get("prompt_chars_first"), dup.get("prompt_chars_second")
         d = dup.get("prompt_grew_chars")
+        claim_verdict, claim = truncation_claim_verdict(
+            (evidence.get("meta") or {}).get("context_length_before"),
+            (evidence.get("ctx_law") or {}).get("min_ctx_for_extraction"),
+            (add1 or {}).get("prompt_eval_count"),
+            add2.get("prompt_eval_count"),
+        )
         if c1 is not None and c2 is not None and d is not None:
-            grew = ("攔截到的 messages：第一次 %d 字元、第二次 %d 字元（%+d）"
-                    "—— 兩次都被截斷到同一個上限，所以 prompt_eval_count "
-                    "看不出這個差別。" % (c1, c2, d))
+            grew = ("攔截到的 messages：第一次 %d 字元、第二次 %d 字元（%+d）%s"
+                    % (c1, c2, d, (" " + claim) if claim else ""))
         else:
             grew = ("讀不到攔截到的 messages（%r／%r），所以**無從比較**"
-                    "兩次的長度。" % (c1, c2))
+                    "兩次的長度。%s" % (c1, c2, claim))
         notes.append(
             "第二次 add（內容相同）：chat=%s 次、prompt token=%s、牆上=%.1f 秒 —— %s"
             % (dup.get("second_add_chat"), add2.get("prompt_eval_count"),
@@ -2079,16 +2167,25 @@ def measure_add(evidence, args, workdir):
     }
     evidence["duplicate"] = {"second_add_chat": len(chat2)}
 
-    # **不可以用 `prompt_eval_count` 相減來量「prompt 有沒有變長」。**
+    # **不可以用 `prompt_eval_count` 相減來量「prompt 有沒有變長」——除非先
+    # 確定兩次都沒有被截斷。**
     #
-    # 那兩個數字都是 2050 —— 兩次都被截斷到**同一個上限**，所以相減永遠是
-    # 0。一個名叫「prompt 變長了」的欄位會永遠回報「沒有變長」，而那個 0
-    # 是儀器的天花板，不是量測結果。（原本這裡就是這樣寫的：註解說「第二次
-    # 的 prompt 應該更長（Phase 1 檢索到第一次寫入的記憶）」，但那個括號裡的
-    # 成因**也是錯的** —— Phase 1 檢索的是向量庫，而這一輪抽出 0 筆、向量庫
-    # 是空的。真正會變長的是 `## Last k Messages`：mem0 把上一次的訊息寫進
-    # history DB，第二次 add() 再讀回來。**那是一條可查的線索，不是這支探針
-    # 的觀測**，所以它不住在 evidence 裡。）
+    # 在 ctx 4096 之下那兩個數字都是 2050（兩次都被截斷到**同一個上限**），
+    # 所以相減永遠是 0。一個名叫「prompt 變長了」的欄位會永遠回報「沒有變長」，
+    # 而那個 0 是儀器的天花板，不是量測結果。**但這個禁令是有條件的**：ctx
+    # 夠大時兩個數字是 8,052 與 8,167，相減得到的 115 是**有效**的（D-036）。
+    # 所以判準是「先問有沒有被截斷」—— 那是 truncation_claim_verdict() 的工作，
+    # 不是這裡。
+    #
+    # 這一支仍然走獨立管道（`prompt_chars()`，從攔截到的 messages 量），理由
+    # 從「唯一可行」變成「與 prompt_eval_count 互相印證」：兩個管道一致時結論
+    # 更強，不一致時看得出來。
+    #
+    # （原本這裡的註解說「第二次的 prompt 應該更長（Phase 1 檢索到第一次寫入的
+    # 記憶）」，那個括號裡的成因**是錯的** —— Phase 1 檢索的是向量庫。真正會
+    # 變長的是 `## Last k Messages`：mem0 把上一次的訊息寫進 history DB，第二次
+    # add() 再讀回來。**那是一條可查的線索，不是這支探針的觀測**，所以它不住在
+    # evidence 裡。）
     evidence["duplicate"].update(duplicate_evidence(a1, b1))
     return memory
 

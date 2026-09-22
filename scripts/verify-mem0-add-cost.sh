@@ -39,11 +39,14 @@
 # 結束碼：0 = 通過（C1~C5 全過）
 #         1 = 未通過（判準沒過 —— 通常代表上游變了，重讀 D-027）
 #         2 = 無法判定（容器未執行、模型沒下載、連不上 —— 不是判準的問題）
-#         3 = 探針自己壞掉（D-018：這不是受測對象的問題，是這支腳本該修）
+#         3 = 探針自己壞掉，**或探針在這一輪執行期間被換掉**（見下面「探針修訂版
+#             的守衛」）。兩者都是儀器的問題，不是受測對象的問題（D-018）。
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # 讀 ollama 日誌的旁證工具。獨立成檔是為了能被單獨測試 —— 見它開頭的說明。
 source "$(dirname "${BASH_SOURCE[0]}")/ollama_log_corroboration.sh"
+# 「這一輪是哪一版探針跑的」—— 探針是即時 bind-mount 進去的，映像雜湊蓋不到它。
+source "$(dirname "${BASH_SOURCE[0]}")/probe_traceability.sh"
 # C2／C3 前提檢查用的門檻與判定（ctx_meets_mem0、MEM0_ADD_MIN_CTX）。
 # 放在那個模組裡是為了能離線測試 —— 這一條錯了會製造假失敗。
 source "$(dirname "${BASH_SOURCE[0]}")/deploy-vps-decisions.sh"
@@ -293,6 +296,18 @@ info "開始 —— 這一輪可能幾十分鐘，輸出會即時印出來"
 #     區段裡找到；找不到就代表視窗沒蓋到這一輪，旁證不可用（見下面那段）。
 RUN_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%S)"
 PRE_ANCHOR="$(docker logs --tail 1 ollama 2>&1 | tail -1)"
+
+# 守衛的第三個基準，也在開跑**之前**取：探針自己的雜湊。
+# 它是唯一能證明「這一輪跑的是工作樹上那一版」的東西 —— 因為下面那行 -v
+# 是把工作樹**即時**掛進去，映像標籤（lab.req-sha256）只涵蓋需求檔。
+#
+# `|| true` 不是裝飾：lib.sh 開頭是 `set -euo pipefail`，少了它，sha256sum
+# 一失敗（讀不到檔）就會**當場帶走整支腳本**（rc=1，看起來像「判準沒過」），
+# 而 probe_stable_verdict 的第三態（unknown → 只警告）永遠走不到。
+# `2>/dev/null` 只擋掉訊息，擋不掉結束碼 —— 這一條是整合測試發現的
+# （scripts/test_verify_mem0_add_cost_guard.sh 的案例 E），不是看出來的。
+PROBE_SHA_BEFORE="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+
 rc=0
 docker run --rm --network "$NET" \
   -v "$PROBE:/probe/mem0_add_cost_probe.py:ro" \
@@ -300,6 +315,25 @@ docker run --rm --network "$NET" \
   "$IMAGE" python3 -u /probe/mem0_add_cost_probe.py \
     --model "$MODEL" --embed-model "$EMBED_MODEL" --ollama-url "$OLLAMA_URL" \
     "${QUICK_ARGS[@]}" "${JSON_ARGS[@]}" "${SECTION_ARGS[@]}" || rc=$?
+
+# ── 探針修訂版的守衛 ────────────────────────────────────
+# 跑完再算一次。不一樣就代表上面那幾小時的數字**對不上任何一個修訂版**：
+# 探針只在啟動時讀一次自己的雜湊（寫進 evidence 的 meta.probe.sha256_16），
+# 所以事後拿工作樹去比對，分不出「跑的是舊碼」與「跑完才被改」。
+# 那一輪的數字仍然印出來（它是真的量到的），但結束碼不可以是 0 —— 一份
+# 追不回修訂版的「通過」是假的通過。
+#
+# 判定在 scripts/probe_traceability.sh（可離線測試，18 條斷言 ＋ 2 個突變）。
+PROBE_SHA_AFTER="$(sha256sum "$PROBE" 2>/dev/null | awk '{print $1}' || true)"
+TRACE_VERDICT="$(probe_stable_verdict "$PROBE_SHA_BEFORE" "$PROBE_SHA_AFTER")"
+case "$TRACE_VERDICT" in
+  stable)  ;;
+  changed) fail "探針在這一輪執行期間被改動（${PROBE_SHA_BEFORE:0:16} → ${PROBE_SHA_AFTER:0:16}）—— 這一輪的數字對不上任何一個修訂版，不可追溯。"
+           warn "這一條蓋過上面的 --sections 結束碼 2：分段重跑是**設計**，儀器被換掉是儀器壞了。" ;;
+  unknown) warn "算不出探針的雜湊（跑前=${PROBE_SHA_BEFORE:0:16}、跑後=${PROBE_SHA_AFTER:0:16}）—— 無法確認它整輪沒被換掉。"
+           warn "只警告不失敗：讀不到不等於它變了（D-016，假失敗比漏掉更糟）。" ;;
+esac
+rc="$(probe_guard_verdict "$rc" "$TRACE_VERDICT")"
 
 # ── 獨立的旁證：ollama 自己的日誌 ───────────────────────
 # 這是**完全不經過探針**的一份證據 —— 探針包住的是 python client，
@@ -322,7 +356,11 @@ info "ollama 日誌裡的截斷旁證（自 $RUN_START_UTC 起，只採計這之
 ollama_log_corroboration "$PRE_ANCHOR" "$RUN_START_UTC" || true
 
 echo
-if [[ "$rc" != "0" && ${#SECTION_ARGS[@]} -gt 0 ]]; then
+# 條件是 `== 2`，不是 `!= 0`。這一段在斷言「結束碼 2 是預期的」，而
+# `!= 0` 會讓它在 rc=3 時也印出來 —— 那就變成一句被自己那行反駁的話
+# （D-036 第七節的形狀）。3 的可能來源不只一個：探針自己壞掉，或上面那個
+# 守衛發現探針被換掉。兩種都不是「只跑一部分」。
+if [[ "$rc" == "2" && ${#SECTION_ARGS[@]} -gt 0 ]]; then
   warn "這一輪是 --sections 的分段重跑（${SECTION_ARGS[1]}）—— 結束碼 2 是"
   warn "預期的：**只跑一部分永遠不算通過**，那是設計，不是失敗。"
   warn "要判定整個 item 3，要跑滿 C2、C2b、C3、C4、add。"

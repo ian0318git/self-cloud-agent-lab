@@ -164,7 +164,9 @@ costs KV-cache memory proportional to it (roughly 36 KiB per token for a 3B-clas
 model; that figure is an **estimate** from Qwen2.5-3B's architecture, not measured
 on this stack, and it scales with the model's layer/head count). It costs **time**
 too: on this stack, going from 8,192 to 16,384 made the same work **45.5% slower**
-(D-035). The reason the default is worth raising anyway: **memory extraction
+(D-035). (*That is a wall-clock **total**, which is measured reliably; how a run
+splits between prefill and generation is a separate claim that no longer holds —
+D-036 §5.*) The reason the default is worth raising anyway: **memory extraction
 silently truncates.** A `mem0` `add()` call sends an extraction prompt measured at
 8,052 and 8,100 tokens, and ollama's 4096 default cuts it to 2,050 — dropping the
 instructions at the end of the prompt, with no error — extraction returns zero
@@ -183,13 +185,22 @@ value to use. `deploy-vps.sh` explains this at the point it matters.
 **Raising it is necessary but still not sufficient.** Both control groups ran on
 2026-09-22. At `num_ctx=8192` the prompt was intact going in but got shifted
 mid-generation; at `num_ctx=16384` it stayed intact for the whole generation
-(`context shift` count: **0**) and extraction *still* returns zero facts, with
+(`context shift` count: **0**) and extraction *still* returned zero facts, with
 generation *still* stopping at `num_predict=2000`. So neither truncation nor the
-mid-generation shift emptied the extraction — both are eliminated. The remaining
-candidate, the generation budget being consumed by `thinking`, now has direct
-evidence behind it rather than mere consistency: the run records
-`thinking_chars=7796` against `eval_count=2000`, the cap (D-034, D-035). It is
-**not yet tested as a cause.**
+mid-generation shift emptied the extraction — both are eliminated.
+
+**The third control group confirmed the remaining candidate.** Same `num_ctx`
+(16,384), only `num_predict` changed — mem0's default **2,000 → 8,000**: the
+first `add()` extracted **2 memories** with `done_reason=stop` and `eval_count`
+5,605 (D-036). The generation budget *was* the cause, and the 2,000-token run
+shows why: at that cap the whole budget went to `thinking` before an answer
+existed (`thinking_chars=7796` against `eval_count=2000`, D-034).
+
+So the pairing to deploy is **16384** for the context and **a `max_tokens` large
+enough that the model stops on its own** — not another magic number. The
+criterion is `done_reason == "stop"`; this model's natural length for this prompt
+was 5,605 tokens, and any fixed cap below it truncates **silently**, in a way
+that reads as "there were no facts to extract".
 
 **Verifying it took effect is not optional**, because the variable's *name* was
 verified in the binary long before anything proved it does anything (D-028). Read
@@ -347,8 +358,11 @@ change anything they cover.
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | That the grader above is actually exercised — 11 mutations of its own criteria, every one must be caught |
 | `bash scripts/verify-chroma-dims.sh` | That mem0 reuses a pre-created ChromaDB collection instead of fighting it, and which metadata key is authoritative for embedding dimensions (D-026) |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
-| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027). **Two control groups since then have eliminated both ways the prompt can be lost** — pre-generation truncation (D-034) and the mid-generation context shift (D-035) — and extraction *still* returns zero facts, which is why the remaining candidate is the generation budget (D-035 §8) |
-| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 78 mutations of its own criteria, every one must be caught |
+| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027). **Three control groups have since closed the question**: pre-generation truncation (D-034) and the mid-generation context shift (D-035) were *eliminated*, and the **generation budget** was **confirmed as the cause** (D-036) — at `num_ctx` held at 16,384, `num_predict` 2,000 → 8,000 extracts 2 memories where 0 were extracted, with `done_reason=stop` |
+| `python3 scripts/test_mem0_add_cost_probe.py` | That the verdicts above have discriminating power offline — no Docker, no ollama — including the four-state truncation claim that `#58` replaced (D-036 §11.1) |
+| `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 92 mutations of its own criteria, every one must be caught |
+| `bash scripts/test_probe_traceability.sh` | That a probe **bind-mounted live** into its container can be proved to be the same file before and after the run — the probe is not baked into the image (four scripts mount it, e.g. `verify-mem0-add-cost.sh:298`), so the image label does not cover it and a pass it produced mid-change traces to no revision — recovering that once took a leftover `.pyc` (D-027 §10, D-036 §11.2) |
+| `bash scripts/test_verify_mem0_add_cost_guard.sh` | That the guard above is actually **wired in**: that `changed` overrides a `--sections` exit 2 while a genuine 2 is not misreported, that an unreadable hash warns instead of failing (D-016), and that 「結束碼 2 是預期的」 can no longer print at rc 3 |
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences — including the lie it tells in the worst direction: under `set -o pipefail` a `printf \| grep -q` coverage check dies of SIGPIPE, so it reports "coverage not established" *precisely when the window covers the most* (D-034) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
@@ -980,8 +994,9 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
    extract facts before storing, which is item 3. This probe drives the vector
    store and the embedder directly, so it needs no API key and no LLM.
 
-3. **[verified] mem0 does cost one extra LLM call — and at the default
-   `num_ctx` that call never sees its own instructions.** Measured 2026-09-20
+3. **[verified] mem0 does cost one extra LLM call; at the default `num_ctx`
+   that call never sees its own instructions; and its default generation budget
+   is too small for the extraction to finish.** Measured 2026-09-20
    (D-027) via `bash scripts/verify-mem0-add-cost.sh`. The claim above was
    structurally right, and measurably worse than it sounds:
 
@@ -1053,6 +1068,58 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
    (`num_ctx - num_predict - 46`) that happened to match the one log line it
    was checked against, and "verified" it with an experiment in which both
    formulas predict the same number. See D-027 §4.
+
+   **The third control group answered it (D-036).** `num_ctx` held at 16,384,
+   `num_predict` 2,000 → 8,000, nothing else changed: the first `add()`
+   extracted **2 memories**, where D-035's run at 2,000 extracted **0** — and
+   `done_reason=stop` with `eval_count` 5,605 says it was not cut off. **The
+   extraction does happen; the generation budget was the cause.** The rule that
+   falls out is not a number: the model stopped on its own, and any fixed
+   `max_tokens` below what the model actually needs truncates *silently*, in a
+   way that reads as "there were no facts to extract" — which is exactly how
+   mem0's own 2,000 was misread for three rounds.
+
+   The second `add()` in that run also returned 0, and **it is a different 0**:
+   `done_reason=stop`, `eval_count` 1,236, and its content had already been
+   stored by the first call — so "nothing new to extract" is the *right*
+   answer. On the older instrument the two zeros are indistinguishable, which
+   is the entire reason `done_reason` was added **before** the run started
+   (commit `d4a8bf8`, pushed before it began, so the numbers trace to that
+   revision). Three more things came out of it:
+
+   - **"A bigger budget costs more" is false.** add 1 went 2,367 → 6,076 s
+     (×2.57) but add 2 went 2,430 → **1,361 s (×0.56, faster)** — it stopped at
+     1,236 tokens instead of being cut at 2,000. You pay for the budget **used**,
+     not the budget **allowed**, so raising the ceiling cost nothing here.
+   - **One thing is observed and *not* explained, and is recorded as unknown.**
+     At `num_predict=8000` ollama split each generation into **two slot tasks**,
+     re-prefilling prompt + generated-so-far; `prompt_eval_duration` therefore
+     no longer names what its name says. The totals still reconcile with the
+     wall clock (5,527.7 + 531.7 + 7.5 = 6,066.9 s vs 6,075.8 s), so **the
+     totals stand — but the prefill/generation split behind every cost claim
+     since D-030 needs rechecking.**
+   - **`grep 'shift'` is fooled by the flag itself.** All 7 hits in that log are
+     llama-server's startup argument dump of `--context-shift`. The verdict
+     rests on the **event** line (`slot context shift, …`, absent) and on
+     `n_discard`/`n_left` (also absent, not merely uncounted) — not on a
+     keyword count that a startup banner satisfies.
+
+   **The context half of that pairing is deployed; the budget half is not.**
+   `deploy-vps.sh` writes `OLLAMA_CONTEXT_LENGTH=16384` (D-035 §8), but mem0's
+   `max_tokens` is a library-level setting that **nothing in this stack writes**
+   — so a deployed instance still extracts with the 2,000 default, and the
+   extraction still comes back empty. That is the next action, and it is not
+   another magic number: raise it until the model stops on its own
+   (`done_reason == "stop"`).
+
+   **The false sentence this item's instrument was known to print was printed
+   for real in that round** — 「兩次都被截斷到同一個上限，所以
+   `prompt_eval_count` 看不出這個差別」 — on a line whose own text reports
+   `prompt token=8167` against 8052 at `num_ctx=16384`, where nothing is
+   truncated. D-035 §6 recorded it as found-but-unfixed; this round gave it an
+   observed instance, and it is now a four-state verdict (`truncated` /
+   `not_truncated` / `disagree` / `unknown`) with a revision guard on the probe,
+   in `#58` (D-036 §11).
 
    **The re-baseline was attempted on 2026-09-21 and did not pass — no rate
    below is a baseline.** The VM was resized on 2026-09-20 from 2 vCPU / 3.8 GB

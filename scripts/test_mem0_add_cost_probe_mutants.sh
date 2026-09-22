@@ -158,8 +158,43 @@ MUTANTS=(
   $'prompt_chars：沒有 content 的訊息當成空字串|        if content is None:\n            return None|        if content is None:\n            content = ""'
   "duplicate：用 prompt_eval_count 相減|        out[\"prompt_grew_chars\"] = c2 - c1|        out[\"prompt_grew_chars\"] = (chat2.get(\"prompt_eval_count\") or 0) - (chat1.get(\"prompt_eval_count\") or 0)"
   $'duplicate：讀不到也放 0|    if c1 is not None and c2 is not None:\n        out["prompt_chars_first"] = c1\n        out["prompt_chars_second"] = c2\n        out["prompt_grew_chars"] = c2 - c1|    out["prompt_chars_first"] = c1 or 0\n    out["prompt_chars_second"] = c2 or 0\n    out["prompt_grew_chars"] = (c2 or 0) - (c1 or 0)'
+  # ── truncation_claim_verdict（#58 的修法本身，D-036 第七節）──
+  # 這一組守的是「同一句話在 ctx=4096 之下是真的、在 16384 之下是假的」。
+  # 它的形狀在 D-034 第五節與 D-035 第六節各出現過一次（寫死的斷言在環境
+  # 改變之後從真變成假），D-036 第七節拿到觀測實例 —— 那句話在同一行裡被
+  # 自己的 8,167 反駁。四個 verdict 各一條，加上 fail-open 的兩面。
+  #
+  # **「缺下限時猜成沒截斷」的第一版寫成 `truncated = need is not None and
+  # c < need`，而它是一個 no-op** —— 那一行根本到不了：`need is None` 在上面的
+  # 守衛就 return "unknown" 了。`ast.dump` 看得出來語意相同的取代，看不出
+  # 「因為上游已經攔掉，所以這段永遠不會用不同的值執行」。
+  # 倖存的突變要先懷疑突變本身（上面那段的老規矩），這次它對了 —— 但查到的是
+  # **好消息**：fail-closed 的守衛確實在比較之前。
+  # 所以要守那個行為，目標是**守衛自己**，而且要讓它安靜地失敗而不是炸掉
+  # （拿掉守衛會讓 `c < need` 去比 `None`，測試變紅的理由會是 TypeError）。
+  # 「缺值當成 0」是 fail-open 最常見的樣子，harness 裡已經有一條同型的
+  # （「記憶數：形狀不對時回 0」）。
+  "截斷主張：沒截斷時還說被截斷|    if truncated:|    if True:"
+  "截斷主張：有截斷時說沒截斷|    truncated = c < need|    truncated = False"
+  $'截斷主張：缺下限時當成 0|    if c is None or need is None:|    need = need if need is not None else 0\n    if c is None:'
+  "截斷主張：界線上那一格算進截斷|    truncated = c < need|    truncated = c <= need"
+  "截斷主張：打架時挑一個相信|    if p1 is not None and p2 is not None and p1 != p2:|    if p1 is not None and p2 is not None and p1 == p2:"
+  "截斷主張：True 當成 1|    return x if isinstance(x, int) and not isinstance(x, bool) else None|    return x if isinstance(x, int) else None"
+  # 呼叫端兩條：判準是對的，但餵給它的輸入不是。這一種最難看見 —— 純函式
+  # 的測試全綠，而輸出那一行仍然在說謊。（縮排是 12 格，不是 16。）
+  $'截斷主張：生效的 num_ctx 寫死|            (evidence.get("meta") or {}).get("context_length_before"),|            4096,'
+  $'截斷主張：不讀 ctx_law 的下限|            (evidence.get("ctx_law") or {}).get("min_ctx_for_extraction"),|            None,'
   # ── observations：第五處 ──
-  "觀察：第二次 add 指名一個沒觀測到的成因|                    \"—— 兩次都被截斷到同一個上限，所以 prompt_eval_count \"|                    \"—— 差別來自 Phase 1 檢索回來的既有記憶，所以 prompt_eval_count \""
+  #
+  # **這一條原本指的字串是寫死在 observations() 裡的那句截斷斷言。** 那個
+  # 寫死被換成 truncation_claim_verdict() 之後，目標字串就從原始碼裡消失了，
+  # 它會以 NOT_FOUND 回報 —— 那是 harness 在說「你指的判準不見了」，不是
+  # 「這個突變沒被抓到」。
+  #
+  # 它守的意圖（**輸出不可以指名一個沒有觀測到的成因**）在新結構下仍然成立，
+  # 所以是搬到新的字面，不是刪掉：指名成因的那個**輸入**不可以用常數。
+  # 上面「生效的 num_ctx 寫死」那一條接的就是這個位置。
+  "觀察：讀不到長度時說沒有變長|            grew = (\"讀不到攔截到的 messages（%r／%r），所以**無從比較**\"|            grew = (\"讀不到攔截到的 messages（%r／%r），所以沒有變長\""
   "觀察：讀不到長度時說沒有變長|            grew = (\"讀不到攔截到的 messages（%r／%r），所以**無從比較**\"|            grew = (\"讀不到攔截到的 messages（%r／%r），所以沒有變長\""
   # ── exit_code：順序就是規格 ──
   "結束碼：儀器壞掉講成判準沒過|    if any(s is False for s in states):|    if False:"
@@ -198,7 +233,12 @@ MUTANTS=(
   # 「生成 8,000 個 token」與「被預算切在 8,000」在輸出上長得一樣。這一組
   # 守的就是那個差別 —— 而它是這一輪唯一的判準。
   "停的判定：done_reason 不看，一律用推論|    if done_reason in (\"stop\", \"length\"):|    if False:"
-  "停的判定：矛盾時挑一個相信|            return \"disagree\", (|            return stated, ("
+  # 這一條的目標字串在 #58 之後**變成不唯一**：`truncation_claim_verdict()`
+  # 也有一個 `return "disagree", (`，兩者的縮排還一樣。目標拉長到下一行
+  # （那句話只在 generation_stop_verdict 裡），才指得回原來那一格。
+  # 這是第三種「突變對不上」的成因：不是原始碼改了，是**旁邊多了一個長得
+  # 一樣的東西**。NOT_UNIQUE 訊息會講「出現 2 次」，照著去數就找得到。
+  $'停的判定：矛盾時挑一個相信|            return "disagree", (\n                "**ollama 與 token 數對不起來**：done_reason=%r 說「%s」，"|            return stated, (\n                "**ollama 與 token 數對不起來**：done_reason=%r 說「%s」，"'
   "停的判定：沒有上限可比也講成沒撞到|    return \"unknown\", \"\"|    return \"stopped\", \"（沒撞到上限）\""
   "停的判定：把 length 講成自己停的|        stated = \"capped\" if done_reason == \"length\" else \"stopped\"|        stated = \"stopped\""
   "停的判定：推論不標成推論|；這是從 eval_count 推的，這一輪沒有讀到 done_reason）\" % c|）\" % c"

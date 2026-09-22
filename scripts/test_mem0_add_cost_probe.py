@@ -1456,6 +1456,112 @@ def test_observations_says_when_the_add_generation_hit_the_cap():
         [n for n in p.observations(e2)]
 
 
+def test_truncation_claim_verdict_ctx_large_says_not_truncated():
+    """D-036 的處境：num_ctx 16,384 ≥ 下限 8,048 → **沒有截斷**。
+
+    這是這一支存在的理由：同一句話在 ctx 4096 之下是真的、在 16384 之下是假
+    的，而它印在輸出裡最常被讀的那一行。
+    """
+    v, s = p.truncation_claim_verdict(16384, 8048, 8052, 8167)
+    assert v == "not_truncated", (v, s)
+    assert "這兩次都沒有被截斷" in s, s
+    assert "8052" in s and "8167" in s, s
+    # 原本那句斷言**一個字都不可以再出現**，包括「引它來說它錯了」的寫法 ——
+    # 這一行的讀者是用眼睛掃、用 grep 找的。
+    assert "都被截斷到同一個上限" not in s, s
+    assert "看不出" not in s, s
+
+
+def test_truncation_claim_verdict_ctx_small_keeps_the_original_sentence():
+    """ctx 4096 < 下限 8,048 → 原句成立（兩次都砍到 2050）。"""
+    v, s = p.truncation_claim_verdict(4096, 8048, 2050, 2050)
+    assert v == "truncated", (v, s)
+    assert "都被截斷到同一個上限" in s and "看不出這個差別" in s, s
+
+
+def test_truncation_claim_verdict_disagrees_when_the_counts_differ():
+    """判準說有截斷，兩個 prompt_eval_count 卻不相等 → **不挑一個相信**。
+
+    兩次都被砍到同一個上限，那兩個數就必須相等（同一個 num_ctx 下
+    truncated_length() 是同一個數）。不相等就是判準與觀測打架。
+    """
+    v, s = p.truncation_claim_verdict(4096, 8048, 2050, 3000)
+    assert v == "disagree", (v, s)
+    assert "打架" in s and "2050" in s and "3000" in s, s
+
+
+def test_truncation_claim_verdict_refuses_without_the_lower_bound():
+    """缺 min_ctx_for_extraction（門檻沒夾準）→ **不主張**。
+
+    fail-closed 的那一面：讀不到下限時說「沒有被截斷」，等於把「不知道」講成
+    好消息。
+
+    **注意不可以用 "沒有被截斷" 當「不該出現」的字串** —— 這一句裡有
+    「有沒有被截斷」，而它含那五個字。断言的對象要指到**可分辨的句子**
+    （D-026 第五節）；第一版就是這樣寫錯，對正確的程式碼回報失敗。
+    """
+    v, s = p.truncation_claim_verdict(16384, None, 8052, 8167)
+    assert v == "unknown", (v, s)
+    assert "沒有主張" in s, s
+    assert "都被截斷到同一個上限" not in s, s
+    assert "這兩次都沒有被截斷" not in s, s
+
+
+def test_truncation_claim_verdict_refuses_without_ctx():
+    v, s = p.truncation_claim_verdict(None, 8048, 8052, 8167)
+    assert v == "unknown", (v, s)
+    assert "沒有主張" in s, s
+
+
+def test_truncation_claim_verdict_does_not_treat_true_as_a_number():
+    """`True` 是 `int` 的子類 —— 不可以被當成 ctx=1。"""
+    v, s = p.truncation_claim_verdict(True, 8048, 8052, 8167)
+    assert v == "unknown", (v, s)
+    assert "沒有主張" in s, s
+
+
+def test_truncation_claim_verdict_at_the_boundary():
+    """下限是「不被截斷」的**最小值**，所以 ctx == 下限算沒有截斷。"""
+    v, _ = p.truncation_claim_verdict(8048, 8048, 8052, 8167)
+    assert v == "not_truncated", v
+    v, _ = p.truncation_claim_verdict(8047, 8048, 2050, 2050)
+    assert v == "truncated", v
+
+
+def test_truncation_claim_verdict_still_decides_without_the_counts():
+    """有截斷、但讀不到 prompt_eval_count → 仍然判得出來，只是不假裝驗過一致性。"""
+    v, s = p.truncation_claim_verdict(4096, 8048, None, None)
+    assert v == "truncated", (v, s)
+    assert "都被截斷到同一個上限" in s, s
+
+
+def test_observations_drops_the_truncation_claim_when_ctx_is_large():
+    """端到端：`observations()` 在 ctx 夠大時不可以再說「兩次都被截斷」。"""
+    e = _evidence_ok()
+    e["meta"]["context_length_before"] = 16384
+    e["ctx_law"] = {"min_ctx_for_extraction": 8048}
+    e["first_add"]["prompt_eval_count"] = 8052
+    e["second_add"]["prompt_eval_count"] = 8167
+    notes = p.observations(e)
+    second = [n for n in notes if "第二次 add（內容相同）" in n]
+    assert len(second) == 1, notes
+    assert "這兩次都沒有被截斷" in second[0], second[0]
+    assert "看不出這個差別" not in second[0], second[0]
+
+
+def test_observations_keeps_the_truncation_claim_when_ctx_is_small():
+    """反向：ctx 不夠大時那句話仍然是對的 —— 修法不是把它刪掉。"""
+    e = _evidence_ok()
+    e["meta"]["context_length_before"] = 4096
+    e["ctx_law"] = {"min_ctx_for_extraction": 8048}
+    e["first_add"]["prompt_eval_count"] = 2050
+    e["second_add"]["prompt_eval_count"] = 2050
+    notes = p.observations(e)
+    second = [n for n in notes if "第二次 add（內容相同）" in n]
+    assert len(second) == 1, notes
+    assert "都被截斷到同一個上限" in second[0], second[0]
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
