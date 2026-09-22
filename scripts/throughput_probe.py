@@ -1322,7 +1322,13 @@ def measure(client: OllamaClient, args: argparse.Namespace, out: dict[str, Any])
             prompt,
             longest,
             32,
-            2,
+            # **不可以寫死。** 這裡原本是字面值 `2`，而穩定度規則要求
+            # `>= MIN_SAMPLES_FOR_STABILITY`（5）。`2 < 5` 是常數不等式，
+            # 所以這一臂的 `stability` 恆為 `unknown`、`baseline_verdict`
+            # 的允許清單恆拒絕、整輪 exit **恆為 1** —— 對任何可能的執行
+            # 都一樣，連算都不用算（D-033 第二節，含實測反駁測試）。
+            # 症狀是「5 個條件很吵」，而真正的原因藏在那句話後面。
+            repeats,
             args.keep_alive,
             args.seed,
         )
@@ -1496,7 +1502,14 @@ def _report(out: dict[str, Any]) -> None:
         p(f"   {note}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """命令列介面。
+
+    抽出來是為了讓離線測試能用**探針自己的預設值**組出 args，餵給
+    `measure()` —— 否則測試得自己抄一份預設值，而抄的那一份會漂移，
+    於是「測試通過」講的是抄本而不是探針（D-033 第八節第 3 條：
+    手邊有一個能查的權威，就不要從別的地方推導）。
+    """
     ap = argparse.ArgumentParser(
         description="量測推論吞吐量基準線（速率一律與條件一起回報）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1537,7 +1550,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--quick", action="store_true", help="只跑 ctx 掃描、每條件一次取樣")
     ap.add_argument("--json", action="store_true", help="量測結果以 JSON 寫 stdout，人看的報告寫 stderr")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if any(c <= 0 for c in args.ctx):
         print("--ctx 必須是正整數", file=sys.stderr)

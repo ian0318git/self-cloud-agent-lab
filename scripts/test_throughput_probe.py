@@ -31,6 +31,7 @@ from throughput_probe import (  # noqa: E402
     STABILITY_CV_PCT,
     _all_ok,
     baseline_verdict,
+    build_parser,
     cap_respected_verdict,
     cv_is_stable,
     long_generation_overall,
@@ -40,6 +41,7 @@ from throughput_probe import (  # noqa: E402
     dependence_verdict,
     duration_identity_error_s,
     kv_slope_verdict,
+    measure,
     new_result,
     parse_kv_buffer_bytes,
     parse_n_threads,
@@ -816,6 +818,107 @@ check("對照組：沒有長生成那一臂 → 不影響", _all_ok(good_out()),
 check("新外殼的 conditions 是空清單（不是 None）", new_result()["conditions"], [])
 # 外殼先建好再填 —— 這是「中斷時前面量到的東西要活下來」的前提
 check("新外殼帶著 ollama_url 這個欄位（先建好、後填）", "ollama_url" in new_result(), True)
+print(f"  {COUNT - before} 項")
+
+# ══ 接線：餵給法官的那個案子 ═══════════════════════════════════════════════
+# 上面每一節測的都是**判定函式**（法官）。這一節測**探針自己組出來的那份
+# 矩陣** —— 法官實際會拿到的那個案子。
+#
+# 為什麼非有這一節不可：`_condition()` 的取樣次數在「長 prompt」那一臂曾經
+# 被寫死成字面值 `2`，而穩定度規則要求 `>= MIN_SAMPLES_FOR_STABILITY`（5）。
+# `2 < 5` 是常數不等式，所以那一臂的 `stability` 恆為 `unknown`、
+# `baseline_verdict` 的允許清單恆拒絕、整輪 exit **恆為 1** —— 對任何可能的
+# 執行都一樣，連算都不用算。判定函式本身完全正確、正反樣本也都有，是**接線**
+# 讓它不可能回 `usable`。兩次完整量測都回 exit 1，而 1 看起來像「機器吵」，
+# 所以這個缺陷活了兩輪（D-033 第二節）。
+#
+# **測的是法官，不是法官永遠會拿到的那個案子。**
+
+
+class _StubClient:
+    """三個方法、零 I/O。介面照 `OllamaClient` 抄（duck typing）。"""
+
+    base_url = "http://stub:11434"
+
+    def tags(self) -> list:
+        return [{"name": "stub:1b", "size": 1024, "digest": "0" * 16}]
+
+    def ps(self) -> list:
+        return [{"name": "stub:1b", "model": "stub:1b", "context_length": 8192, "size": 4096}]
+
+    def generate(self, **body):
+        # 固定 6.25 t/s（每 token 160 ms），所以每一組的 CV 都是 0。
+        n = int((body.get("options") or {}).get("num_predict") or 1)
+        return {**sample(eval_count=n, eval_ns=n * 160_000_000), "done_reason": "stop"}
+
+
+def _matrix(repeats: int = 7, quick: bool = False) -> dict:
+    """用**探針自己的預設值**組 args，跑完整個 `measure()`，回傳外殼。
+
+    走 `build_parser()` 而不是自己抄一份 `Namespace`：抄的那一份會漂移，
+    於是「測試通過」講的是抄本而不是探針。
+    """
+    args = build_parser().parse_args([])
+    args.models = ["stub:1b"]
+    args.ctx = [8192]
+    args.repeats = repeats
+    args.quick = quick
+    out = new_result()
+    measure(_StubClient(), args, out)
+    return out
+
+
+print("接線：探針自己組出來的矩陣")
+before = COUNT
+_full = _matrix()
+
+check("完整矩陣組出 4 個條件（base + 2 個生成長度 + 長 prompt）", len(_full["conditions"]), 4)
+check(
+    "每個條件的樣本數都 >= MIN_SAMPLES_FOR_STABILITY",
+    [len(c["samples"]) for c in _full["conditions"] if len(c["samples"]) < MIN_SAMPLES_FOR_STABILITY],
+    [],
+)
+# 最直接的一條：那一臂的樣本數必須跟其他臂一樣，不可以是寫死的常數。
+_long = [c for c in _full["conditions"] if "長 prompt" in c["label"]]
+check("長 prompt 那一臂在矩陣裡", len(_long), 1)
+check("長 prompt 那一臂的樣本數與其他臂相同（不是寫死的 2）", len(_long[0]["samples"]), 7)
+# **這一條就是缺陷的形狀。** 上面所有單元測試全綠都攔不住它：判定函式正確，
+# 但它拿到的輸入讓 `usable` 不可能發生。
+check(
+    "完整矩陣判得成 usable（不是結構上不可能）",
+    baseline_verdict(_full["conditions"], attempted=True)["verdict"],
+    "usable",
+)
+# 邊界的另一側：比下限少一個就必須擋下（D-024 第八節要求兩側都有樣本）
+check(
+    f"repeats={MIN_SAMPLES_FOR_STABILITY - 1} 的矩陣必須被擋下",
+    baseline_verdict(_matrix(MIN_SAMPLES_FOR_STABILITY - 1)["conditions"], attempted=True)["verdict"],
+    "unstable",
+)
+check(
+    f"repeats={MIN_SAMPLES_FOR_STABILITY}（剛好下限）判得成 usable",
+    baseline_verdict(_matrix(MIN_SAMPLES_FOR_STABILITY)["conditions"], attempted=True)["verdict"],
+    "usable",
+)
+
+# `--quick`：長 prompt 與溢出臂都不跑，所以條件更少、每條件只有 1 個樣本。
+# 它必須被記成「沒有嘗試建立基準線」，**不是**「不穩」 —— 沒做的事不可以
+# 記成做失敗（D-016）。
+_q = _matrix(quick=True)
+check("--quick 不跑長 prompt 那一臂", [c["label"] for c in _q["conditions"] if "長 prompt" in c["label"]], [])
+check("--quick 的條件數比完整矩陣少 1", len(_q["conditions"]), 3)
+check("--quick 每條件只有 1 個樣本（從設計上就沒有要建立基準線）", {len(c["samples"]) for c in _q["conditions"]}, {1})
+check(
+    "--quick 記成 not_attempted（不是 unstable）",
+    baseline_verdict(_q["conditions"], attempted=False)["verdict"],
+    "not_attempted",
+)
+# 同一份輸入若被當成「有嘗試」就會記成不穩 —— 那是在說一件沒發生的事
+check(
+    "同一份輸入當成有嘗試時才會是 unstable",
+    baseline_verdict(_q["conditions"], attempted=True)["verdict"],
+    "unstable",
+)
 print(f"  {COUNT - before} 項")
 
 # ══ 結果 ═══════════════════════════════════════════════════════════════════
