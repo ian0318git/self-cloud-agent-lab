@@ -72,7 +72,7 @@ on 2026-09-19;** the findings are below, marked by whether they carry over clean
 
 ```bash
 git clone <this repo> && cd self-cloud-agent-lab
-bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 8192
+bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 16384
 ```
 
 That is the whole deploy. It closes the port, pulls the models, starts the stack,
@@ -153,7 +153,7 @@ raise:
 
 ```bash
 OLLAMA_MODEL=qwen3:70b          # or whatever the VPS can hold
-OLLAMA_CONTEXT_LENGTH=8192      # see below — the default 4096 truncates memory extraction
+OLLAMA_CONTEXT_LENGTH=16384     # see below — 4096 truncates the prompt, and 8192 is not enough either
 OLLAMA_MAX_LOADED_MODELS=3
 OLLAMA_NUM_PARALLEL=4           # big throughput win; shares one model load
 OLLAMA_KEEP_ALIVE=-1            # keep resident; reloading costs tens of seconds
@@ -162,22 +162,34 @@ OLLAMA_KEEP_ALIVE=-1            # keep resident; reloading costs tens of seconds
 Unlike the other three, `OLLAMA_CONTEXT_LENGTH` is **not** free — a larger context
 costs KV-cache memory proportional to it (roughly 36 KiB per token for a 3B-class
 model; that figure is an **estimate** from Qwen2.5-3B's architecture, not measured
-on this stack, and it scales with the model's layer/head count). The reason the
-default is worth raising anyway: **memory extraction silently truncates.** A
-`mem0` `add()` call sends an extraction prompt measured at 8,052 and 8,100 tokens,
-and ollama's 4096 default cuts it to 2,050 — dropping the instructions at the end
-of the prompt, with no error — extraction returns zero facts and says nothing.
-The operating rule is `num_ctx >= prompt_tokens + 1`, so anything ≥ 8,101
-preserves that prompt (D-027). `deploy-vps.sh` explains this at the point it
-matters and defaults `--num-ctx` to 8192.
+on this stack, and it scales with the model's layer/head count). It costs **time**
+too: on this stack, going from 8,192 to 16,384 made the same work **45.5% slower**
+(D-035). The reason the default is worth raising anyway: **memory extraction
+silently truncates.** A `mem0` `add()` call sends an extraction prompt measured at
+8,052 and 8,100 tokens, and ollama's 4096 default cuts it to 2,050 — dropping the
+instructions at the end of the prompt, with no error — extraction returns zero
+facts and says nothing (D-027).
 
-**Raising it turned out to be necessary but not sufficient.** The control group
-ran on 2026-09-22: with `num_ctx=8192` the prompt is intact — 8,052 and 8,100,
-both below the 8,191 trigger — and extraction *still* returns zero facts, with
-generation *still* stopping at `num_predict=2000`. So truncation is not what
-emptied the extraction; it was one of two candidates, and it is now eliminated.
-The other one — the generation budget running out before mem0 gets usable JSON —
-is **not yet tested** (D-034).
+**"Large enough that the prompt fits" is two different thresholds, and the obvious
+one is not sufficient.** The first is the pre-generation truncation trigger,
+`prompt_tokens > num_ctx − 1`, so ≥ 8,101 gets the prompt *in*. But ollama starts
+llama-server with `--context-shift --keep 4`: generation that runs past
+`num_ctx − prompt_tokens` makes llama-server **discard a block out of the prompt**
+and keep going. At `num_ctx=8192` that leaves **140** tokens of room, and both
+`add()` calls hit it (D-035). The rule that actually holds is
+`num_ctx > prompt_tokens + num_predict` — about 10,052 here, so **16384** is the
+value to use. `deploy-vps.sh` explains this at the point it matters.
+
+**Raising it is necessary but still not sufficient.** Both control groups ran on
+2026-09-22. At `num_ctx=8192` the prompt was intact going in but got shifted
+mid-generation; at `num_ctx=16384` it stayed intact for the whole generation
+(`context shift` count: **0**) and extraction *still* returns zero facts, with
+generation *still* stopping at `num_predict=2000`. So neither truncation nor the
+mid-generation shift emptied the extraction — both are eliminated. The remaining
+candidate, the generation budget being consumed by `thinking`, now has direct
+evidence behind it rather than mere consistency: the run records
+`thinking_chars=7796` against `eval_count=2000`, the cap (D-034, D-035). It is
+**not yet tested as a cause.**
 
 **Verifying it took effect is not optional**, because the variable's *name* was
 verified in the binary long before anything proved it does anything (D-028). Read
@@ -335,12 +347,12 @@ change anything they cover.
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | That the grader above is actually exercised — 11 mutations of its own criteria, every one must be caught |
 | `bash scripts/verify-chroma-dims.sh` | That mem0 reuses a pre-created ChromaDB collection instead of fighting it, and which metadata key is authoritative for embedding dimensions (D-026) |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | That the grader above is actually exercised — 24 mutations of its own criteria, every one must be caught |
-| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027) |
+| `bash scripts/verify-mem0-add-cost.sh` | That mem0's `add()` costs exactly one extra LLM call, and that at the default `num_ctx` that call never sees its own instructions (D-027). **Two control groups since then have eliminated both ways the prompt can be lost** — pre-generation truncation (D-034) and the mid-generation context shift (D-035) — and extraction *still* returns zero facts, which is why the remaining candidate is the generation budget (D-035 §8) |
 | `bash scripts/test_mem0_add_cost_probe_mutants.sh` | That the grader above is actually exercised — 78 mutations of its own criteria, every one must be caught |
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences — including the lie it tells in the worst direction: under `set -o pipefail` a `printf \| grep -q` coverage check dies of SIGPIPE, so it reports "coverage not established" *precisely when the window covers the most* (D-034) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 62 mutations across the three bash modules and the smoke probe, every one must be caught |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 65 mutations across the three bash modules and the smoke probe, every one must be caught |
 | `bash scripts/verify-phase3-runtime.sh` | That `recursion_limit` counts super-steps (+1), that a tight limit aborts only after all the work is done, and that a persistent job store still drops a due job silently under the 1-second default grace (D-030) |
 | `bash scripts/test_phase3_runtime_probe.py` | That the verdicts above have discriminating power offline — no Docker, no langgraph — with every boundary as its own case |
 | `bash scripts/test_phase3_storage_decisions.sh` | That the storage verdicts separate a named volume, a bind mount and a container's temp directory, and that `unknown` is never read as durable |
@@ -1005,6 +1017,20 @@ bash scripts/verify-phase3-runtime.sh --json   # machine-readable on stdout
      it is that rule applied to the prompt *this probe reconstructs* (8,047
      tokens). ollama's own log reports `prompt=8052` and `prompt=8100` for the
      two real `add()` calls in the same run, so a real `add()` needs `>= 8101`.
+   - **…but that is only the first of two thresholds, and the obvious one is not
+     sufficient.** The rule above governs truncation *before generation starts*.
+     ollama launches llama-server with `--context-shift --keep 4`, so a
+     generation that fills the context does not stop — llama-server **discards a
+     block out of the middle of the prompt** and keeps going (D-035; log line
+     `slot context shift, n_keep = 4, n_left = 8187, n_discard = 4093`). At
+     `num_ctx=8192` an 8,052-token prompt leaves only **140** tokens of room, and
+     both real `add()` calls hit it. The rule that actually holds is
+     `num_ctx > prompt_tokens + num_predict` — 8,100 + 2,000 + 1 = **10,101** —
+     so **16384** is the value to deploy. **The evidence for that trigger rule is
+     weak and is flagged as such**: it is fitted from two observations at the
+     *same* `num_ctx`, and 16,384 is its first check at a second one, where it
+     predicted zero shifts and zero were observed. That is consistent, not
+     proven — so the `+1` there is a conservative choice, not a measured edge.
    - **The server's log confirms the shape of the cut, independently of the
      probe.** Every truncation line in `docker logs ollama` reads
      `limit=2050 prompt=... keep=4 new=2050`, and the slot line that follows

@@ -37,6 +37,25 @@ DEPLOY_BROKEN=3
 # —— 與 mem0_add_cost_probe.py 的 min_ctx_required() 是同一個數字。
 MEM0_ADD_MIN_CTX=8101
 
+# ── 第二個門檻：prompt 要**待完整段生成**，不只是進得去 ──────
+#
+# 上面那個門檻只管**生成之前**的截斷。ollama 是用 `--context-shift --keep 4`
+# 起 llama-server 的，所以生成只要把 context 用滿，llama-server 不會停 ——
+# 它會從 prompt **中段**丟掉一整塊（8192 之下是 4,093 個 token）再繼續生成。
+# 8192 配 8,052 的 prompt 只剩 140 個生成 token 的餘裕，兩次真實 add() 都
+# 撞到了（D-035 第三節）。
+#
+# 所以真正要滿足的是 `num_ctx > prompt_tokens + num_predict`：
+#   8,100（實測到最大的 prompt）＋ 2,000（mem0 的生成上限）＋ 1 ＝ 10,101
+#
+# **證據強度要說清楚：** 觸發規則（「生成到 num_ctx - prompt_tokens 就 shift」）
+# 是從**兩個同一個 num_ctx 的觀測**配出來的，在 16,384 上只驗過一次而且那次
+# 是預測 0 次、實測 0 次（D-035 第三節）。**不足以宣稱它對所有 num_ctx 成立。**
+# 這裡的 +1 因此是保守取值，不是量出來的邊界。
+MEM0_ADD_MAX_PROMPT=8100
+MEM0_ADD_NUM_PREDICT=2000
+MEM0_ADD_HOLD_CTX=10101
+
 # KV cache 的每 token 估算（KiB）。這是 D-022 的**估算值，本堆疊未實測**：
 # 由 Qwen2.5-3B 的架構推得（36 層 × 2 個 KV head × head_dim 128 × f16）。
 # 它與模型的架構綁定（KV head 多的模型會是倍數），所以**只能拿來產生一句
@@ -285,6 +304,18 @@ ctx_meets_mem0() {
   local n="${1:-0}"
   if [[ ! "$n" =~ ^[0-9]+$ ]]; then printf 'no'; return 0; fi
   if (( n >= MEM0_ADD_MIN_CTX )); then printf 'yes'; return 0; fi
+  printf 'no'
+}
+
+# 這個 num_ctx 夠不夠讓 prompt **整段生成期間**都保持完整（第二個門檻，
+# 見上面 MEM0_ADD_HOLD_CTX 的說明）。
+#
+# **與 ctx_meets_mem0 是兩個獨立的問題，不可以只用這一個取代那一個。**
+# 8192 就是「過第一個、不過第二個」的那個值 —— 而它正是這個腳本原本的預設。
+ctx_holds_through_generation() {
+  local n="${1:-0}"
+  if [[ ! "$n" =~ ^[0-9]+$ ]]; then printf 'no'; return 0; fi
+  if (( n >= MEM0_ADD_HOLD_CTX )); then printf 'yes'; return 0; fi
   printf 'no'
 }
 

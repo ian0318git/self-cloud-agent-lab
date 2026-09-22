@@ -69,7 +69,7 @@ Codespaces 是**測試台**，不是終點。目標是一套可搬移的私有 A
 
 ```bash
 git clone <這個 repo> && cd self-cloud-agent-lab
-bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 8192
+bash scripts/deploy-vps.sh --model qwen3:4b --num-ctx 16384
 ```
 
 這就是整個佈署。它會關掉那個埠、下載模型、起堆疊、驗證堆疊真的生成得出
@@ -141,27 +141,38 @@ tunnel 開著的時候，這台主機正在服務你的主機名，而 `check-ex
 
 ```bash
 OLLAMA_MODEL=qwen3:70b          # 或這台 VPS 裝得下的任何模型
-OLLAMA_CONTEXT_LENGTH=8192      # 見底下 —— 預設的 4096 會截斷記憶抽取
+OLLAMA_CONTEXT_LENGTH=16384     # 見底下 —— 4096 會截斷抽取 prompt，而 8192 也不夠
 OLLAMA_MAX_LOADED_MODELS=3
 OLLAMA_NUM_PARALLEL=4           # 吞吐提升明顯；多個請求共用一次模型載入
 OLLAMA_KEEP_ALIVE=-1            # 常駐；重載一次要數十秒
 ```
 
-`OLLAMA_CONTEXT_LENGTH` 與另外三個不同：它**不是免費的**，context 調大會
-按比例增加 KV cache 的記憶體（3B 等級的模型大約每 token 36 KiB；那個數字是
-由 Qwen2.5-3B 的架構推得的**估算值，本堆疊未實測**，而且會隨模型的層數／
-head 數變動）。儘管如此，預設值仍然值得調高的理由：**記憶抽取會被無聲截斷。**
+`OLLAMA_CONTEXT_LENGTH` 與另外三個不同：它**不是免費的**。它吃 KV cache 的
+記憶體（3B 等級的模型大約每 token 36 KiB；那個數字是由 Qwen2.5-3B 的架構
+推得的**估算值，本堆疊未實測**，而且會隨模型的層數／head 數變動），也吃
+**時間** —— 在本堆疊上，8,192 開到 16,384 讓同一份工作**慢了 45.5%**（D-035）。
+儘管如此，預設值仍然值得調高的理由：**記憶抽取會被無聲截斷。**
 一次 `mem0` 的 `add()` 送出的抽取 prompt 實測是 8,052 與 8,100 個 token，
 而 ollama 的 4096 預設會把它砍到 2,050 —— prompt 尾端的指示被丟掉，抽取回傳
-零筆事實，而且**不報錯**。操作準則是 `num_ctx >= prompt token 數 + 1`，
-所以任何 ≥ 8,101 的值都能保住那個 prompt（D-027）。`deploy-vps.sh` 會在
-相關的那一步解釋這件事，並把 `--num-ctx` 預設為 8192。
+零筆事實，而且**不報錯**（D-027）。
 
-**但調高是必要、不是充分。** 對照組在 2026-09-22 跑完了：`num_ctx=8192`
-之下 prompt 是完整的 —— 8,052 與 8,100 都在 8,191 的觸發門檻之下 —— 而抽取
-**仍然回傳零筆**，生成也**仍然停在 `num_predict=2000`**。所以截斷不是把抽取
-清空的原因；它是兩個候選之一，而這個候選現在被排除了。另一個 —— 生成預算
-在 mem0 拿到可用 JSON 之前就用完 —— **還沒測**（D-034）。
+**「大到 prompt 進得去」是兩個門檻，而且明顯的那一個不夠。** 第一個是
+**生成之前**的截斷觸發點 `prompt_tokens > num_ctx − 1`，所以 ≥ 8,101 能讓
+prompt **進得去**。但 ollama 是用 `--context-shift --keep 4` 起 llama-server
+的：生成只要超過 `num_ctx − prompt_tokens`，llama-server 就會**從 prompt
+中段丟掉一整塊**再繼續生成。`num_ctx=8192` 之下那個餘裕只有 **140** 個
+token，兩次 `add()` 都撞到了（D-035）。真正該滿足的是
+`num_ctx > prompt_tokens + num_predict` —— 這裡約 10,052，所以要用
+**16384**。`deploy-vps.sh` 會在相關的那一步解釋這件事。
+
+**但調高仍舊是必要、不是充分。** 兩組對照組都在 2026-09-22 跑完：`num_ctx=8192`
+之下 prompt 進得去，但生成途中被 shift 掏空；`num_ctx=16384` 之下它整段生成
+期間都保持完整（`context shift` 次數：**0**），而抽取**仍然回傳零筆**，生成也
+**仍然停在 `num_predict=2000`**。所以截斷與生成期間的 shift **都不是**把抽取
+清空的原因 —— 兩個都被排除了。剩下來的候選「生成預算被 `thinking` 吃光」
+現在有直接觀測撐著，不再只是「與證據相容的讀法」：那一輪記到
+`thinking_chars=7796` 對上 `eval_count=2000`（也就是上限）（D-034、D-035）。
+它**還沒被當成原因測過**。
 
 **驗證它有生效不是可有可無的步驟**，因為這個變數的**名字**在二進位檔裡被
 驗證過，遠早於有任何東西證明它真的有用（D-028）。要從**已載入的模型**讀
@@ -314,12 +325,12 @@ bash scripts/up.sh
 | `bash scripts/test_langgraph_tools_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 11 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/verify-chroma-dims.sh` | mem0 會沿用預先建立的 ChromaDB 集合，而不是跟它對抗；以及 embedding 維度以哪個 metadata 鍵為準（D-026） |
 | `bash scripts/test_chroma_dims_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 24 道判準做突變，每一個都必須被抓到 |
-| `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027） |
+| `bash scripts/verify-mem0-add-cost.sh` | mem0 的 `add()` 確切只多付一次 LLM 呼叫，而且在預設 `num_ctx` 下那一次讀不到自己的指令（D-027）。**此後兩組對照組把「prompt 可以怎麼丟掉」的兩條路都排除了** —— 生成之前的截斷（D-034）與生成期間的 context shift（D-035）—— 而抽取**仍然回傳零筆**，所以剩下的候選是生成預算（D-035 第八節） |
 | `bash scripts/test_mem0_add_cost_probe_mutants.sh` | 上面的評分器真的有在被執行 —— 對它自己的 78 道判準做突變，每一個都必須被抓到 |
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話 —— 也測它在**最壞的方向**上說的謊：`set -o pipefail` 之下 `printf \| grep -q` 的涵蓋檢查會死於 SIGPIPE，於是**偏偏在涵蓋範圍最大的時候**回報「涵蓋不到」（D-034） |
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
 | `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 62 道突變，每一個都必須被抓到 |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 65 道突變，每一個都必須被抓到 |
 | `bash scripts/verify-phase3-runtime.sh` | `recursion_limit` 算的是 super-step（+1）、太緊的 limit 會在工作全部做完之後才中止、以及持久化的 job store 在 1 秒預設寬限下仍會安靜地丟掉到期的 job（D-030） |
 | `bash scripts/test_phase3_runtime_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 langgraph —— 而且每個邊界都是獨立一個案例 |
 | `bash scripts/test_phase3_storage_decisions.sh` | 儲存判定分得出 named volume、bind mount 與容器的暫存目錄，而且 `unknown` 永遠不會被讀成 durable |
@@ -912,6 +923,18 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
      prompt（8,047 個 token）上的結果。同一輪裡 ollama 自己的日誌對兩次真實
      的 `add()` 寫的是 `prompt=8052` 與 `prompt=8100`，所以真實的 `add()`
      要 `≥ 8101`。
+   - **……但那只是兩個門檻裡的第一個，而且明顯的那一個不夠。** 上面那條規則
+     管的是**生成開始之前**的截斷。ollama 是用 `--context-shift --keep 4` 起
+     llama-server 的，所以把 context 用滿的生成**不會停** —— llama-server 會
+     **從 prompt 中段丟掉一整塊**再繼續生成（D-035；日誌行
+     `slot context shift, n_keep = 4, n_left = 8187, n_discard = 4093`）。
+     `num_ctx=8192` 配 8,052 的 prompt 只剩 **140** 個 token 的餘裕，兩次真實
+     的 `add()` 都撞到了。真正成立的是
+     `num_ctx > prompt_tokens + num_predict` —— 8,100 + 2,000 + 1 = **10,101**
+     —— 所以佈署要用 **16384**。**這條觸發規則的證據很弱，而且這裡就標明它弱**：
+     它是從**同一個 `num_ctx`** 的兩個觀測配出來的，16,384 是它在第二組上的
+     第一次檢驗，那次預測 0 次 shift、實測也是 0 次。那叫一致，不叫證明 ——
+     所以上面那個 `+1` 是保守取值，不是量出來的邊界。
    - **砍的形狀由伺服器日誌獨立確認，不經過探針。** `docker logs ollama` 裡
      每一條截斷紀錄都寫著 `limit=2050 prompt=... keep=4 new=2050`，緊接著的
      slot 行寫 `n_keep = 4` —— 也就是保留前 `numKeep = 4` 個 token、保留尾段、

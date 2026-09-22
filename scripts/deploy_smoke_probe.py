@@ -262,8 +262,10 @@ def ctx_verdict(ps, model, expected):
             return True, "context_length=%d，與要求的 --num-ctx 相符" % got
         return False, (
             "context_length=%d，不是要求的 %d —— 這個設定**沒有生效**。"
-            "堆疊本身是好的、可以用，但 mem0 的抽取 prompt 仍會被截斷"
-            "（D-027：需要 >= 8101 才完整）"
+            "堆疊本身是好的、可以用，但 mem0 的抽取 prompt 這下就沒有保障了："
+            "低於 8101 會被**截斷**（D-027），8101～10100 之間雖然進得去、"
+            "但生成途中會被 **context shift** 從中段掏掉一整塊（D-035，"
+            "8192 之下餘裕只有 140 個 token）。要完整需要 >= 10101"
             % (got, expected)
         )
 

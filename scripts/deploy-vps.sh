@@ -7,7 +7,7 @@
 #
 #   --model NAME        對話模型（預設沿用 .env 的 OLLAMA_MODEL）
 #   --embed-model NAME  嵌入模型（預設沿用 .env 的 EMBEDDING_MODEL）
-#   --num-ctx N         伺服器端的 context 長度，**預設 8192**（見下方說明）
+#   --num-ctx N         伺服器端的 context 長度，**預設 16384**（見下方說明）
 #   --expose            刻意綁 0.0.0.0。**這是對一個真實取捨的確認，不是方便旗標**
 #   --keep-data         機器上已經有人類的資料時，仍然繼續（見下方說明）
 #   --dry-run           只做前置檢查與 .env 的差異顯示，**不寫任何檔案、不起容器**
@@ -54,17 +54,34 @@
 # 煙霧測試失敗的佈署，會讓腳本自己不能再跑第二次，而「跑到一半失敗」正是
 # 佈署最常見的狀態。模型與 volume 都是可以重建的產物；帳號與對話不是。
 #
-# ── --num-ctx 為什麼預設 8192 ───────────────────────────
+# ── --num-ctx 為什麼預設 16384 ──────────────────────────
 #
-# mem0 的 ADDITIVE_EXTRACTION_PROMPT 實測 8,052 與 8,100 個 token，而截斷
-# 規則是 `num_ctx >= prompt tokens + 1`（D-027）—— 所以不截斷的門檻是 8,101。
-# 8192 是它的下一個好記的 2 的次方，留了 91 個 token 的餘裕。
+# **「大到 prompt 進得去」是兩個門檻，而且明顯的那一個不夠。**
 #
-# **代價要說清楚：KV cache 隨這個值線性成長，而這個代價在本堆疊沒有實測過。**
-# D-022 的 ~36 KiB/token 是從 Qwen2.5-3B 的架構推得的**估算值**，而且與模型的
-# KV head 數綁定（KV head 多的模型會是倍數）。8,192 對 3B 級模型大約是數百 MB
-# 的量級，對 14B 級模型則不是。下面的資源檢查會用這個估算值提醒你，但
-# **只有實測到的模型大小能擋下佈署**，估算值不會。
+# 第一個門檻是**生成之前**的截斷：`num_ctx >= prompt tokens + 1`（D-027）。
+# mem0 的 ADDITIVE_EXTRACTION_PROMPT 實測 8,052 與 8,100 個 token，所以
+# 8,101 就能讓 prompt **進得去**。
+#
+# 第二個門檻是**生成期間**的 context shift：ollama 是用
+# `--context-shift --keep 4` 起 llama-server 的，生成只要超過
+# `num_ctx - prompt_tokens`，llama-server 不會停 —— 它會**從 prompt 中段
+# 丟掉一整塊再繼續生成**（日誌：`slot context shift, n_keep = 4,
+# n_left = 8187, n_discard = 4093`）。8192 之下那個餘裕只有 **140** 個
+# token，兩次真實 add() 都撞到了（D-035）。
+#
+# 真正該滿足的是 `num_ctx > prompt_tokens + num_predict` —— 8,052 + 2,000
+# = 10,052，所以 **16384** 才是下一個好記的 2 的次方（留 6,332 個 token，
+# 足以讓 num_predict 開到約 8,000 都還不觸發 shift）。
+#
+# **代價要說清楚，而且這次有一半是實測的：**
+#   * **時間**：同一份 prompt、同樣生成 2,000 個 token，從 8192 開到 16384
+#     讓牆上時間 **+45.5%**、生成速率掉 **36%**（1.79 → 1.15 tok/s，D-035）。
+#     這是這個預設值真正的代價，而且是量出來的。
+#   * **記憶體**：KV cache 隨這個值線性成長，而這個代價在本堆疊**沒有實測過**。
+#     D-022 的 ~36 KiB/token 是從 Qwen2.5-3B 的架構推得的**估算值**，而且與
+#     模型的 KV head 數綁定（KV head 多的模型會是倍數）。16,384 對 3B 級模型
+#     大約是 GB 的量級，對 14B 級模型則不是。下面的資源檢查會用這個估算值
+#     提醒你，但**只有實測到的模型大小能擋下佈署**，估算值不會。
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # 所有判斷都在這裡（純函式、可離線測試）：綁定預設、暴露閘門的四態、
@@ -104,7 +121,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --num-ctx 的驗證。非 `ok` 一律回 3 —— 與 verify-mem0-add-cost.sh 一致。
-NUM_CTX_DEFAULT=8192
+NUM_CTX_DEFAULT=16384
 NUM_CTX_CHECK="$(num_ctx_verdict "${NUM_CTX_RAW:-$NUM_CTX_DEFAULT}")"
 case "$NUM_CTX_CHECK" in
   ok\ *) NUM_CTX="${NUM_CTX_CHECK#ok }" ;;
@@ -425,7 +442,18 @@ fi
 # --num-ctx 的說明放這裡：上面的閘門可能已經讓腳本結束了，不必對著一個
 # 已經中止的佈署解釋 context 長度。
 if [[ "$(ctx_meets_mem0 "$NUM_CTX")" == "yes" ]]; then
-  ok "num_ctx=$NUM_CTX >= $MEM0_ADD_MIN_CTX —— mem0 的抽取 prompt（實測 8,052／8,100）完整進得去"
+  ok "num_ctx=$NUM_CTX >= $MEM0_ADD_MIN_CTX —— mem0 的抽取 prompt（實測 8,052／8,100）進得去"
+  # 這一條只講了**第一個**門檻（生成之前不被截斷）。第二個門檻（生成期間
+  # 不被 context shift 掏空）在下面用同一組常數再判一次 —— 兩個都要滿足，
+  # 而 8192 這種「剛好過第一個」的值正是會漏掉第二個的那一種（D-035）。
+  if [[ "$(ctx_holds_through_generation "$NUM_CTX")" == "yes" ]]; then
+    ok "而且整段生成期間待得住（需要 >= $MEM0_ADD_HOLD_CTX = $MEM0_ADD_MAX_PROMPT + $MEM0_ADD_NUM_PREDICT + 1）"
+  else
+    warn "num_ctx=$NUM_CTX **不足以讓 prompt 待完整段生成**：生成每超過"
+    warn "  num_ctx - prompt 個 token，llama-server 就會 context shift，"
+    warn "  從 prompt 中段丟掉一整塊（8192 之下餘裕只有 140，D-035）。"
+    warn "  要的是 num_ctx > prompt + num_predict，也就是 >= $MEM0_ADD_HOLD_CTX。"
+  fi
 else
   warn "num_ctx=$NUM_CTX **小於** $MEM0_ADD_MIN_CTX —— mem0 的抽取 prompt 會被截斷。"
   warn "  截斷規則是 num_ctx >= prompt tokens + 1（D-027），砍掉的是**開頭與中段**，"

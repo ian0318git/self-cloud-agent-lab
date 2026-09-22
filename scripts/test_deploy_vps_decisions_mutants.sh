@@ -168,6 +168,14 @@ MUTANTS=(
   "context：門檻忘了 +1（>= 寫成 >）|  if (( n >= MEM0_ADD_MIN_CTX )); then printf 'yes'; return 0; fi|  if (( n > MEM0_ADD_MIN_CTX )); then printf 'yes'; return 0; fi"
   "context：門檻常數少一|MEM0_ADD_MIN_CTX=8101|MEM0_ADD_MIN_CTX=8100"
 
+  # ── ctx_holds_through_generation：D-035 的第二個門檻 ──
+  # 這一條突變把「生成期間」的門檻換成「生成之前」的門檻 —— 也就是**把
+  # 8192 這個壞掉的預設值重新變成合格的**。它必須被測到，因為那正是這個
+  # 函式唯一的存在理由，而它與 ctx_meets_mem0 長得幾乎一樣。
+  "context：第二個門檻被換成第一個|  if (( n >= MEM0_ADD_HOLD_CTX )); then printf 'yes'; return 0; fi|  if (( n >= MEM0_ADD_MIN_CTX )); then printf 'yes'; return 0; fi"
+  "context：生成期間的門檻忘了 num_predict|MEM0_ADD_HOLD_CTX=10101|MEM0_ADD_HOLD_CTX=8101"
+  "context：生成期間的門檻邊界鬆一格（>= 寫成 >）|  if (( n >= MEM0_ADD_HOLD_CTX )); then printf 'yes'; return 0; fi|  if (( n > MEM0_ADD_HOLD_CTX )); then printf 'yes'; return 0; fi"
+
   # ── num_ctx_verdict：參數錯誤要走 3，不是 2 ──
   "num_ctx：非整數照收|  if [[ ! \"\$raw\" =~ ^[0-9]+\$ ]]; then printf 'not_integer'; return 0; fi|  if false; then printf 'not_integer'; return 0; fi"
   "num_ctx：下限不檢查|  if (( raw < 512 )); then printf 'too_small'; return 0; fi|  if false; then printf 'too_small'; return 0; fi"
