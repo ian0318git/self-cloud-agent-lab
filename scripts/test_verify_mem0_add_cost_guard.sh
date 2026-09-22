@@ -312,6 +312,7 @@ check() {
 }
 
 GUARD_MSG="探針在這一輪執行期間被改動"
+OLLAMA_MSG="ollama 容器未在執行中"
 # **不可以拿「分段重跑」當判別字串。** 守衛自己那兩行訊息裡就有那四個字
 # （「分段重跑是**設計**，儀器被換掉是儀器壞了」），所以案例 D 的「不該出現」
 # 會撞到自己人 —— 而它會**回報測試失敗**，看起來像程式碼有問題。
@@ -433,6 +434,56 @@ echo "L3：算不出探針的雜湊 → 只警告，結束碼不變（三支共�
 # test_probe_traceability.sh 有 18 條斷言；這裡要證的是**接線**上它是警告不是失敗。
 run_other verify-chroma-dims.sh chroma_dims_probe.py "$WORK/bin-nohash" 0 ""
 check "L3 維持 0 並發出警告" 0 "無法確認它整輪沒被換掉" "$GUARD_MSG"
+
+echo "I：假 docker 分兩次寫（中間隔 50 ms）→ **仍然要認得 ollama**"
+# 這一條是那個 flake 的**確定性**版本，不是機率版。
+#
+# 舊寫法 `docker ps … | grep -qx ollama` 在 lib.sh:5 的 pipefail 之下：grep 配對
+# 到第一行就離開 → 生產者第二次寫入吃 EPIPE → 死於 141 → pipefail 把整條管線
+# 變非零 → **明明有 ollama 也被讀成「沒有」**。舊寫法在這一條上是 200/200 全錯，
+# 所以把修法改回去它就會紅（鑑別力由 K 當場證明）。中間那個 sleep 是刻意的：
+# 不靠排程決定勝負之後，這一條就不再靠運氣（原本只能靠機率撞，實測一次 4/10）。
+STUB_PS_MODE=split
+run "" 2 "" "16384" --sections add
+STUB_PS_MODE=""
+check "I 生產者分兩次寫，仍然認得 ollama" 2 "$SECTIONS_MSG" "$OLLAMA_MSG"
+
+echo
+echo "J：ollama 真的不在（假 docker 只回 open-webui 與 mcp-test-server）→ **仍然要擋，並留下證據**"
+# I 少了這一條就可能是空的：一個「永遠說 ollama 在跑」的實作也會讓 I 通過。
+# 同時守「失敗要講出看到什麼」—— 現在失敗訊息會列出 docker ps 實際回的容器名，
+# 下一次再有怪事，訊息本身就是現場（把沉默的失敗變成一聲響）。
+STUB_PS_MODE=no-ollama
+run "" 0 "" ""
+STUB_PS_MODE=""
+check "J 擋下來，且列出實際看到的容器名" 2 "$OLLAMA_MSG" "item 3 通過" \
+  "這次 docker ps 看到的容器名：[open-webui mcp-test-server]"
+
+echo
+echo "K：把前置檢查突變回管線形式 → **必須變紅**（證明 I 有鑑別力）"
+# 做法與 test_ollama_log_corroboration.sh:130 的突變同一條路：把修法改回去，
+# 餵同一組輸入，斷言它會誤判。**它證明的是「I 有鑑別力」，不是「修法是必要的」**
+# —— 兩者分開講，因為「測試有鑑別力」與「測試盯的是實際的程式碼」是兩件事。
+cp "$WORK/scripts/verify-mem0-add-cost.sh" "$WORK/pristine-verify.sh"
+mut_err="$(python3 - "$WORK/scripts/verify-mem0-add-cost.sh" 2>&1 <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+fixed = """if [[ $'\\n'"$PS_NAMES"$'\\n' != *$'\\n'ollama$'\\n'* ]]; then"""
+pipe  = """if ! docker ps --format '{{.Names}}' | grep -qx \"ollama\"; then"""
+assert fixed in s, "突變目標不在腳本裡（改了原始碼就要更新這支測試）"
+p.write_text(s.replace(fixed, pipe, 1))
+PY
+)" || true
+if grep -q '| grep -qx "ollama"' "$WORK/scripts/verify-mem0-add-cost.sh"; then
+  STUB_PS_MODE=split
+  run "" 2 "" "16384" --sections add
+  STUB_PS_MODE=""
+  check "K 突變後誤判成 ollama 不在（I 有鑑別力）" 2 "$OLLAMA_MSG" "$SECTIONS_MSG"
+else
+  FAILED=$((FAILED + 1))
+  fail "K 突變植入失敗 —— 目標字串不在腳本裡；python 說：$mut_err"
+fi
+cp "$WORK/pristine-verify.sh" "$WORK/scripts/verify-mem0-add-cost.sh"
 
 echo
 if [[ "$FAILED" -gt 0 ]]; then

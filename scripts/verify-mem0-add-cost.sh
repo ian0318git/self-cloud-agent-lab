@@ -97,7 +97,13 @@ while [[ $# -gt 0 ]]; do
     --sections)    SECTION_ARGS+=(--sections "$2"); shift 2 ;;
     # 註解的結尾用「第一個空行」找，不用寫死的行號 —— 寫死的話每次改上面
     # 那段註解，--help 就會開始印出一半的說明（或印到程式碼）。
-    -h|--help)     sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      # 判準是**內容**（一直印到第一行非註解、非空行為止），不是行號。轉換前
+      # 這裡是 `sed -n '2,/^$/p'` —— 對這一支它**今天是等價的**（檔頭 56 行裡
+      # 沒有空行，實測逐位元組相同），但那只不過是檔頭剛好沒有空行；只要有人在
+      # 檔頭中間補一個空行，它就會從那裡開始截斷，而且沒有症狀（D-039）。
+      usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
     *) fail "未知參數：$1（--help 看用法）"; exit 3 ;;
   esac
 done
@@ -115,8 +121,19 @@ if [[ -n "$ADD_MAX_TOKENS" ]] \
 fi
 
 # ── 前置：ollama 要在跑 ─────────────────────────────────
-if ! docker ps --format '{{.Names}}' | grep -qx "ollama"; then
+# **不可以寫成 `docker ps … | grep -qx ollama`。** lib.sh:5 開了 pipefail，
+# 而 `grep -q` 一配對到就離開：生產者只要還會再寫一次（哪怕只多一行），那一次
+# 就吃 EPIPE → 生產者死於 141 → pipefail 把整條管線變非零 → **明明有 ollama
+# 也被讀成「沒有」**。判準是「讀者離開之後，生產者還會不會再寫」，與內建／
+# 輸出大小都無關：外部行程、只有 17 位元組照樣發作（實測 200/200 誤判）。
+# 先把輸出收下來，再用 shell 自己的樣式整行比對 —— 完全不開子行程，所以沒有
+# 任何行程會吃到 EPIPE，是**結構上**不可能而不是量不到（D-037 的規矩）。
+# 先例、實測與突變測試：scripts/ollama_log_corroboration.sh:54 與
+# test_verify_mem0_add_cost_guard.sh 的案例 I／K。
+PS_NAMES="$(docker ps --format '{{.Names}}' || true)"
+if [[ $'\n'"$PS_NAMES"$'\n' != *$'\n'ollama$'\n'* ]]; then
   fail "ollama 容器未在執行中 —— 先執行 bash scripts/up.sh"
+  warn "  這次 docker ps 看到的容器名：[${PS_NAMES//$'\n'/ }]"
   exit 2
 fi
 
@@ -173,8 +190,10 @@ esac
 # 一次數 GB 的下載。生成模型沒有這道檢查則會在第一次 add() 才失敗，
 # 而那時已經花掉幾分鐘了。
 for NAME in "$MODEL" "$EMBED_MODEL"; do
-  if ! $COMPOSE exec -T ollama ollama list 2>/dev/null \
-       | awk 'NR>1 {print $1}' | grep -qx -- "$NAME"; then
+  # **不可以寫成 `$COMPOSE exec … | awk … | grep -qx -- "$NAME"`**：同一個
+  # pipefail×SIGPIPE 形狀（`grep -q` 一配對到就離開），而 `docker compose ps`
+  # 這類指令實測就是**兩次寫**。`model_in_ollama` 先收下來再整行比對。
+  if ! model_in_ollama "$NAME"; then
     fail "ollama 裡沒有 $NAME —— 先下載："
     fail "  docker compose exec ollama ollama pull $NAME"
     exit 2
@@ -225,8 +244,10 @@ if [[ ",$SECTIONS_STR," == *",C2,"* || ",$SECTIONS_STR," == *",C3,"* ]]; then
 fi
 
 # ── 前置：探針容器的網路 ────────────────────────────────
-NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' ollama 2>/dev/null \
-       | grep -v '^$' | sort -u | head -1)"
+# `head -1` 是同一個形狀的另一個讀者：`sort -u` 只要還會再吐一次（輸出超過
+# 它的緩衝區就會），head 就已經走了。改成整串收下來再自己取第一行。
+NET="$(first_line "$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' ollama 2>/dev/null \
+       | grep -v '^$' | sort -u)")"
 if [[ -z "$NET" ]]; then
   fail "取不到 ollama 的網路 —— 探針容器到不了它。"
   exit 2
@@ -441,7 +462,7 @@ case $rc in
   0) ok "第三階段 item 3 通過：C1~C7 全過（見上方觀察段）" ;;
   1) fail "第三階段 item 3 未通過（見上方判準）—— 這通常代表上游變了，重讀 D-027"; exit 1 ;;
   2) fail "無法判定（見上方輸出）—— 環境問題或分段重跑，不是判準的問題"; exit 2 ;;
-  3) fail "探針自己壞掉（見上方輸出）—— 不是受測對象的問題，是這支腳本該修"; exit 3 ;;
+  3) fail "探針自己壞掉，**或**它在這一輪被改動（見上方輸出；守衛那一段會說是哪一種）"; exit 3 ;;
   *) fail "意外的結束碼 $rc"; exit 3 ;;
 esac
 

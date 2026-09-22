@@ -33,7 +33,8 @@
 #      必須逐字等於對該檔**獨立推導**出來的檔頭，而且不含任何一行程式碼
 #   D  掃描：沒有 handler 回頭用寫死行號；每個 usage_text 呼叫都搆得到定義；
 #      每個 handler 都屬於已知的三種形狀之一（新形狀要來這裡登記理由）
-#   E  已知例外（verify-mem0-add-cost.sh 還不能改，見 #67）—— 例外**會自己過期**
+#   E  （已刪）曾經是已知例外 verify-mem0-add-cost.sh；#67 落地時它一起被轉掉，
+#      自爆裝置 E1 依設計失敗、這一節就照著它說的刪掉 —— 例外不會留成裝飾
 #
 # ── 它刻意**不**涵蓋什麼 ─────────────────────────────────────
 #
@@ -102,11 +103,12 @@ mapfile -t HELP_SCRIPTS < <(
 HEREDOC_SCRIPTS=(lock-signup)
 is_heredoc() { local x; for x in "${HEREDOC_SCRIPTS[@]}"; do [[ "$x" == "$1" ]] && return 0; done; return 1; }
 
-# 已知例外：`verify-mem0-add-cost.sh` 的 handler 是第四種形狀（`sed -n '2,/^$/p'`），
-# 因為它正在跑（#66），改它就是改一支執行中的腳本 —— #67 落地時會一起換掉。
-# 例外不可能是「靜靜留著」的：E1 斷言它今天還是那個舊形狀，改掉就會失敗叫人來刪。
-SHAPE_EXCEPTIONS=(verify-mem0-add-cost)
-is_shape_exception() { local x; for x in "${SHAPE_EXCEPTIONS[@]}"; do [[ "$x" == "$1" ]] && return 0; done; return 1; }
+# **現在沒有例外了。** 曾經有一個：`verify-mem0-add-cost.sh` 是第四種形狀
+# （`sed -n '2,/^$/p'`），但當時它正在跑（#66），改它就是改一支執行中的腳本；
+# 那個例外由 E 節的 E1 自己盯著（一被改掉就失敗、叫人來刪這一節），#67 落地時
+# 它照著做了。**例外機制留在這裡沒有意義了** —— 空的例外清單只會是裝飾，所以
+# 連同 `is_shape_exception` 一起刪掉：D3 現在要求每一個 handler 都是三種已知
+# 形狀之一，沒有「未分類但被原諒」這條路。
 
 # ════════════════════════════════════════════════════════════════════
 echo "A：usage_text 的判準（fixture）"
@@ -280,7 +282,8 @@ echo
 echo "D：掃描 —— 擋住「下一個人又寫一次」"
 # ════════════════════════════════════════════════════════════════════
 # 這一節是唯一會涵蓋「還沒有人踩到的檔案」的一節，也是這支測試存在的主要理由。
-# 已知例外只有一個，而且例外本身也被斷言（它一旦被改掉，E1 就會失敗叫人來刪）。
+# 這一節是**唯一**會涵蓋「還沒有人踩到的檔案」的一節（見檔頭）。每個 handler 都
+# 要落在三種已知形狀之一；未分類就是失敗。
 n_handlers=0; n_usage=0; n_inline_awk=0; n_heredoc=0
 # 掃**同一份清單**（${HELP_SCRIPTS[@]}），不重新 glob `scripts/*.sh` —— 重新 glob
 # 會掃到這支測試自己（它裡面就有這串字：掃描用的 grep 樣式本身），於是它把自己
@@ -322,41 +325,14 @@ for name in "${HELP_SCRIPTS[@]}"; do
   elif grep -q "<<'USAGE'" <<<"$body"; then shape="heredoc"; n_heredoc=$((n_heredoc + 1))
   else shape="未分類"
   fi
-  if [[ "$shape" == "未分類" ]] && is_shape_exception "$name"; then
-    PASS=$((PASS + 1)); ok "D/$name handler 是已知的形狀（**已知例外**，理由見 E 節）"
-  else
-    check "D/$name handler 是已知的形狀（usage_text／內嵌 awk／heredoc）" "known" \
-      "$([[ "$shape" == "未分類" ]] && echo "**未分類**" || echo known)"
-  fi
+  check "D/$name handler 是已知的形狀（usage_text／內嵌 awk／heredoc）" "known" \
+    "$([[ "$shape" == "未分類" ]] && echo "**未分類**" || echo known)"
 done
 
 # 掃描涵蓋的 handler 數量：只驗下界（新增腳本是正常的事，掃描壞掉才是問題）
 check "D/掃到至少 11 個 handler" "yes" "$([[ "$n_handlers" -ge 11 ]] && echo yes || echo no)"
-check "D/每個 handler 都被歸類（未歸類會讓這個總數對不上；+1 是 E 的已知例外）" "yes" \
-  "$(same "$((n_usage + n_inline_awk + n_heredoc + 1))" "$n_handlers")"
-
-# ════════════════════════════════════════════════════════════════════
-echo
-echo "E：已知例外 —— verify-mem0-add-cost.sh（等 #67）"
-# ════════════════════════════════════════════════════════════════════
-# 這一支正在跑（#66），改它就是改一支執行中的腳本，所以它的 --help 這次不動。
-# 例外**會自己過期**：E1 斷言它今天還是舊形狀，一旦有人把它改掉，E1 就會失敗
-# 並提醒把這一節刪掉 —— 例外不會安靜地留下來變成裝飾。
-MEM0="$REPO_ROOT/scripts/verify-mem0-add-cost.sh"
-mem0_hline="$(grep -n -- '-h|--help)' "$MEM0" | head -1 | cut -d: -f1 || true)"
-check "E1 例外還在（handler 裡還是那個 sed 範圍）" "yes" \
-  "$(same "$(sed -n "${mem0_hline}p" "$MEM0" | grep -c "sed -n '2,/\^\$/p'" || true)" 1)"
-check "E2 它今天的 --help 是**對的**（檔頭 56 行、中間沒有空行 —— 巧合，不是設計）" "yes" \
-  "$(usage_to "$MEM0" "$WORK/mem0-new.txt"; derive_to "$MEM0" "$WORK/mem0-der.txt"; same_file "$WORK/mem0-new.txt" "$WORK/mem0-der.txt")"
-# E3：為什麼它還是得改 —— 檔頭一有空行就會截斷。在它的真檔頭裡插一行說明與一個
-#     空行，舊形狀立刻停在那個空行上，而正解照樣印完整份。
-awk 'NR == 3 { print "# 新補的一行說明" } NR == 5 { print "" } { print }' "$MEM0" > "$WORK/mem0.sh"
-sed -n '2,/^$/p' "$WORK/mem0.sh" | sed 's/^# \{0,1\}//' > "$WORK/mem0-old.txt"
-derive_to "$WORK/mem0.sh" "$WORK/mem0-full.txt"
-check "E3 檔頭一有空行，舊形狀就截斷（只印到那個空行，不到 7 行）" "yes" \
-  "$([[ "$(lines_of "$WORK/mem0-old.txt")" -le 6 ]] && echo yes || echo no)"
-check "E3b 同一份檔案，正解印出完整檔頭（> 50 行）" "yes" \
-  "$([[ "$(lines_of "$WORK/mem0-full.txt")" -gt 50 ]] && echo yes || echo no)"
+check "D/每個 handler 都被歸類（未歸類會讓這個總數對不上）" "yes" \
+  "$(same "$((n_usage + n_inline_awk + n_heredoc))" "$n_handlers")"
 
 # ════════════════════════════════════════════════════════════════════
 echo
