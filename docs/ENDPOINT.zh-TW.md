@@ -83,7 +83,10 @@ Kaggle 的[使用條款](https://www.kaggle.com/terms)把服務限定為**個人
 - `endpoint` CLI：
 
 ```bash
-uvx endpoint-vps boot          # 免安裝
+uv tool install endpoint-vps   # 之後直接打 endpoint boot
+# 套件叫 endpoint-vps，執行檔叫 endpoint —— `uvx endpoint-vps` 會失敗
+# （訊息是 "not provided by package"）
+# 不想安裝的一次性用法：uvx --from endpoint-vps endpoint boot
 # 或 pip install endpoint-vps / pipx install endpoint-vps
 ```
 
@@ -120,8 +123,26 @@ endpoint -g boot        # T4 x2
 其他目標：`endpoint boot`（CPU）、`endpoint -t boot`（TPU v5e-8）、
 `endpoint boot --p100`。
 
-之後可用：`endpoint base-url`、`endpoint models`、`endpoint logs`、
-`endpoint stop`。
+**`init` 與 `boot` 都是互動式的。** `boot` 的 argparse 只有 `--no-watch`、
+`--p100`、`--community` —— **沒有 `--model`**，模型是當場問的。這兩步都
+不能接進排程、CI 或任何非互動的工具裡。`--no-watch` 是「不要串流狀態」，
+**不是**「不要問問題」。
+
+之後可用：
+
+| 指令 | 做什麼 |
+|---|---|
+| `endpoint status` | 目前那台的狀態、tunnel 網址、已佈署的模型 |
+| `endpoint base-url` | 只取網址，附可直接用的 curl 範例 |
+| `endpoint doctor` | 系統診斷 —— 先確認設定真的被讀到了 |
+| `endpoint models` / `upload` / `settings` | 列出或上傳模型；看或改引擎參數 |
+| `endpoint logs` / `watch` | 引擎日誌（SSE），或狀態訊號串流 |
+| `endpoint stop` | 停掉這一台 |
+| `endpoint kill-all` | **終止帳號上所有在跑的 Kaggle kernel** |
+
+> `kill-all` 的範圍是**整個帳號**，不是這一台。這既是它有用的原因——例如
+> 你另外手動開了一台 notebook 正在默默吃 GPU 額度——也是它是一把掃射的槍、
+> 而不是一把步槍的原因。
 
 **不要把額度或硬體寫死進任何東西。** Kaggle 會改這些政策（P100 已於
 2026-09-15 退役），而且每個帳號不同。`endpoint` 回報什麼，那個才是真的。

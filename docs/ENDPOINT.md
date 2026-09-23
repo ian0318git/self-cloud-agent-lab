@@ -95,7 +95,10 @@ and its boundaries):
 - The `endpoint` CLI:
 
 ```bash
-uvx endpoint-vps boot          # no install
+uv tool install endpoint-vps   # then run: endpoint boot
+# The package is `endpoint-vps`; the executable is `endpoint`.
+# `uvx endpoint-vps` fails with "not provided by package".
+# One-off without installing: uvx --from endpoint-vps endpoint boot
 # or: pip install endpoint-vps / pipx install endpoint-vps
 ```
 
@@ -133,8 +136,27 @@ endpoint -g boot        # T4 x2
 Other targets: `endpoint boot` (CPU), `endpoint -t boot` (TPU v5e-8),
 `endpoint boot --p100`.
 
-Useful afterwards: `endpoint base-url`, `endpoint models`, `endpoint logs`,
-`endpoint stop`.
+**Both `init` and `boot` are interactive.** `boot`'s argparse takes only
+`--no-watch`, `--p100` and `--community` — there is **no `--model`**; the model
+is chosen at a prompt. Neither step can be wired into a scheduler, a CI job, or
+any other non-interactive tool. `--no-watch` means "don't stream status" — it
+does not mean "don't prompt".
+
+Useful afterwards:
+
+| Command | What it does |
+|---|---|
+| `endpoint status` | Kernel state, tunnel URL, deployed models |
+| `endpoint base-url` | Just the URL, with ready-to-use curl examples |
+| `endpoint doctor` | System diagnostics — check the config was actually read |
+| `endpoint models` / `upload` / `settings` | List or upload models; view or change engine parameters |
+| `endpoint logs` / `watch` | Engine logs (SSE), or the status-signal stream |
+| `endpoint stop` | Stop this instance |
+| `endpoint kill-all` | **Terminate every running Kaggle kernel on the account** |
+
+> `kill-all` is account-wide, not per-instance. That is what makes it useful —
+> say a notebook you opened by hand is quietly burning GPU quota — and also what
+> makes it a shotgun rather than a rifle.
 
 **Do not hard-code the quota or the hardware into anything.** Kaggle changes
 these (P100 was retired 2026-09-15), and they differ per account. Whatever
