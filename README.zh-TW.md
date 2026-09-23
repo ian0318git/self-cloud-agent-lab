@@ -330,6 +330,10 @@ max_tokens = num_ctx − EXTRACTION_PROMPT_TOKENS_BOUND   # bound = 8192
 引用時要**連模型大小一起說**。D-047 第一節的校準值因此寫成 12–20 GB/s 而不是 12
 （D-049 第四／五節）。
 
+兩輪的**逐字輸出**（除移除 ANSI 色碼外未編輯）已存進版控：`docs/evidence/`
+（`2026-09-23-throughput-qwen3-4b.txt` 與 `…-8b.txt`）；那些轉錄要守的規矩寫在
+`docs/evidence/README.md`。
+
 ### 預測速度的那條規則
 
 ```

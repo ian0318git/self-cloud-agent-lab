@@ -364,6 +364,10 @@ number for this machine**: it runs 13.1–19.7 GB/s depending on model size, so 
 together with the size. That is why D-047 §1's calibration now reads 12–20 GB/s rather
 than 12 (D-049 §4–5).
 
+The raw output of both runs — verbatim apart from stripped ANSI codes — is checked in
+under `docs/evidence/` (`2026-09-23-throughput-qwen3-4b.txt` and `…-8b.txt`), and
+`docs/evidence/README.md` states the rules those transcripts follow.
+
 ### The rule that predicts throughput
 
 ```

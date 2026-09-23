@@ -6769,7 +6769,7 @@ ollama 自己記著第二次：`msg="truncating input prompt" limit=4052 prompt=
 | 容器上限 | ollama 容器**沒有**記憶體上限（`mem=0`） | `docker inspect ollama` |
 | 模型與檔案大小 | qwen2.5:3b **1.9 GB**、qwen3:4b **2.5 GB**、bge-m3 1.2 GB、qwen3-embedding:0.6b 639 MB | `ollama list` |
 | 生成速率（三次） | **2.70**（`eval time = 451497.15 ms / 1220 tokens`）、**3.15**（`116331.17 ms / 368`）、**4.78**（`620529.00 ms / 2966`）tok/s | `docker logs ollama` 的 `slot print_timing` |
-| 乾淨探針讀數（4b／8b） | **5.96**／**3.55** t/s（`num_ctx=16384`）⇒ 等效 **13.9／17.3 GiB/s**；探針報 4b **2.33 GiB**、8b **4.87 GiB** | `verify-throughput.sh --quick -- --models qwen3:4b／8b --ctx 8192 16384`，兩輪皆 exit 2；4b 的 ollama 端對照 `eval time = 25047.60 ms / 131 tokens (5.19 t/s)` |
+| 乾淨探針讀數（4b／8b） | **5.96**／**3.55** t/s（`num_ctx=16384`）⇒ 等效 **13.9／17.3 GiB/s**；探針報 4b **2.33 GiB**、8b **4.87 GiB** | `verify-throughput.sh --quick -- --models qwen3:4b／8b --ctx 8192 16384`，兩輪皆 exit 2；4b 的 ollama 端對照 `eval time = 25047.60 ms / 131 tokens (5.19 t/s)`；**兩輪的逐字輸出**：`docs/evidence/2026-09-23-throughput-qwen3-4b.txt`／`…-8b.txt` |
 | prefill 速率 | **18.86**（`77923.65 ms / 1470`）、**20.12**（`93452.13 ms / 1880`）、**24.38**（`11648.88 ms / 284`）tok/s | 同上 |
 | 載入 | 冷啟動 **71.83 s**、暖重載 **3.28 s** | `llama-server started in …` |
 | 單槽 | `-np 1`、`--context-shift --keep 4`、`-c 16384` | llama-server 啟動行 |
@@ -6931,11 +6931,11 @@ D-047 第一節用 4b 的 `2.5 GB ÷ 4.78 t/s` 校準出 **~12 GB/s**。今晚�
 | 備份 | `/tmp/env.backup.20260923T120947Z`（**repo 之外**；`.env.*` 本身也已 gitignore）；補丁前 md5 `f88d7c1f…` 與備份一致 |
 | 容器內生效值 | `docker exec ollama env` → `OLLAMA_KEEP_ALIVE=-1`、`OLLAMA_MAX_LOADED_MODELS=2`、`OLLAMA_CONTEXT_LENGTH=16384`、`OLLAMA_NUM_PARALLEL=1`；容器 id `82e7ce91a6af` → `6751887ef5e0` |
 | 模型 | `docker exec ollama ollama list` → `qwen3:8b 500a1f067a9f 5.2 GB`（探針報 4.87 GiB） |
-| 讀數 | `bash scripts/verify-throughput.sh --quick -- --models qwen3:8b --ctx 8192 16384`（**exit 2**＝沒有嘗試建立基準線，牆上 **14m36s**） |
+| 讀數 | `bash scripts/verify-throughput.sh --quick -- --models qwen3:8b --ctx 8192 16384`（**exit 2**＝沒有嘗試建立基準線，牆上 **14m36s**）；逐字輸出存於 `docs/evidence/2026-09-23-throughput-qwen3-8b.txt` |
 | ollama 端 | `docker logs ollama` 的 `slot print_timing`：`eval time = 164085.73 ms / 512 tokens (3.11 t/s)`、`prompt eval time = 260.35 ms / 1 tokens`（後者就是 prefix cache 重用的證據） |
 | 常駐 | `docker exec ollama ollama ps` → `qwen3:8b 7.9 GB 100% CPU 16384` |
 | 壓力 | `vmstat 1 5`（`si/so≈0`、`id 0%`）、`free -h`（`free` 215 Mi、`buff/cache` 5.7 Gi、swap 用掉 435 Mi 但不再增長） |
-| 4b 讀數（乾淨） | `bash scripts/verify-throughput.sh --quick -- --models qwen3:4b --ctx 8192 16384`（**exit 2**、牆上 **3m46s**）→ **5.93／5.96／5.72／5.23** t/s |
+| 4b 讀數（乾淨） | `bash scripts/verify-throughput.sh --quick -- --models qwen3:4b --ctx 8192 16384`（**exit 2**、牆上 **3m46s**）→ **5.93／5.96／5.72／5.23** t/s；逐字輸出存於 `docs/evidence/2026-09-23-throughput-qwen3-4b.txt` |
 | 4b 的 ollama 端對照 | `slot print_timing: eval time = 25047.60 ms / 131 tokens (5.19 t/s)`（探針在同一條件報 5.23） |
 | 4b 的 KV 幾何 | `llama_kv_cache: CPU KV buffer size = 2304.00 MiB` ＝ 16384 × **144 KiB/token**（36 層 × 8 KV heads × 128 head_dim × 2 × 2 B）—— 與 8b **完全相同** |
 | 4b 的常駐 | `ollama ps` → `qwen3:4b 5.1 GB 100% CPU 16384`、`UNTIL 10 minutes from now`（客戶端送 `keep_alive=10m`，蓋過伺服器的 `-1`） |

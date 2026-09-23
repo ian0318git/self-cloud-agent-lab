@@ -1,0 +1,71 @@
+# 原始輸出 —— 推論吞吐量探針，qwen3:4b（`--quick`）
+#
+# 指令    ：bash scripts/verify-throughput.sh --quick -- --models qwen3:4b --ctx 8192 16384
+# 時間    ：2026-09-23 23:04–23:08（+1000）
+# 結束碼  ：2 —— 依設計（同上：沒有嘗試建立基準線）
+# 牆上時間：3m46s
+# 機器    ：同一台（4 vCPU 切片、15 GiB、無 GPU）
+#
+# 這份檔案是那次執行的逐字輸出，只移除 ANSI 色碼，其餘未編輯（這一份沒有外層頁腳，
+# 因為它是直接重導向寫出來的）。
+#
+# 同一輪的 ollama 端對照（`docker logs ollama`）：
+#   slot print_timing: eval time = 25047.60 ms / 131 tokens ( 5.19 t/s)  ← 探針同條件報 5.23
+#   slot print_timing: prompt eval time = 216.49 ms / 1 tokens
+#   llama_kv_cache:    CPU KV buffer size = 2304.00 MiB ＝ 16384 × 144 KiB/token
+#
+# 同一輪的 swap 監看：每 ~10 秒一次 `vmstat`，全程**零事件**（輸出只有開始與收工兩行）。
+#
+# 引用它的地方：DECISIONS.md D-047 第一／五節、D-049 第四／五節、README.md〈Hardware
+# sizing → The baseline〉。比較用的另一半（8b）在同目錄的 2026-09-23-throughput-qwen3-8b.txt。
+# ---------------------------------------------------------------------------
+
+前提
+✓ ollama 容器在跑
+✓ ollama API 有回應
+
+機器的形狀
+→ vCPU = 4，記憶體 = 15946 MB
+→ physical id = {0 2 4 6}，siblings = {1}
+→ ollama 的執行緒數：n_threads = 4
+→ 日誌裡最後一次載入：KV buffer size =  2304.00 MiB
+
+量測（快速模式）
+→ 模型載入約 30 秒；完整矩陣約 35 分鐘（每個條件取樣 7 次）。中途沒有進度輸出是正常的。
+
+判定
+══════════════════════════════════════════════════════════════════════════════
+  推論吞吐量基準線
+══════════════════════════════════════════════════════════════════════════════
+
+儀器自我檢查：eval_count=24 ≤ num_predict=24（done_reason=length），上限有效。
+
+── 模型 ──
+   qwen3:8b                  4.87 GiB  500a1f067a9f
+   qwen2.5:3b                1.80 GiB  357c53fb659c
+   qwen3:4b                  2.33 GiB  359d7dd4bcda
+   bge-m3:latest             1.08 GiB  790764642607
+   qwen3-embedding:0.6b      0.60 GiB  ac6da0dfba84
+
+── 速率 ──
+   條件                                            decode t/s prefill t/s*  n      CV      全距
+   qwen3:4b num_ctx=8192                               5.93         64.8  1     —      0.0%
+   qwen3:4b num_ctx=16384                              5.96         80.2  1     —      0.0%
+   qwen3:4b num_ctx=16384 num_predict=128              5.72        119.6  1     —      0.0%
+   qwen3:4b num_ctx=16384 num_predict=512              5.23         87.8  1     —      0.0%
+   * prefill 速率**沒有控制 prefix cache 重用**，同一支探針報出 306～14,710 t/s，
+     而日誌顯示請求帶著 cached n_tokens（本輪 1,448）、真實冷 prefill 約 25 t/s。
+     這一欄現在不可引用；decode 那一欄不受影響。（見 D-031）
+
+── KV cache（size 的斜率，非純 KV）──
+   qwen3:4b：`size` 每 token 146.0 KiB（只有兩點，無法檢查線性）；其中約 23 KiB/token 不是 KV（ctx 4096 下約 92 MiB），所以這只能當 KV 成本的**上界**
+
+── 診斷 ──
+
+基準線判定：這一輪每個條件只有一個樣本（`--quick`），從設計上就**沒有嘗試**建立基準線 —— 不判定。要基準線請讓每條件 ≥5 個樣本。
+! 這一輪是 `--quick`：每個條件只有一個樣本，**沒有嘗試**建立基準線 —— 不判定，既不是通過也不是失敗（理由見上面的「基準線判定」）。要基準線就拿掉 `--quick`，完整矩陣約 35 分鐘。
+
+real	3m46.388s
+user	0m0.741s
+sys	0m0.614s
+exit=2
