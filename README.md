@@ -344,12 +344,25 @@ the difference — and the probe's KV slope is an **upper bound** of 146 KiB per
 no swapping, `id` sat at 0%, and the run queue was 5–6 on four vCPUs, so these numbers
 are mildly conservative.
 
-**Do not read the two series as an 8B-vs-4B comparison.** The 4b rows were taken
-during real chats — WebUI, RAG, and a runaway background title generation all
-competing for the same four vCPUs — while the 8B rows are clean single requests from
-the probe. Both are true; only one is apples-to-apples. The 8B reading also implies a
-*higher* effective bandwidth than the 4b one did, which is why D-047 §1's calibration
-now reads 12–20 GB/s rather than 12 (D-049 §5).
+**The two series are now comparable — the 4b has since been measured the same way.**
+The same probe, the same conditions, only the model name changed (`--quick -- --models
+qwen3:4b --ctx 8192 16384`, exit 2, 3m46s, and **no swapping at any point**):
+
+| Condition | 4b | 8b | 4b/8b | 4b bandwidth | 8b bandwidth |
+|---|---|---|---|---|---|
+| `num_ctx=8192` | 5.93 t/s | 3.77 t/s | 1.57× | 13.8 GiB/s | 18.4 GiB/s |
+| `num_ctx=16384` | **5.96** | **3.55** | **1.68×** | **13.9 GiB/s** | **17.3 GiB/s** |
+| `num_ctx=16384`, `num_predict=128` | 5.72 | 2.89 | 1.98× | 13.3 | 14.1 |
+| `num_ctx=16384`, `num_predict=512` | 5.23 | 3.12 | 1.68× | 12.2 | 15.2 |
+
+Three things this settles. **Chat contention costs about 20%**: the same 4b ran at
+4.78 t/s during a real chat (D-046's evidence table) against 5.96 t/s clean. **The
+remaining gap is not contention**: two *clean* readings still differ by 1.24×, because
+the 4b is only 1.68× faster while being 2.09× smaller — the rule in the next section
+*systematically over-predicts small models*. And **effective bandwidth is not one
+number for this machine**: it runs 13.1–19.7 GB/s depending on model size, so quote it
+together with the size. That is why D-047 §1's calibration now reads 12–20 GB/s rather
+than 12 (D-049 §4–5).
 
 ### The rule that predicts throughput
 
@@ -358,8 +371,11 @@ generation rate ≈ efficient bandwidth ÷ model file size
 ```
 
 Every token requires reading the model's weights once, so throughput is set by
-**memory bandwidth**, not core count. Calibrated on this box: 2.5 GB at 4.78
-token/s ⇒ **≈12 GB/s effective**. A dual-channel DDR5 desktop is specified at
+**memory bandwidth**, not core count. Calibrated on this box: 2.5 GB at **5.96 token/s
+clean ⇒ ≈14.9 GB/s effective**; the same model under **chat contention** drops to 4.78
+token/s (≈12 GB/s), and the 8B file reaches ≈18.6 GB/s — so this is **not one number
+but a range, 13.1–19.7 GB/s across model sizes** (D-047 §1 quotes it as 12–20 GB/s;
+both series are in the table above). A dual-channel DDR5 desktop is specified at
 ~77 GB/s, so this VM slice gets a fraction of its host. For the estimates below
 we assume **60% of the spec-sheet bandwidth**; measure your own box before
 trusting any of it. (Prefill is compute-bound and behaves differently — that is
@@ -386,7 +402,7 @@ mem0 extraction (16384, see Step 2) is not free.
 
 | Hardware | Effective BW | 3–4B | 8B | 14B | 32B | 70B |
 |---|---|---|---|---|---|---|
-| this lab box (4 vCPU VM) | ~12 GB/s *(measured)* | **3–5** *(measured)* | ~2 | — | — | — |
+| this lab box (4 vCPU VM) | **12–20 GB/s** *(measured; varies with model size)* | **5.2–6.0** *(measured, clean)* | **3.5** *(measured)* | — | — | — |
 | desktop, DDR5 dual channel | ~46 GB/s | 20–30 | 8–10 | 5 | 2 | — |
 | bare metal, 12-ch DDR5 (EPYC) | ~275 GB/s | 100+ | 40–60 | 25–30 | 12–15 | 5–6 |
 | 1× 24 GB GPU (RTX 4090/3090) | ~600 GB/s | 100+ | 60–100 | 40–60 | 20–30 | does not fit |
