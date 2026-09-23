@@ -14,6 +14,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 
 - [Why this is not a persistent service](#why-this-is-not-a-persistent-service)
 - [Moving to a VPS](#moving-to-a-vps)
+- [Hardware sizing](#hardware-sizing)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Securing remote access](#securing-remote-access)
@@ -95,7 +96,7 @@ Open WebUI database already has accounts or chats, and it never migrates data
 |---|---|
 | `docker-compose.yml` | Three containers and a bridge network — nothing Codespaces-specific. The third, `mcp-test-server`, is a Phase 2 fixture and is deleted once its checklist is verified (`docker-compose.yml:196`). |
 | Open WebUI state | Chats, Knowledge, MCP connections, users, settings all live in the `open_webui_storage` volume. Copy the volume, keep the data. |
-| Model choice | `OLLAMA_MODEL` in `.env` is where the chat model is named, and `EMBEDDING_MODEL` is where the embedding model is named — those two are the only places. Scripts and compose read those variables. Swapping to a larger model is a one-line change. |
+| Model choice | `OLLAMA_MODEL` in `.env` names the chat model **for the scripts** (`up.sh` pulls it, the verify scripts run it). `docker-compose.yml` reads neither it nor `EMBEDDING_MODEL` — no `OLLAMA_MODEL` line exists in that file at all (`grep -n OLLAMA_ docker-compose.yml`, verified 2026-09-23). The embedding model is not in `.env` in any operative sense either: it lives in Open WebUI's own `config` table, is changed with `scripts/set-embedding.sh`, and needs a restart because the process builds its embedding function once at startup (D-013). The model you actually chat with is picked per conversation in the UI, or pinned by a model preset. Both of those live in the database and move with the volume — so "swapping to a larger model" is one line in `.env`, a pull, and one selection in the UI. |
 | MCP / RAG / Memory / Agents | All Open WebUI features configured in its database, not in this repo. They move with the volume. |
 | Cloudflare Tunnel | `cloudflared` runs behind a compose profile and dials **out**. No inbound port needed — which is exactly why it is the right answer for a VPS too. |
 
@@ -148,18 +149,18 @@ script checks this too.
 
 ### Step 2: enlarge the model and the limits
 
-Four values in `.env` were tuned for 2 cores and 8GB. They are the first things to
+Five values in `.env` were tuned for 2 cores and 8GB. They are the first things to
 raise:
 
 ```bash
 OLLAMA_MODEL=qwen3:70b          # or whatever the VPS can hold
 OLLAMA_CONTEXT_LENGTH=16384     # see below — 4096 truncates the prompt, and 8192 is not enough either
-OLLAMA_MAX_LOADED_MODELS=3
-OLLAMA_NUM_PARALLEL=4           # big throughput win; shares one model load
+OLLAMA_MAX_LOADED_MODELS=3      # must be >= OLLAMA_NUM_PARALLEL; every extra model holds its own weights
+OLLAMA_NUM_PARALLEL=4           # big throughput win; shares one model load — but it multiplies the KV cache (see below)
 OLLAMA_KEEP_ALIVE=-1            # keep resident; reloading costs tens of seconds
 ```
 
-Unlike the other three, `OLLAMA_CONTEXT_LENGTH` is **not** free — a larger context
+Unlike the others, `OLLAMA_CONTEXT_LENGTH` is **not** free — a larger context
 costs KV-cache memory proportional to it (roughly 36 KiB per token for a 3B-class
 model; that figure is an **estimate** from Qwen2.5-3B's architecture, not measured
 on this stack, and it scales with the model's layer/head count). It costs **time**
@@ -274,6 +275,208 @@ mid-move, which is the same reason D-014 exists.
    else worked) was about *this* machine. Re-check them rather than inheriting
    them — D-011's "keep thinking on" in particular deserves a fresh look when a
    GPU makes 264–293 s per answer irrelevant.
+
+---
+
+## Hardware sizing
+
+What this stack costs in hardware, what each configuration buys, and how close a
+rented box gets to a hosted assistant. **Everything measured is marked as such;
+everything else is extrapolation and is marked too.** The rule behind the
+extrapolation is stated so you can recompute it for hardware not listed here.
+
+### The baseline: what this lab box is and what it does
+
+| | |
+|---|---|
+| CPU | 4 vCPU slice of an Intel i7-1260P (Alder Lake laptop part) |
+| RAM | 15 GiB on the host; the ollama container has **no** memory limit |
+| GPU | none |
+| Runtime | `OLLAMA_NUM_PARALLEL=1` (one slot), `OLLAMA_CONTEXT_LENGTH=16384`, `OLLAMA_MAX_LOADED_MODELS=2`, `OLLAMA_KEEP_ALIVE=-1` (the last two since 2026-09-23, D-049) |
+
+Measured 2026-09-22/23, per-run logs kept:
+
+| Quantity | qwen2.5:3b (1.9 GB) | qwen3:4b (2.5 GB) |
+|---|---|---|
+| generation | 5–6 token/s | 2.7–4.8 token/s |
+| prompt evaluation (prefill) | 19–24 token/s | 19–24 token/s |
+| cold model load | — | 71.8 s |
+| warm reload | — | 3.3 s |
+
+Three consequences that the numbers alone do not make obvious:
+
+1. **Prefill is paid per turn, not per answer.** Evaluating a 1,880-token prompt
+   took **93.5 s** on this box. Every tool call is another round trip, and every
+   round re-evaluates a *larger* prompt — so a task that calls a tool three times
+   pays that tax four times.
+2. **A reasoning model turns a four-second answer into a ten-minute one.** One
+   three-dice round generated **2,966 tokens over 620 s**; the three tool calls
+   themselves were instant. Most of those tokens were `thinking`. The tool-calling
+   round-trip is not the slow part — the model thinking about it is.
+3. **One slot means everything queues.** With `OLLAMA_NUM_PARALLEL=1` a second
+   chat does not run slower; it does not run at all until the first one finishes.
+   When an answer takes ten minutes, that is the whole box for ten minutes. This
+   is the first number to raise on a bigger machine, and it costs no model quality.
+
+**The default model changed on 2026-09-23** (`.env`: `qwen3:4b` → `qwen3:8b`, 5.2 GB,
+plus `OLLAMA_KEEP_ALIVE=-1` and `OLLAMA_MAX_LOADED_MODELS=2` — D-049). That makes the
+table above the **4b series**, which matters because *rate is a function of the model*.
+The same probe run against `qwen3:8b` on this box, one sample per condition:
+
+| Condition | decode | prefill* |
+|---|---|---|
+| `num_ctx=8192` | 3.77 t/s | 76.7 t/s |
+| `num_ctx=16384` | 3.55 t/s | 76.4 t/s |
+| `num_ctx=16384`, `num_predict=128` | 2.89 t/s | 56.4 t/s |
+| `num_ctx=16384`, `num_predict=512` | 3.12 t/s | 73.0 t/s |
+
+\* **The prefill column is not usable.** The probe does not control prefix-cache
+reuse, and says so itself (the same instrument has printed 306–14,710 t/s); ollama's
+log for this run shows the real cold prefill at about **25 t/s**. Decode is
+unaffected. The run was `--quick` — one sample per condition — so by the probe's own
+design it is **not** a baseline (exit 2, "no baseline attempted"), only a reading with
+its conditions attached.
+
+Two costs this measures that the earlier series did not: at 16k context the model is
+**7.9 GB resident** (`ollama ps`, 100% CPU) against 5.2 GB on disk — the KV cache is
+the difference — and the probe's KV slope is an **upper bound** of 146 KiB per token
+(two points only, and ~23 KiB/token of that is not KV). During the run `vmstat` showed
+no swapping, `id` sat at 0%, and the run queue was 5–6 on four vCPUs, so these numbers
+are mildly conservative.
+
+**Do not read the two series as an 8B-vs-4B comparison.** The 4b rows were taken
+during real chats — WebUI, RAG, and a runaway background title generation all
+competing for the same four vCPUs — while the 8B rows are clean single requests from
+the probe. Both are true; only one is apples-to-apples. The 8B reading also implies a
+*higher* effective bandwidth than the 4b one did, which is why D-047 §1's calibration
+now reads 12–20 GB/s rather than 12 (D-049 §5).
+
+### The rule that predicts throughput
+
+```
+generation rate ≈ efficient bandwidth ÷ model file size
+```
+
+Every token requires reading the model's weights once, so throughput is set by
+**memory bandwidth**, not core count. Calibrated on this box: 2.5 GB at 4.78
+token/s ⇒ **≈12 GB/s effective**. A dual-channel DDR5 desktop is specified at
+~77 GB/s, so this VM slice gets a fraction of its host. For the estimates below
+we assume **60% of the spec-sheet bandwidth**; measure your own box before
+trusting any of it. (Prefill is compute-bound and behaves differently — that is
+why a GPU improves it far more than it improves generation.)
+
+### How much memory a model needs
+
+| Model class | Q4_K_M file | + KV cache at 16k context | Realistic minimum |
+|---|---|---|---|
+| 3–4B | 1.9–2.5 GB *(measured)* | ~0.6 GB | 4 GB |
+| 7–8B | ~5 GB | ~1.2 GB | 8 GB |
+| 14B | ~9 GB | ~2 GB | 16 GB |
+| 32B | ~20 GB | ~4 GB | 24 GB (tight) |
+| 70B | ~43 GB | ~8 GB | 48 GB |
+| 120B MoE | ~60–65 GB | ~2 GB (fewer layers active) | 80 GB |
+
+The KV-cache column scales from **D-022's ~36 KiB/token for a 3B-class model** —
+an *estimate* derived from Qwen2.5-3B's architecture, not a measurement on this
+stack. Two things follow from it and both are easy to get wrong: raising
+`OLLAMA_CONTEXT_LENGTH` costs memory proportionally, and the context you need for
+mem0 extraction (16384, see Step 2) is not free.
+
+### What each machine buys
+
+| Hardware | Effective BW | 3–4B | 8B | 14B | 32B | 70B |
+|---|---|---|---|---|---|---|
+| this lab box (4 vCPU VM) | ~12 GB/s *(measured)* | **3–5** *(measured)* | ~2 | — | — | — |
+| desktop, DDR5 dual channel | ~46 GB/s | 20–30 | 8–10 | 5 | 2 | — |
+| bare metal, 12-ch DDR5 (EPYC) | ~275 GB/s | 100+ | 40–60 | 25–30 | 12–15 | 5–6 |
+| 1× 24 GB GPU (RTX 4090/3090) | ~600 GB/s | 100+ | 60–100 | 40–60 | 20–30 | does not fit |
+| 1× 48 GB GPU (L40S/A6000) | ~520 GB/s | 100+ | 60–100 | 40–60 | 25–35 | 10–15 |
+| 1× 80 GB GPU (A100/H100) | ~1,200–2,000 GB/s | 100+ | 60–100 | 40–60 | 50–80 | 25–45 |
+
+Numbers other than the measured row are **estimates** from the rule above at 60%
+efficiency; treat them as orders of magnitude, not promises. `—` means the model
+does not fit in system RAM at a sane size, or would be too slow to converse with.
+
+Two rows are worth reading twice. **A CPU-only cloud VPS is usually worse than a
+desktop**, because it is a slice of a shared memory bus — the exact resource this
+workload needs. And **a single 24 GB GPU is the first configuration that is
+qualitatively different**: it is where 14B stops being a wait and starts being a
+conversation.
+
+### VPS configurations
+
+| | A — CPU only | B — one 24 GB GPU **(sweet spot)** | C — 80 GB GPU |
+|---|---|---|---|
+| Spec | 8 vCPU / 32 GB / 200 GB NVMe | 8 vCPU / 32–64 GB / 1× 24 GB / 200 GB NVMe | 16 vCPU / 128 GB / 1× 80 GB / 500 GB NVMe |
+| Serves | 7–8B at 5–10 token/s | 14B at 40–60; 32B at 20–30 token/s | 70B at 25–45 token/s |
+| Users | 1, patient | 1–5 comfortable | 5–15 |
+| Cost band (2026) | ~$40–120/mo | ~$250–650/mo | ~$1,100–2,200/mo |
+
+Costs are **order-of-magnitude only** — GPU rental prices move, and hourly
+billing is the honest way to try one. The arithmetic to sit with: **at these
+prices self-hosting is not cheaper than an API.** You buy the data path, not the
+price. That is the correct reason and it is worth being explicit about, because
+the alternative — renting an 80 GB GPU to save money — does not work.
+
+Things that are easy to miss when moving to a GPU instance:
+
+1. **The instance needs the NVIDIA container runtime**, and the compose file needs
+   a `deploy.resources.reservations.devices` block for the ollama service. Ollama's
+   image detects the GPU on its own once the runtime is there.
+2. **VRAM is a hard wall.** If weights plus KV cache exceed it, ollama offloads
+   layers to system RAM and throughput collapses — often 10–50× worse, not 20%
+   worse. Size for the model **and the context**, not just the model.
+3. **Disk speed shows up in the first answer.** Cold load was 71.8 s here for a
+   2.5 GB model; the 70B tier is a 43 GB read.
+4. **Never publish 11434.** Ollama has no authentication at all — the "Securing
+   remote access" section below is not optional on a public IP.
+
+### How close to ChatGPT can a rented VPS get?
+
+Two questions are hiding in that one, and they have different answers.
+
+**The features** — tools, RAG over your own documents, MCP, multi-user, an
+OpenAI-compatible endpoint — are already here, and they move to a VPS unchanged.
+No hardware decision changes this layer.
+
+**The model** is the part you cannot rent your way out of. Open-weight models
+top out below the frontier, and the gap is most visible exactly where a studio
+notices it: long multi-step reasoning, following intricate instructions, and
+knowing when it does not know. Rough honesty by tier:
+
+- **7–8B**: fine for summarising, extraction, classification, translation. It will
+  also invent a tool result when it has no tool — observed on this stack
+  2026-09-23: three fabricated `<tool_response>` blocks in one chat, while the MCP
+  server logged **zero** sessions. It needs guardrails wherever being wrong is
+  expensive. (The write-up is pending; the runs are in the logs.)
+- **14B–32B**: a capable junior assistant that remembers everything you gave it.
+  This is the tier where "接近 ChatGPT 的功能" becomes a fair description of the
+  *experience*, for a single user or a small studio.
+- **70B and MoE 100B+**: noticeably better, still not ChatGPT — and at tier C's
+  cost, worth measuring against an API before committing to monthly billing.
+
+**The practical answer: configuration B.** 14B–32B at 20–60 token/s is the point
+where the *medium* stops being the problem. Rent it hourly first, run your own
+hardest real task through it, and only then decide whether the next tier up is
+worth 3–4× the monthly cost. And keep the OpenAI-compatible connection (see the
+compose comments) as an escape hatch: sensitive work local, everything else to an
+API — that hybrid is cheaper and better than either extreme.
+
+### What "sensitive data" actually requires
+
+Sensitivity is decided by what **leaves**, not by where the model runs.
+
+- `ENABLE_OPENAI_API=false` is the default here **because the upstream default
+  sends data to OpenAI** — see the comment in `docker-compose.yml`. Keep it off.
+- Web search and external tools are the features that send content out. On a
+  sensitive corpus they must stay off; local MCP tools on the internal network
+  (like `mcp-test-server`) are a different thing entirely.
+- Local by construction: embeddings (`bge-m3`, `qwen3-embedding:0.6b`), chat
+  storage in the `open_webui_storage` volume (`webui.db` is the whole install).
+- **Still egress, and easy to forget:** the first boot downloads an embedding
+  model from Hugging Face, and `ollama pull` fetches from `registry.ollama.ai`.
+  Pull every model you need **before** the data arrives.
+- Back up both volumes. Losing `webui.db` loses every chat, document and setting.
 
 ---
 

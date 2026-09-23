@@ -237,7 +237,8 @@ bash scripts/connect-endpoint.sh --disconnect   # 切回只有 Ollama
 | 能不能撐過長時間 session | 讓它跑幾個小時 |
 | 實際可用的 context 長度 | `LLM_CONTEXT_LEN` 對上 KV cache 的實際成本 |
 
-模型本身是一個變數，不是架構的一部分。改 `OLLAMA_MODEL` 或 `DEFAULT_MODEL`
+模型本身是一個變數，不是架構的一部分。改它——`.env` 的 `OLLAMA_MODEL` 給腳本用，
+Open WebUI 的模型選單給對話用——
 不是程式碼變更。
 
 ---

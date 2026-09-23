@@ -260,8 +260,9 @@ answer "is this fast enough / big enough". Measure those yourself:
 | Does it survive a long session? | Run it for a few hours |
 | Context length actually usable | `LLM_CONTEXT_LEN` vs. what the KV cache costs |
 
-The model itself is a variable, not part of the architecture. Changing
-`OLLAMA_MODEL` or `DEFAULT_MODEL` is not a code change.
+The model itself is a variable, not part of the architecture. Changing it is not a
+code change — `OLLAMA_MODEL` in `.env` names it for the scripts, and the model
+selector in Open WebUI picks it per conversation.
 
 ---
 
