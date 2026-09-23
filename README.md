@@ -882,7 +882,7 @@ claim in it has a citation in the bullets:
   database — see [Enabling MCP](#enabling-mcp).
 - **`:8080 → :3000` is the one published port.** Open WebUI listens on `:8080`
   inside the container; compose publishes it to the host on `:3000`, bound to
-  `${WEBUI_BIND_ADDR:-0.0.0.0}` (`docker-compose.yml:71`).
+  `${WEBUI_BIND_ADDR:-0.0.0.0}` (`docker-compose.yml:88`).
 - **The probe layer is not part of the deployed stack.** It is how Phase 2's
   claims get checked: each probe is a `docker run --rm --network
   <project>_ai-net` one-off, with the image built on the spot from an inline

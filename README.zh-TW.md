@@ -805,7 +805,7 @@ workflow 或明確狀態機的需求時」才評估。那個條件現在正被�
 - **MCP 連線本身是資料庫狀態，不是設定。** 它沒有環境變數，是在介面上新增、存進
   Open WebUI 的資料庫 —— 見[啟用 MCP](#啟用-mcp)。
 - **`:8080 → :3000` 是唯一發布的埠。** Open WebUI 在容器內聽 `:8080`，compose 把
-  它發布到主機的 `:3000`，綁在 `${WEBUI_BIND_ADDR:-0.0.0.0}`（`docker-compose.yml:71`）。
+  它發布到主機的 `:3000`，綁在 `${WEBUI_BIND_ADDR:-0.0.0.0}`（`docker-compose.yml:88`）。
 - **探針層不屬於佈署面上的一員。** 它是第二階段那些宣稱的查核方式：每個探針都是
   `docker run --rm --network <project>_ai-net` 的一次性執行，映像檔當場用 heredoc
   建起來（`docker build -t … -f -`，所以磁碟上沒有 `Dockerfile`），探針的 `.py`
