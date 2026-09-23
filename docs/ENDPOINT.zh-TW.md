@@ -40,6 +40,7 @@ $ bash scripts/probe-openai.sh
 | Kaggle + Endpoint 能跑較大的 GGUF | **未驗證** —— 需要你的 Kaggle 帳號 |
 | 速度、可用 VRAM、2×T4 裝得下多大的模型 | **未量測** |
 | tunnel 能否撐過一整個 session | **未量測** |
+| 修補後的產生器撐得過一次真的 `endpoint boot` | **未驗證** —— 補丁是對模擬的 ntfy 驗證的，不是對真的 Kaggle 跑 |
 
 介面相容不等於承載能力。探針刻意不宣稱後者——它自己的輸出就寫明了這件事。
 
@@ -282,6 +283,38 @@ bash scripts/connect-endpoint.sh --url http://your-vps:8000/v1
   全部失效（[D-013](../DECISIONS.md)）。聊天可以搬到 GPU，嵌入留著不動。
   探針把嵌入分成獨立一項，正是為了這個原因。
 
+## 修補 notebook 產生器
+
+`endpoint boot` 跑的筆記本不是你能編輯的那種。它跑的是已安裝的 `endpoint-vps`
+套件裡的 `master_build_notebook.py`，由它**產生**筆記本再推上去 —— 所以產出的
+筆記本有缺陷時，產生器是唯一能改的地方。
+
+兩個缺陷是從一次「健康卻死亡」的 kernel log 裡讀出來的
+（[D-050](../DECISIONS.md)）：
+
+| 缺陷 | 它做了什麼 |
+|---|---|
+| `signal()` 把每一行 HF 下載進度都發布出去 | 628 秒內 629 則，而額度是約 60 則、之後每 5 秒 1 則（每個 IP）。桶子見底，夾著網址的一次性 `TUNNEL ACQUIRED` 被 429 丟掉 —— 而 `signal()` 對此完全沉默。 |
+| `check_kill_signals()` 用 `/raw?since=5m` 卻沒有 `poll=1` | 那是阻塞式訂閱，不是輪詢。`boot` 會在新 kernel 啟動前約 20 秒發布一則 `KILL`，所以每次開機都會重播前一台的 kill 訊號 —— 並在 32 分鐘後對著健康的引擎擊發。 |
+
+兩者必須一起修，因為它們共用同一個額度：筆記本的同一個 IP 既發布訊號、也輪詢
+kill 主題。
+
+```bash
+bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run   # 只檢查，不動檔案
+bash scripts/apply-endpoint-ntfy-fixes.sh             # 套用
+bash scripts/apply-endpoint-ntfy-fixes.sh --revert    # 還原
+```
+
+腳本會擋下三種情況：目標雜湊不是補丁所依據的版本、原始檔竟然**通過**行為驗證
+（代表已經沒有東西可修）、以及套用後雜湊不符（會自動還原）。套用前先備份，
+套用後再驗一次。行為驗證是 `scripts/test_endpoint_ntfy_fixes.py`，可以指向任何
+產生器：它驅動的是產生器**實際吐出的字串**，跑在模擬的 ntfy token bucket 與假
+時鐘上。**它對原始檔是預期要失敗的** —— 那個失敗本身就是缺陷的展示。
+
+**這動的是 package manager 目錄裡的檔案。** 重裝或升級 `endpoint-vps` 就會把
+修正蓋掉；升級後請重跑一次。
+
 ## 疑難排解
 
 | 症狀 | 可能原因 |
@@ -292,6 +325,9 @@ bash scripts/connect-endpoint.sh --url http://your-vps:8000/v1
 | UI 裡沒有模型 | 設定對了但抓取失敗。看 open-webui 日誌。 |
 | 本來正常，約 12 小時後停了 | Kaggle session 上限。重啟 endpoint 再重接。 |
 | `check-egress.sh` 說有啟用中的外部端點 | 接上之後這是預期的——接上就是這個意思。確認那是你自己的。 |
+| kernel log 出現 `SHUTDOWN SIGNAL RECEIVED` 但沒人下 `stop` | 未修補的 kill 開關在重播它自己開機前約 20 秒發布的 `KILL`。套用補丁。 |
+| `boot` 成功但 tunnel 網址一直沒出現 | 未修補的限流把額度花在下載進度上。用 `scripts/apply-endpoint-ntfy-fixes.sh --verify` 確認。 |
+| `apply-endpoint-ntfy-fixes.sh` 說雜湊不符而拒絕 | `endpoint-vps` 升級了。先確認上游是否已修；否則針對新檔案重建補丁。 |
 
 接上之後，`bash scripts/check-egress.sh` 會把你的 runtime 列在「啟用中」。
 那是正確且預期的。這支探針存在的目的，是讓那成為一個**決定**，而不是意外。

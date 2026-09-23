@@ -44,6 +44,7 @@ Being explicit about this, because the whole project depends on not confusing
 | Kaggle + Endpoint can run a larger GGUF model | **Not verified** — needs your Kaggle account |
 | Speed, VRAM headroom, which model sizes fit on 2×T4 | **Not measured** |
 | That the tunnel stays up for a whole session | **Not measured** |
+| That the patched generator survives a real `endpoint boot` | **Not verified** — the patch is verified against simulated ntfy, not against a live Kaggle run |
 
 Interface conformance is not the same as capacity. The probe deliberately does
 not claim otherwise — its own output says so.
@@ -308,6 +309,42 @@ Two things to get right on the way:
   ([D-013](../DECISIONS.md)). Chat can move to the GPU while embeddings stay
   put. The probe reports embeddings separately for exactly this reason.
 
+## Patching the notebook generator
+
+`endpoint boot` does not run a notebook you can edit. It runs
+`master_build_notebook.py` inside the installed `endpoint-vps` package, which
+*generates* the notebook and pushes it — so when the generated notebook has a
+defect, the generator is the only place to fix it.
+
+Two defects were found by reading the kernel log of a run that died healthy
+([D-050](../DECISIONS.md)):
+
+| Defect | What it did |
+|---|---|
+| `signal()` published every HF download progress line | 629 messages in 628s against a budget of ~60 plus one per 5s per IP. The bucket drained, and the one-shot `TUNNEL ACQUIRED` carrying the URL was discarded with a 429 that `signal()` swallows in silence. |
+| `check_kill_signals()` used `/raw?since=5m` without `poll=1` | That is a blocking subscribe, not a poll. `boot` publishes a `KILL` ~20s before the new kernel starts, so every boot replayed its predecessor's kill signal — and fired it 32 minutes later, on a healthy engine. |
+
+Both are fixed together, because they share one budget: the notebook's IP both
+publishes signals *and* polls the kill topic.
+
+```bash
+bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run   # check; change nothing
+bash scripts/apply-endpoint-ntfy-fixes.sh             # apply
+bash scripts/apply-endpoint-ntfy-fixes.sh --revert    # undo
+```
+
+The script refuses unless the target hashes to the exact version the patch was
+built against, refuses if the pristine file already *passes* the behavioural
+verifier (which would mean there is nothing left to fix), backs the file up
+first, and re-verifies afterwards. `scripts/test_endpoint_ntfy_fixes.py` is that
+verifier and takes any generator as an argument: it drives the code the
+generator actually *emits*, against a simulated ntfy token bucket and a fake
+clock. Note that it is meant to fail against the pristine file — that failure is
+the demonstration of the bug.
+
+**This patches a file inside a package-manager directory.** Reinstalling or
+upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -318,6 +355,9 @@ Two things to get right on the way:
 | Models do not appear in the UI | The config is right but the fetch failed. Check the open-webui logs. |
 | Everything works, then stops after ~12h | Kaggle session limit. Reboot the endpoint and reconnect. |
 | `check-egress.sh` reports an enabled external endpoint | Expected once connected — that is what connecting means. Confirm it is yours. |
+| Kernel log shows `SHUTDOWN SIGNAL RECEIVED` but nobody ran `stop` | The unpatched kill switch replaying the `KILL` its own boot published ~20s before it started. Apply the patch. |
+| `boot` succeeds but the tunnel URL never arrives | The unpatched rate limit spent the budget on download progress. Check with `scripts/apply-endpoint-ntfy-fixes.sh --verify`. |
+| `apply-endpoint-ntfy-fixes.sh` refuses with a hash mismatch | `endpoint-vps` was upgraded. Check whether upstream fixed it; otherwise rebuild the patch against the new file. |
 
 After connecting, `bash scripts/check-egress.sh` will list your runtime under
 "啟用中". That is correct and intended. The probe exists so that it is a

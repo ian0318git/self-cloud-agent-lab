@@ -546,6 +546,9 @@ bash scripts/up.sh
 | `bash scripts/connect-endpoint.sh --url URL` | 接上一個 OpenAI-compatible runtime（先驗證、後接線、再回讀確認） |
 | `bash scripts/connect-endpoint.sh --status` | 目前接的是哪一個 runtime |
 | `bash scripts/connect-endpoint.sh --disconnect` | 切回只有 Ollama |
+| `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | 檢查 endpoint 產生器裡的兩項 ntfy 修正是否需要、以及補丁還套不套得上。不做任何變更 |
+| `bash scripts/apply-endpoint-ntfy-fixes.sh` | 對那個產生器套補丁（備份 → 雜湊關卡 → 套用 → 重驗）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
+| `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | 上面那支的行為驗證 —— 驅動產生器**實際吐出的字串**，跑在模擬的 ntfy token bucket 上。**對原始檔是預期要失敗的**，那個失敗就是缺陷的展示（D-050） |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 

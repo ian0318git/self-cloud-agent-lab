@@ -595,6 +595,9 @@ Open <http://localhost:3000>.
 | `bash scripts/connect-endpoint.sh --url URL` | Attach an OpenAI-compatible runtime (verify → wire → read back) |
 | `bash scripts/connect-endpoint.sh --status` | Which runtime is wired right now |
 | `bash scripts/connect-endpoint.sh --disconnect` | Back to Ollama only |
+| `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | Check whether the two ntfy fixes in endpoint's notebook generator are needed, and whether they still apply. Changes nothing |
+| `bash scripts/apply-endpoint-ntfy-fixes.sh` | Patch that generator (backup → hash gate → apply → re-verify). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
+| `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | The verifier behind the above — drives the code the generator *emits* against a simulated ntfy token bucket. **Fails against the pristine file on purpose**; that failure is the demonstration (D-050) |
 
 Attaching a GPU runtime (Kaggle + Endpoint, or a VPS + vLLM) has its own guide:
 [`docs/ENDPOINT.md`](docs/ENDPOINT.md) · [`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md).
