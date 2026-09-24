@@ -7343,14 +7343,26 @@ bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1
   的 mtime 推得 notebook 在 **22:46** 產生，所以這次存活約 **85 分鐘** —— 遠超過
   32 分鐘那個窗。兩個推論，強度不同：
 
-  - **502 而不是 530 是關鍵。** 530 代表 tunnel connector 不見了；502 代表 connector
-    還連著、掛掉的是它後面的 origin 服務。cloudflared 跑在 kernel 裡，所以**這表示
-    Kaggle 的 kernel 很可能還活著**，死的只是引擎的 HTTP 服務。（這是推論，不是直證。）
+  - **我原先從「502 而不是 530」推論「kernel 還活著、死的只有引擎的 HTTP 服務」——
+    這個推論是錯的。** 00:20 跑 `endpoint stop`，回 **`No running kernel found.`**
+    （結束碼 0）：kernel 整台都結束了，cloudflared 也一起沒了。
+    **教訓：502 與 530 的差別不足以支撐「origin 死了但 connector 還活著」這種推論** ——
+    quick tunnel 在 connector 離線之後的一段時間內，邊緣仍可能回 502。代理訊號再一次
+    比它看起來的還弱，這與本節第一條是同一條規則。
+  - **配額沒有在燒。** 上面那個 `endpoint stop` 的結果同時回答了這件事：對 30 小時／週
+    的配額而言，這次的 85 分鐘約佔 4.7%，而且已經結束了。
   - 因此**不能說補丁有效、也不能說無效**：它撐過了 32 分鐘，但沒撐過 85 分鐘，而死因
     不在手上的證據裡。
 
-  **`endpoint logs` 對死掉的引擎幫不上忙** —— 它是**透過 tunnel** 向引擎要日誌的，
-  引擎一死就只拿回 Cloudflare 的錯誤頁。要看死因只能去 Kaggle 的 notebook 頁面讀
-  cell 輸出（日誌在那裡），而那需要登入。
+  **兩條拿日誌的路都不通，而且原因不同。**
+  - **`endpoint logs`** 是**透過 tunnel** 向引擎要日誌的 —— 引擎一死就只拿回
+    Cloudflare 的錯誤頁。它沒有本機備份。
+  - **Kaggle CLI 也不能用**（`kaggle kernels status` 回 `Authentication required`）。
+    `endpoint doctor` 確認了同一件事：`✗ Kaggle API token`，而 `~/.config/kaggle/`
+    是空的。**token 只存在於使用者跑 `endpoint boot` 的那個 shell 裡**，不是
+    系統層級的設定 —— 這是一個容易誤判的地方：`endpoint` 能用不代表 `kaggle` 能用。
+
+  所以**死因只能在瀏覽器裡讀**：Kaggle 的 notebook 頁面有 cell 輸出（日誌在那裡），
+  而那需要登入。（見待辦 #77。）
 - **輪替金鑰仍未做。** 它需要重開機（見第二節），而且會把現在這台機器換掉 ——
   這是刻意的延後，不是遺漏。
