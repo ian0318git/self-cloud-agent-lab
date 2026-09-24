@@ -21,6 +21,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 載入原因只有一個：usage_text()，也就是 `--help` 要印的檔頭。
+#
+# **載入在頂層而不是在 handler 裡是刻意的。** lib.sh 就在同一層目錄，少了它的
+# 話頂層載入會用「No such file」大聲失敗；改成在 handler 裡惰性載入則會
+# **安靜地印出空白、而且結束碼 0** —— test_usage_text.sh 的 C-對照組示範的
+# 就是這個假成功。一個會安靜回報成功的 --help，比一個壞掉的 --help 更難發現。
+#
+# 這也把 --help 從「寫死的行號範圍」（`sed -n '2,20p'`）換成與其他腳本相同的
+# 形狀。行號會在下次有人補一行說明時默默錯掉，而錯掉的 --help 沒有人會發現 ——
+# 那正是 test_usage_text.sh 的 D1 在擋的東西。
+source "$SCRIPT_DIR/lib.sh"
+
 PATCH="$SCRIPT_DIR/endpoint-ntfy-fixes.patch"
 VERIFIER="$SCRIPT_DIR/test_endpoint_ntfy_fixes.py"
 
@@ -37,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --verify)  MODE=verify ;;
         --revert)  MODE=revert ;;
         --target)  TARGET="${2:-}"; shift ;;
-        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) usage_text "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "不認識的參數：$1" >&2; exit 2 ;;
     esac
     shift
