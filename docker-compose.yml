@@ -73,6 +73,28 @@ services:
     container_name: open-webui
     restart: unless-stopped
 
+    # ── 為什麼要自己指定 DNS ──────────────────────────────────
+    # 這不是效能調校，是**修一個會讓 Kaggle 那條路整條不通的故障**。
+    #
+    # 2026-09-24 實測：`connect-endpoint.sh` 的相容性探針在容器內回
+    #     URLError: <urlopen error [Errno -2] Name or service not known>
+    # 而**同一個網址用原始 IP ＋ SNI 直接連是 200 OK**（模型清單正常）。
+    # 所以 runtime 沒壞，是解析壞了。
+    #
+    # 根因不在 Docker：本機 systemd-resolved 轉發到 NAT 閘道 192.168.44.2，
+    # 閘道的上游是 ISP 的 117.102.159.254，而它對 `*.trycloudflare.com`
+    # 回 **NXDOMAIN** —— 與「確定不存在的名字」回的同一個 status。
+    # 1.1.1.1 與 8.8.8.8 都解得出來。`*.trycloudflare.com` 常被用來做釣魚，
+    # 有些 ISP 的解析器直接濾掉；而 endpoint 的 tunnel 正好就是這個網域。
+    #
+    # 指定在這裡而不是改主機的 resolver：範圍限定在這個 lab（不影響同機其他
+    # 用途）、跟著 repo 走（Codespaces 與別台機器一樣受益），而且重開機與
+    # 容器重建都不會失效。代價是**容器不再繼承主機 DNS**，所以將來若這個 lab
+    # 需要解析僅內網可見的名字（公司內部服務、.local），要把它加進這份清單。
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+
     # 綁定位址刻意做成可設定的，因為**這個值的正確答案取決於機器在哪**：
     #
     #   Codespaces：0.0.0.0 是安全的。那裡的埠預設為私有，要通過 GitHub
