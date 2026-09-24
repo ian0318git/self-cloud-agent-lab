@@ -143,6 +143,92 @@ bind_is_wildcard() {
   printf 'no'
 }
 
+# 一個綁定位址屬於哪一類。回 loopback / wildcard / private / public / unknown。
+#
+# 為什麼要分類，而不是只問「是不是 0.0.0.0」：check-exposure.sh 原本只認得萬用
+# 位址，其餘一律印「僅綁在 loopback」。那個推論有兩個錯，第二個是安全問題：
+#
+#   · 綁在特定網卡上（例：192.168.44.128）時，那句話**與事實相反** ——
+#     同一層網路的裝置直接連得到，不經過 tunnel，也不經過 Cloudflare Access。
+#   · 綁在**公開位址**上時，那支腳本同樣會回「未發現對外暴露」，而機器其實
+#     對 Internet 開著。那是安全檢查的 fail-open —— 正是這支腳本檔頭說要
+#     消滅的那個形狀（把「我沒檢查」講成「沒問題」）。
+#
+# 方向刻意 fail-closed：認不出來的一律回 unknown（呼叫端當成無法判定），
+# 長得像 IP 卻不屬於任何私有段的回 public。把公開位址誤判成私有才是要防的洞，
+# 反過來只是多一次警告。
+bind_addr_scope() {
+  local addr="${1:-}"
+  # `docker port` 把 IPv6 寫成 [::1]:3000 這種形式，所以先脫掉方括號再分類。
+  # 不脫的話 `[fd00::1]` 會因為開頭是 `[` 而落到「看起來像 IP」那條，被當成
+  # 公開位址 —— 方向是安全的，但結論是錯的，而錯的結論會讓人開始不信這支腳本。
+  addr="${addr#\[}"
+  addr="${addr%\]}"
+  # 每個樣式**各佔一行**，不是排版偏好：突變測試要求目標字串裡不能有 `|`
+  # （那個字元是欄位分隔符），而 case 的樣式用 `|` 串接。寫成一行的話
+  # `10.*|192.168.*` 這種字串就沒辦法被突變瞄準 —— 也就是這一格會沒有守衛。
+  case "$addr" in
+    '')                        printf 'unknown' ;;
+    '0.0.0.0')                 printf 'wildcard' ;;
+    '::')                      printf 'wildcard' ;;
+    '::1')                     printf 'loopback' ;;
+    127.*)                     printf 'loopback' ;;
+
+    # RFC1918 與 link-local。
+    10.*)                      printf 'private' ;;
+    192.168.*)                 printf 'private' ;;
+    169.254.*)                 printf 'private' ;;
+    172.1[6-9].*)              printf 'private' ;;
+    172.2[0-9].*)              printf 'private' ;;
+    172.3[01].*)               printf 'private' ;;
+
+    # CGNAT（100.64.0.0/10）—— 電信級的私有段，從外面連不到，與 RFC1918 同類。
+    100.6[4-9].*)              printf 'private' ;;
+    100.[7-9][0-9].*)          printf 'private' ;;
+    100.1[01][0-9].*)          printf 'private' ;;
+    100.12[0-7].*)             printf 'private' ;;
+
+    # IPv6：ULA（fc00::/7）與 link-local（fe80::/10）。
+    fc*)                       printf 'private' ;;
+    fd*)                       printf 'private' ;;
+    fe[89ab]*)                 printf 'private' ;;
+
+    # 看起來是 IP 卻不屬於上面任何一段 —— 當成公開位址（fail-closed）。
+    *.*.*.*)                   printf 'public' ;;
+    *:*)                       printf 'public' ;;
+
+    *)                         printf 'unknown' ;;
+  esac
+}
+
+# `docker port` 的輸出裡，這個埠整體綁在哪一類位址上。多條綁定取**最寬**的
+# 那一條：只要有一條落在公開位址或萬用位址，其餘是 loopback 也救不回來。
+#
+# 空字串、以及「解析不出任何位址」都回 unknown。這兩者與 loopback 在呼叫端
+# 是不同的處置（前者是無法判定）—— 把它們混進 loopback 就是原本那個 fail-open。
+port_bind_scope() {
+  local text="$1" host scope worst='loopback' found=0
+  # 寫成 `||` 而不是 `if`：**這一行的字串必須與 bind_is_wildcard 的那一行不同**。
+  # 突變測試要求目標字串在檔案裡唯一，而兩處一樣的話，想瞄準 bind_is_wildcard
+  # 的那條突變會變成 NOT_UNIQUE 而失效 —— 一個守衛會靜靜地消失，
+  # 症狀是「突變沒被抓到」，看起來像測試有洞，其實是原始碼撞字串。
+  # （順帶：`||` 形式在 $text 非空時回 0，不會踩到 set -e。）
+  [[ -n "$text" ]] || { printf 'unknown'; return 0; }
+  if [[ "$(bind_is_wildcard "$text")" == "yes" ]]; then printf 'wildcard'; return 0; fi
+  while IFS= read -r host; do
+    if [[ -z "$host" ]]; then continue; fi
+    found=1
+    scope="$(bind_addr_scope "$host")"
+    case "$scope" in
+      public)  worst='public' ;;
+      unknown) if [[ "$worst" != 'public' ]]; then worst='unknown'; fi ;;
+      private) if [[ "$worst" == 'loopback' ]]; then worst='private'; fi ;;
+    esac
+  done < <(sed -n 's/.*-> \(.*\):[0-9]\{1,\}$/\1/p' <<<"$text")
+  if [[ $found -eq 0 ]]; then printf 'unknown'; return 0; fi
+  printf '%s' "$worst"
+}
+
 # 這台機器的 DMI 字串看起來像不像「NIC 只有私有位址、公開 IP 是 1:1 NAT
 # 在前面」的環境。回環境名稱，不像就回空字串。
 #

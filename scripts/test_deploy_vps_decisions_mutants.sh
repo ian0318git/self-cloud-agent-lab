@@ -116,6 +116,28 @@ MUTANTS=(
   # "no"（= 沒綁在萬用位址 = 安全）的實作會全綠 —— 那正是 fail-open。
   "綁定判讀：讀不到時當成沒綁在萬用位址|  if [[ -z \"\$text\" ]]; then printf 'unknown'; return 0; fi|  if false; then printf 'unknown'; return 0; fi"
 
+  # ── bind_addr_scope ／ port_bind_scope：「不是 0.0.0.0」不等於 loopback ──
+  # 這一組是這次要補的洞。原本 check-exposure.sh 只問「是不是萬用位址」，
+  # 其餘一律印「僅綁在 loopback」—— 綁在區網位址時那句話與事實相反，
+  # 綁在公開位址時它是把「對 Internet 開著」講成「未發現對外暴露」。
+  #
+  # **最貴的一條就是第一條**：公開位址被判成 private 的話，整套安全檢查
+  # 就是空的，而它的每一行輸出都照常。
+  "位址分類：公開 IPv4 被判成私有（fail-open）|    *.*.*.*)                   printf 'public' ;;|    *.*.*.*)                   printf 'private' ;;"
+  "位址分類：公開 IPv6 被判成私有|    *:*)                       printf 'public' ;;|    *:*)                       printf 'private' ;;"
+  # 方括號不脫 → `[fd00::1]` 與 `[::1]` 都會落到「看起來像 IP」那條被判公開。
+  # 方向是安全的，但結論是錯的，而錯的結論會讓人開始不信這支腳本。
+  "位址分類：IPv6 的方括號不脫|  addr=\"\${addr#\\[}\"|  true"
+  "位址分類：10.x 不再算私有（會落到公開那條）|    10.*)                      printf 'private' ;;|    10.*)                      printf 'public' ;;"
+  # 萬用位址的短路拿掉之後，`0.0.0.0` 會落到逐條解析，而縮減的 case 沒有
+  # wildcard 這一格 —— 於是它會被算成 loopback。
+  "整體綁定：萬用位址不再短路（會被算成 loopback）|  if [[ \"\$(bind_is_wildcard \"\$text\")\" == \"yes\" ]]; then printf 'wildcard'; return 0; fi|  if false; then printf 'wildcard'; return 0; fi"
+  # 解析不出任何位址時回 loopback = 原本那個 fail-open 的原形。
+  "整體綁定：解析不出位址時當成 loopback|  if [[ \$found -eq 0 ]]; then printf 'unknown'; return 0; fi|  if false; then printf 'unknown'; return 0; fi"
+  # 多條綁定取最寬的那兩格。少一格，一條公開 + 一條 loopback 就會回 loopback。
+  "整體綁定：私有被 loopback 吃掉|      private) if [[ \"\$worst\" == 'loopback' ]]; then worst='private'; fi ;;|      private) : ;;"
+  "整體綁定：unknown 被吃掉|      unknown) if [[ \"\$worst\" != 'public' ]]; then worst='unknown'; fi ;;|      unknown) : ;;"
+
   # ── bind_value_is_wildcard：萬用位址的定義 ──
   # 空字串代表「.env 沒設這個鍵」，不是「開放到全部介面」。兩者混為一談會
   # 讓「沒設」被讀成「已明確開放」，於是 default_bind_addr 永遠不被套用。

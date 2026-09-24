@@ -121,11 +121,14 @@ bash scripts/check-exposure.sh
 ```
 
 `check-exposure.sh` reads the **running containers' actual bindings** via
-`docker port`, not what the compose file claims, and it tells the difference
-between "exposed to the internet" and "reachable on your LAN only" by looking for
-public addresses on this host. Note that the LAN-only case is **held back by your
-router, not by this stack** — the same config becomes a real exposure the moment it
-lands on a public IP.
+`docker port`, not what the compose file claims, and it classifies the address each
+port is bound to — loopback, wildcard, private, or public — instead of only asking
+whether the wildcard address was used. Binding to one of this host's own LAN
+addresses therefore reports as **LAN-reachable, not loopback**: it is not an
+internet exposure, but it does not pass through the tunnel or Cloudflare Access
+either, so anything that can route to that address reaches the login page directly.
+That case is **held back by your router, not by this stack** — a bind to a public
+address is a real exposure, and is reported as one.
 
 **What this check cannot answer:** it reads **ports**, and a Cloudflare Tunnel
 publishes no port — that is what makes it a tunnel. So "no open ports" is not

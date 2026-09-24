@@ -13,9 +13,21 @@
 # 檢查兩件事：
 #   1. Ollama 的 11434 **不得**發布到主機。Ollama 沒有任何認證機制，
 #      任何能觸及該埠的人都可以讀取、刪除、推送模型（見 D-003）。
-#   2. Open WebUI 的 3000 若綁在 0.0.0.0 且**不在 Codespaces 上**，就是
-#      對整個 Internet 開放 —— 而且會**繞過** Cloudflare Access。Access
-#      保護的是經過 tunnel 的那條路，不是這個埠。
+#   2. Open WebUI 的 3000 **綁在哪一類位址上**。分五類處置：
+#
+#        loopback  只有本機連得到 —— 對外一律走 tunnel。這是預期的設定
+#        wildcard  0.0.0.0：再問這台有沒有公開位址、是不是 Codespaces
+#        private   區網可達。**不到 Internet，但不經過 tunnel、也不經過
+#                  Cloudflare Access** —— 碰得到那個位址的人（同一層網路的
+#                  裝置、或 NAT 主機本身）直接就能開到登入頁
+#        public    **等於對 Internet 開放**，而且會繞過 Cloudflare Access
+#        unknown   讀不出來 —— 當成「無法判定」，不是「安全」
+#
+#      後三類是 2026-09-24 補上的。原本只問「是不是 0.0.0.0」，其餘一律印
+#      「僅綁在 loopback」：綁在區網位址時那句話**與事實相反**，綁在公開
+#      位址時它更是把「機器對 Internet 開著」講成「未發現對外暴露」——
+#      一個安全檢查的 fail-open，正是這個檔頭說要消滅的那個形狀。
+#      分類本身在 deploy-vps-decisions.sh 的 bind_addr_scope()／port_bind_scope()。
 #
 # 讀的是**執行中容器的實際綁定**（docker port），不是 compose 檔的宣告。
 # 兩者可能不一致（改了 .env 但沒重建容器），而前者才是真正發生的事。
@@ -25,12 +37,13 @@
 #
 # 結束碼：0 = 未發現暴露；1 = 發現暴露；2 = **無法判定**
 #
-# 2 有兩種來源，而兩者都不能被讀成「安全」：
+# 2 有三種來源，而三者都不能被讀成「安全」（都是把「我不知道」講成「沒問題」）：
 #   · 容器未執行 —— 沒有綁定可讀
 #   · 綁在 0.0.0.0，但**判定不出這台機器有沒有公開位址**：讀不到 `ip`，
 #     或這台是 1:1 NAT 的雲主機（在那種機器上 `ip` 只會讀到私有位址）。
-#     兩者在 2026-09-21 之前都會走到「只有私有位址」那條分支然後回 0 ——
-#     那是把「我讀不到」講成「沒有」，也就是 fail-open。
+#     兩者在 2026-09-21 之前都會走到「只有私有位址」那條分支然後回 0。
+#   · 讀不出 3000 綁在哪一類位址（`docker port` 的輸出格式變了之類）。
+#     同理：解析不出位址不是「沒綁在危險的地方」，是「不知道綁在哪」。
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/deploy-vps-decisions.sh"
@@ -146,54 +159,82 @@ print_fix() {
 INDETERMINATE=0
 
 if [[ -v BINDINGS[open-webui] ]] && grep -q "3000" <<<"${BINDINGS[open-webui]}"; then
-  # 只要有任何一行綁在萬用位址，就是對外開放。
-  wide="$(grep -E '\-> (0\.0\.0\.0|\[::\]|::):' <<<"${BINDINGS[open-webui]}" || true)"
+  # 綁定屬於哪一類位址。這一格取代了原本的「不是 0.0.0.0 就當成 loopback」——
+  # 那個推論在綁定是特定網卡位址時**與事實相反**，在綁定是公開位址時更是
+  # 安全檢查的 fail-open。分類的完整理由與 fail-closed 的方向寫在 bind_addr_scope。
+  SCOPE="$(port_bind_scope "${BINDINGS[open-webui]}")"
 
-  if [[ -z "$wide" ]]; then
-    ok "Open WebUI 3000 僅綁在 loopback（對外只能經由 tunnel 抵達）"
-  else
-    # 判定順序與每一條分支的結論都在 wide_bind_verdict() 裡（那裡可測）。
-    case "$(wide_bind_verdict "$IS_CODESPACE" "$HAS_PUBLIC" "$IP_AVAILABLE" "$NAT_ENV")" in
-      codespace)
-        warn "Open WebUI 綁在 0.0.0.0 —— 在 Codespaces 上這是可接受的"
-        echo "    （那裡的埠預設為私有，需通過 GitHub 認證才連得到）。"
-        echo "    但這個設定**不能**直接帶到自己的 VPS。" ;;
+  case "$SCOPE" in
+    loopback)
+      ok "Open WebUI 3000 僅綁在 loopback（對外只能經由 tunnel 抵達）" ;;
 
-      exposed)
-        fail "Open WebUI 綁在 0.0.0.0，且這台機器**有公開位址** —— 等於對 Internet 開放！"
-        echo
-        echo "  這台機器的公開位址："
-        [[ -n "$PUBLIC_V4" ]] && while IFS= read -r ip; do echo "      $ip"; done <<<"$PUBLIC_V4"
-        [[ -n "$PUBLIC_V6" ]] && while IFS= read -r ip; do echo "      $ip（IPv6）"; done <<<"$PUBLIC_V6"
-        echo "  只要防火牆沒擋，任何人都連得到你的 Open WebUI。更麻煩的是："
-        echo "  它會**繞過** Cloudflare Access —— Access 保護的是經過 tunnel 的"
-        echo "  那條路，不是這個埠。掃到 3000 的人不經過它。"
-        print_fix
-        EXPOSED=1 ;;
+    wildcard)
+      # 判定順序與每一條分支的結論都在 wide_bind_verdict() 裡（那裡可測）。
+      case "$(wide_bind_verdict "$IS_CODESPACE" "$HAS_PUBLIC" "$IP_AVAILABLE" "$NAT_ENV")" in
+        codespace)
+          warn "Open WebUI 綁在 0.0.0.0 —— 在 Codespaces 上這是可接受的"
+          echo "    （那裡的埠預設為私有，需通過 GitHub 認證才連得到）。"
+          echo "    但這個設定**不能**直接帶到自己的 VPS。" ;;
 
-      unknown)
-        warn "Open WebUI 綁在 0.0.0.0，但這台機器上讀不到 \`ip\` 指令 —— **無法判定**有沒有公開位址。"
-        echo "    這不是「安全」，是「不知道」。在 VPS 上這通常就是對 Internet 開放。"
-        echo "    要自己確認：這台機器的對外 IP 是什麼、防火牆有沒有擋 3000。"
-        print_fix
-        INDETERMINATE=1 ;;
+        exposed)
+          fail "Open WebUI 綁在 0.0.0.0，且這台機器**有公開位址** —— 等於對 Internet 開放！"
+          echo
+          echo "  這台機器的公開位址："
+          [[ -n "$PUBLIC_V4" ]] && while IFS= read -r ip; do echo "      $ip"; done <<<"$PUBLIC_V4"
+          [[ -n "$PUBLIC_V6" ]] && while IFS= read -r ip; do echo "      $ip（IPv6）"; done <<<"$PUBLIC_V6"
+          echo "  只要防火牆沒擋，任何人都連得到你的 Open WebUI。更麻煩的是："
+          echo "  它會**繞過** Cloudflare Access —— Access 保護的是經過 tunnel 的"
+          echo "  那條路，不是這個埠。掃到 3000 的人不經過它。"
+          print_fix
+          EXPOSED=1 ;;
 
-      nat_fronted)
-        warn "Open WebUI 綁在 0.0.0.0，而這台看起來是 $NAT_ENV —— **無法判定**有沒有公開位址。"
-        echo "    這種機器的 NIC 上**永遠**只有私有位址（公開 IP 是 1:1 NAT 在前面），"
-        echo "    所以「只讀到 10.x」推論不出「不到 Internet」。"
-        echo "    要自己確認：雲端控制台的安全性群組有沒有放行 3000。"
-        print_fix
-        INDETERMINATE=1 ;;
+        unknown)
+          warn "Open WebUI 綁在 0.0.0.0，但這台機器上讀不到 \`ip\` 指令 —— **無法判定**有沒有公開位址。"
+          echo "    這不是「安全」，是「不知道」。在 VPS 上這通常就是對 Internet 開放。"
+          echo "    要自己確認：這台機器的對外 IP 是什麼、防火牆有沒有擋 3000。"
+          print_fix
+          INDETERMINATE=1 ;;
 
-      *)
-        warn "Open WebUI 綁在 0.0.0.0，但這台機器只有私有位址（在 NAT 後）。"
-        echo "    目前只有同一個區網的裝置連得到 —— 不到 Internet。"
-        echo "    **這是靠外部環境擋住的，不是靠這個堆疊。** 換到有公開 IP 的"
-        echo "    VPS 時，同一個設定就會變成真的對外開放。搬到 VPS 時請一併改。"
-        print_fix ;;
-    esac
-  fi
+        nat_fronted)
+          warn "Open WebUI 綁在 0.0.0.0，而這台看起來是 $NAT_ENV —— **無法判定**有沒有公開位址。"
+          echo "    這種機器的 NIC 上**永遠**只有私有位址（公開 IP 是 1:1 NAT 在前面），"
+          echo "    所以「只讀到 10.x」推論不出「不到 Internet」。"
+          echo "    要自己確認：雲端控制台的安全性群組有沒有放行 3000。"
+          print_fix
+          INDETERMINATE=1 ;;
+
+        *)
+          warn "Open WebUI 綁在 0.0.0.0，但這台機器只有私有位址（在 NAT 後）。"
+          echo "    目前只有同一個區網的裝置連得到 —— 不到 Internet。"
+          echo "    **這是靠外部環境擋住的，不是靠這個堆疊。** 換到有公開 IP 的"
+          echo "    VPS 時，同一個設定就會變成真的對外開放。搬到 VPS 時請一併改。"
+          print_fix ;;
+      esac ;;
+
+    private)
+      warn "Open WebUI 3000 綁在**私有位址**上 —— 不是 loopback。"
+      while IFS= read -r line; do echo "      $line"; done <<<"${BINDINGS[open-webui]}"
+      echo "    這個位址從 Internet 連不到，所以**不算對外暴露**。但它不經過"
+      echo "    tunnel、也不經過 Cloudflare Access —— 任何碰得到這個位址的人"
+      echo "    （同一個區網的裝置、或 NAT 主機本身）都能直接開到登入頁。"
+      echo "    無意的話，把 .env 的 WEBUI_BIND_ADDR 設回 127.0.0.1 並重建容器。"
+      ;;
+
+    public)
+      fail "Open WebUI 3000 綁在**公開位址**上 —— 等於對 Internet 開放！"
+      while IFS= read -r line; do echo "      $line"; done <<<"${BINDINGS[open-webui]}"
+      echo "  綁在特定公開 IP 上與綁在 0.0.0.0 的後果相同：任何路由得到它的人"
+      echo "  都進得來，而且會**繞過** Cloudflare Access —— Access 保護的是經過"
+      echo "  tunnel 的那條路，不是這個埠。"
+      print_fix
+      EXPOSED=1 ;;
+
+    *)
+      warn "讀不出 Open WebUI 3000 綁在哪一類位址 —— **無法判定**。"
+      while IFS= read -r line; do echo "      $line"; done <<<"${BINDINGS[open-webui]}"
+      echo "    這不是「安全」，是「不知道」。預期格式是 \`8080/tcp -> 位址:3000\`。"
+      INDETERMINATE=1 ;;
+  esac
 else
   warn "Open WebUI 目前沒有發布 3000 埠 —— 請確認這是你要的。"
 fi

@@ -92,6 +92,74 @@ check "綁定判讀：IPv6 的 :: 也算萬用位址" "yes" "$(bind_is_wildcard 
 check "綁定判讀：讀不到時回 unknown，不是 no" "unknown" "$(bind_is_wildcard '')"
 
 # ═══════════════════════════════════════════════════════════
+# bind_addr_scope ／ port_bind_scope —— 「不是 0.0.0.0」不等於 loopback
+# ═══════════════════════════════════════════════════════════
+# 這一組守的是 check-exposure.sh 原本那個 fail-open。它只認得萬用位址，其餘
+# 一律印「僅綁在 loopback」，而那個推論有兩個錯：
+#
+#   · 綁在特定網卡上（這個 lab 就是 192.168.44.128）時，那句話**與事實相反** ——
+#     同一層網路的裝置直接連得到，不經過 tunnel，也不經過 Cloudflare Access。
+#   · 綁在**公開位址**上時，它會回「未發現對外暴露」，而機器其實對 Internet
+#     開著。那是把「我沒檢查」講成「沒問題」。
+#
+# 最貴的一條是「公開位址被判成 public，不是 private」—— 那個字判錯，整套
+# 安全檢查就是空的，而所有輸出照常。
+check "位址分類：127.0.0.1 是 loopback" "loopback" "$(bind_addr_scope 127.0.0.1)"
+check "位址分類：::1 是 loopback" "loopback" "$(bind_addr_scope '::1')"
+# docker port 對 IPv6 會寫成 [::1]:3000 —— 方括號要在分類之前脫掉。
+check "位址分類：[::1]（docker port 的 IPv6 寫法）也是 loopback" \
+      "loopback" "$(bind_addr_scope '[::1]')"
+check "位址分類：0.0.0.0 是萬用" "wildcard" "$(bind_addr_scope 0.0.0.0)"
+check "位址分類：[::] 也是萬用" "wildcard" "$(bind_addr_scope '[::]')"
+check "位址分類：這個 lab 的 192.168.44.128 是私有" \
+      "private" "$(bind_addr_scope 192.168.44.128)"
+check "位址分類：10.x 是私有" "private" "$(bind_addr_scope 10.0.0.5)"
+check "位址分類：172.16.x 是私有" "private" "$(bind_addr_scope 172.16.3.9)"
+# 172.15 與 172.32 不在 RFC1918 裡 —— 邊界要盯，不然「差不多像」就會被放進去。
+check "位址分類：172.15.x 不在 RFC1918（算公開）" "public" "$(bind_addr_scope 172.15.3.9)"
+check "位址分類：172.32.x 不在 RFC1918（算公開）" "public" "$(bind_addr_scope 172.32.3.9)"
+# CGNAT 從外面連不到，與 RFC1918 同類；但 100.63 與 100.128 不在 100.64/10 裡。
+check "位址分類：100.64.x（CGNAT）是私有" "private" "$(bind_addr_scope 100.64.0.1)"
+check "位址分類：100.128.x 不在 CGNAT 段（算公開）" "public" "$(bind_addr_scope 100.128.0.1)"
+# **這一條是整個分類存在的理由。**
+check "位址分類：公開 IPv4 是 public，不是 private" "public" "$(bind_addr_scope 203.0.113.5)"
+check "位址分類：公開 IPv6 是 public" "public" "$(bind_addr_scope '2001:db8::1')"
+check "位址分類：[fd00::1]（ULA，docker port 的寫法）是私有" \
+      "private" "$(bind_addr_scope '[fd00::1]')"
+check "位址分類：[fe80::1]（link-local）是私有" \
+      "private" "$(bind_addr_scope '[fe80::1]')"
+check "位址分類：空的回 unknown" "unknown" "$(bind_addr_scope '')"
+# 認不出來的東西不可以被歸進安全的那一類（fail-closed）。
+check "位址分類：認不出來的回 unknown" "unknown" "$(bind_addr_scope 'some-hostname')"
+
+# ── port_bind_scope：整個埠的綁定，多條取最寬的 ──
+check "整體綁定：只有 loopback" "loopback" \
+      "$(port_bind_scope '3000/tcp -> 127.0.0.1:3000')"
+check "整體綁定：萬用位址" "wildcard" \
+      "$(port_bind_scope '3000/tcp -> 0.0.0.0:3000')"
+check "整體綁定：IPv6 的 [::]" "wildcard" \
+      "$(port_bind_scope '3000/tcp -> [::]:3000')"
+check "整體綁定：這個 lab 現在的綁定是私有（不是 loopback）" "private" \
+      "$(port_bind_scope '3000/tcp -> 192.168.44.128:3000')"
+check "整體綁定：公開位址" "public" \
+      "$(port_bind_scope '3000/tcp -> 203.0.113.5:3000')"
+# 多條綁定取**最寬**的 —— 只要有一條公開，其餘是 loopback 也救不回來。
+check "整體綁定：多條取最寬（有公開就是公開）" "public" \
+      "$(port_bind_scope $'3000/tcp -> 127.0.0.1:3000\n3000/tcp -> 203.0.113.5:3000')"
+check "整體綁定：多條取最寬（有私有就不是 loopback）" "private" \
+      "$(port_bind_scope $'3000/tcp -> 127.0.0.1:3000\n3000/tcp -> 10.0.0.5:3000')"
+check "整體綁定：多條取最寬（順序反過來也一樣）" "public" \
+      "$(port_bind_scope $'3000/tcp -> 203.0.113.5:3000\n3000/tcp -> 127.0.0.1:3000')"
+# 讀不到、以及解析不出位址，都不可以被當成 loopback —— 那正是原本那個
+# fail-open 的形狀（把「我不知道」講成「沒問題」）。
+check "整體綁定：讀不到 → unknown，不是 loopback" "unknown" "$(port_bind_scope '')"
+check "整體綁定：解析不出位址 → unknown，不是 loopback" "unknown" \
+      "$(port_bind_scope '3000/tcp')"
+# 解析出一個認不得的位址也一樣：unknown 在縮減裡不可以被 loopback 吃掉。
+check "整體綁定：認不出來的位址 → unknown，不是 loopback" "unknown" \
+      "$(port_bind_scope '3000/tcp -> some-hostname:3000')"
+
+# ═══════════════════════════════════════════════════════════
 # exposure_gate_verdict —— 0／1／2／3 是四個不同的處置
 # ═══════════════════════════════════════════════════════════
 check "閘門：0 是通過" "pass" "$(exposure_gate_verdict 0 strict)"
