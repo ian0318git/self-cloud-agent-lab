@@ -66,6 +66,42 @@ SKIP = "未執行"
 UNKNOWN = "無法判定"
 
 
+# ── 生成請求的兩個上限 ──────────────────────────────────────
+#
+# 這裡曾經是寫死的 16，而它是一個**假失敗**的成因：Qwen3 這類「先思考再回答」
+# 的模型會把預算整個花在思考段，`content` 因此是空的、`finish_reason` 是
+# `length` —— 探針於是把一個完全正常的 runtime 判成未通過，connect-endpoint.sh
+# 也就照著結束碼拒絕寫入設定。探針的說明自己寫著「假失敗比漏報更糟」，
+# 而這次它對自己做了同一件事。
+#
+# 根因是把兩件事混為一談：**「要求一句短的回答」與「只准它用 16 個 token」**。
+# 前者由 prompt 決定；後者什麼都沒買到 —— `max_tokens` 是**上限，不是成本**，
+# 模型自然停下時，上限設多大都跑一樣快。實測 qwen3:8b 回答「好」這一個字要
+# 用掉 200 個 token（其中 338 個字元是思考），16 只是保證它被腰斬，換不到
+# 任何速度。
+#
+# 所以上限要**大到讓模型自己停**（與 D-036／D-037 對 num_predict 立的規矩
+# 同一條），而「夠不夠」由 `finish_reason` 判定，不是由這個數字保證。
+CHAT_MAX_TOKENS = 1024
+
+# 生成請求的逾時下限。
+#
+# 同一個「上限設錯方向」的形狀：`--timeout` 的預設 120 秒對 `/v1/models`
+# 綽綽有餘，對**生成**卻不然。實測本機 CPU 上 qwen3:8b 暖機後回一句話要
+# 98 秒，冷啟動（把 5.2 GB 讀進記憶體）要 283 秒 —— 也就是說 120 秒距離
+# 一個**假**「無法判定」只剩 18% 的餘裕，而那個假結論會叫使用者去查一個
+# 沒有問題的網路。
+#
+# 所以生成請求用 `max(--timeout, 這個值)`：`--timeout` 是**下限**，不是上限。
+# 取 600 是最壞情況的約兩倍 —— 冷啟動 ＋ 用滿預算的生成 ≈ 380 秒。
+GENERATION_TIMEOUT = 600
+
+
+def _generation_timeout(timeout):
+    """生成請求的逾時。`--timeout` 是下限而非上限，理由見 GENERATION_TIMEOUT。"""
+    return max(timeout, GENERATION_TIMEOUT)
+
+
 def _is_private_host(base):
     """端點是否在私有網路上。
 
@@ -196,18 +232,20 @@ def probe(base, api_key, model, timeout):
     print(f"      使用模型：{model_id}", flush=True)
 
     # ── 2. 非串流 chat completion ───────────────────────
-    # 這是上層真正會走的路徑。要求一句極短的回應以縮短等待。
+    # 這是上層真正會走的路徑。prompt 只要求一句極短的回應，但**預算不跟著
+    # 縮小** —— 理由見 CHAT_MAX_TOKENS：上限不是成本，設小了只會腰斬
+    # 先思考再回答的模型，換不到速度。
     t0 = time.time()
     status, body = _request(
         f"{base}/chat/completions",
         payload={
             "model": model_id,
             "messages": [{"role": "user", "content": "回答一個字：好"}],
-            "max_tokens": 16,
+            "max_tokens": CHAT_MAX_TOKENS,
             "stream": False,
         },
         api_key=api_key,
-        timeout=timeout,
+        timeout=_generation_timeout(timeout),
     )
     wall = time.time() - t0
     if status is None:
@@ -218,15 +256,33 @@ def probe(base, api_key, model, timeout):
     else:
         try:
             choice = json.loads(body)["choices"][0]
-            content = (choice.get("message") or {}).get("content") or ""
+            msg = choice.get("message") or {}
+            content = msg.get("content") or ""
+            finish = choice.get("finish_reason")
+            # 思考段的欄位名各家不同（Ollama 用 `reasoning`，其他實作常見
+            # `reasoning_content`）。它只拿來當**診斷訊息**，不當判準 ——
+            # 判準是 `finish_reason`，因為那才是協定有定義的欄位。
+            reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
             if content.strip():
                 p.add("POST /v1/chat/completions", PASS,
                       f"{wall:.1f}s，回應 {_short(content, 40)}")
-            else:
-                # 空 content 不是「通過」—— 上層拿到的是空字串，
-                # 但 HTTP 是 200，呼叫端會以為成功（D-014 的假通過形狀）。
+            elif finish == "length":
+                # 被截斷。**這是我們的預算不夠，不是 runtime 壞掉** ——
+                # 訊息必須說得出這件事，否則下一個人會去修一個沒壞的東西
+                # （D-016：假失敗比漏報更糟）。
+                #
+                # 但它仍然是「未通過」：上層拿到的會是 HTTP 200 ＋ 空字串，
+                # 畫面一片空白（D-014 的假通過形狀），而空白比報錯更難查。
                 p.add("POST /v1/chat/completions", FAIL,
-                      f"{wall:.1f}s，HTTP 200 但 content 為空")
+                      f"{wall:.1f}s，{CHAT_MAX_TOKENS} 個 token 的預算內沒有產出 "
+                      f"content（finish_reason=length，思考段 {len(reasoning)} 字元）"
+                      f" —— 這個模型需要更大的思考預算")
+            else:
+                # 模型自己停下來了卻什麼都沒說 —— 這才是 D-014 的假通過形狀
+                # 本身，與上面那條（被我們腰斬）是不同的病，訊息必須分得開。
+                p.add("POST /v1/chat/completions", FAIL,
+                      f"{wall:.1f}s，HTTP 200 但 content 為空"
+                      f"（finish_reason={finish}）")
         except Exception as exc:  # noqa: BLE001
             p.add("POST /v1/chat/completions", FAIL,
                   f"回應不是 OpenAI 格式：{exc} {_short(body, 120)}")
@@ -238,11 +294,11 @@ def probe(base, api_key, model, timeout):
         payload={
             "model": model_id,
             "messages": [{"role": "user", "content": "回答一個字：好"}],
-            "max_tokens": 16,
+            "max_tokens": CHAT_MAX_TOKENS,
             "stream": True,
         },
         api_key=api_key,
-        timeout=timeout,
+        timeout=_generation_timeout(timeout),
         accept="text/event-stream",
         stream=True,
     )
@@ -251,23 +307,39 @@ def probe(base, api_key, model, timeout):
     elif status != 200:
         p.add("串流（SSE）", FAIL, f"HTTP {status}")
     else:
-        chunks, done, raw = 0, False, []
+        chunks, done, raw, streamed = 0, False, [], 0
         try:
             for line in resp:
                 line = line.decode("utf-8", "replace").strip()
-                if line.startswith("data:"):
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        done = True
-                        break
-                    if payload:
-                        chunks += 1
-                        if len(raw) < 3:
-                            raw.append(payload)
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    done = True
+                    break
+                if not payload:
+                    continue
+                chunks += 1
+                if len(raw) < 3:
+                    raw.append(payload)
+                try:
+                    delta = json.loads(payload)["choices"][0].get("delta") or {}
+                    streamed += len(delta.get("content") or "")
+                except Exception:  # noqa: BLE001 - 單一 chunk 不符格式不該中斷整條串流
+                    pass
         finally:
             resp.close()
-        if chunks and done:
-            p.add("串流（SSE）", PASS, f"{chunks} 個 chunk，收到 [DONE]")
+        if chunks and done and streamed:
+            p.add("串流（SSE）", PASS,
+                  f"{chunks} 個 chunk，回應 {streamed} 個字元，收到 [DONE]")
+        elif chunks and done:
+            # 串流機制本身是好的（chunk 有來、[DONE] 有到），但整條串流裡
+            # 沒有一個字進到 `content` —— 思考型模型的 token 全在 `reasoning`。
+            # 這與非串流那項是同一個盲點：只算 chunk 數的話，這裡會**通過
+            # 一個空回答**，而上層顯示的就是一片空白。
+            p.add("串流（SSE）", FAIL,
+                  f"{chunks} 個 chunk 且收到 [DONE]，但整條串流沒有任何 content"
+                  f"（{CHAT_MAX_TOKENS} 個 token 的預算內）")
         elif chunks:
             # 有 chunk 但沒有 [DONE]：多數前端仍能顯示，但串流沒有正常結束。
             p.add("串流（SSE）", FAIL, f"{chunks} 個 chunk，但未收到 [DONE]")
@@ -281,13 +353,16 @@ def probe(base, api_key, model, timeout):
     # 這一項的判定取決於端點在私有網路還是公開網址（見 _is_private_host）：
     # 判準不是「有沒有認證」，而是「**這個位置**沒有認證能不能接受」。
     if api_key:
+        # 這一項的預算刻意停在 4（不跟著 CHAT_MAX_TOKENS 放大）：判準是
+        # **狀態碼**，不是回應內容 —— 內容一個字都不會被讀，預算開大只是
+        # 讓一個思考型模型多花時間思考一段沒有人看的文字。
         status, body = _request(
             f"{base}/chat/completions",
             payload={"model": model_id,
                      "messages": [{"role": "user", "content": "hi"}],
                      "max_tokens": 4},
             api_key=None,          # 刻意不帶金鑰
-            timeout=timeout,
+            timeout=_generation_timeout(timeout),
         )
         if status == 200:
             if _is_private_host(base):

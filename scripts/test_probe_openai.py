@@ -159,6 +159,140 @@ try:
 finally:
     p._request = _orig_request
 
+
+# ── 思考型模型的假失敗（2026-09-24）────────────────────────
+#
+# 這一組是**迴歸測試**，對應一個讓 Kaggle runtime 接不上來的缺陷：兩個 chat
+# 檢查都用寫死的 `max_tokens: 16`，而 Qwen3 這類「先思考再回答」的模型會把
+# 那 16 個 token 全部花在思考段 —— `content` 是空的、`finish_reason` 是
+# `length`，於是探針把一個完全正常的 runtime 判成未通過，
+# connect-endpoint.sh 照著結束碼拒絕寫入設定。實測 qwen3:8b 回答「好」這一個
+# 字要用掉 200 個 token，16 是它的 1/12。
+#
+# **判準是 `finish_reason`，不是「content 是不是空的」。** 兩件事都會讓
+# content 變空，而它們的下一步完全相反：
+#   `length` → 我們的預算不夠，去把 CHAT_MAX_TOKENS 開大
+#   `stop`   → 模型自己停了卻什麼都沒說，那才是 runtime 的問題（D-014）
+# 併在一起正是這個缺陷當初能存在的原因。
+
+_MODELS_OK = (200, json.dumps({"data": [{"id": "m1"}]}))
+
+
+def _chat_body(content="", finish="stop", reasoning=None):
+    msg = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        msg["reasoning"] = reasoning
+    return json.dumps({"choices": [{"index": 0, "message": msg,
+                                    "finish_reason": finish}]})
+
+
+def _sse(*deltas, done=True):
+    """把 delta 串成 SSE 主體。
+
+    形狀要跟真的回應一致：`_request(stream=True)` 交出來的是**可迭代、可 close
+    的檔案物件**（探針在 `finally` 裡呼叫 `resp.close()`）。回傳字串或 list
+    會讓替身自己爆掉 —— 那時紅的是測試，不是被測的程式。
+    """
+    lines = []
+    for d in deltas:
+        body = json.dumps({"choices": [{"index": 0, "delta": d,
+                                        "finish_reason": None}]})
+        lines.append("data: " + body)
+    if done:
+        lines.append("data: [DONE]")
+    return io.BytesIO(("\n".join(lines) + "\n").encode())
+
+
+def _result(probe, name):
+    for n, s, d in probe.results:
+        if n == name:
+            return s, d
+    return None, None
+
+
+def _probe_with(chat_body=None, sse=None, seen=None):
+    """跑一次探針，chat 回應由呼叫端指定；`seen` 收下每個請求的 payload。
+
+    輸出吞掉：這裡的斷言看的是 `probe.results`，六次探針的逐項列印只會蓋掉
+    真正該看的訊息。
+    """
+    def handler(url, payload):
+        if seen is not None and payload is not None:
+            seen.append((url, payload))
+        if url.endswith("/models"):
+            return _MODELS_OK
+        if payload and payload.get("stream"):
+            # 串流請求一律回檔案物件，沒指定內容時給空串流 —— 但**仍然要**是
+            # 檔案物件，理由見 _sse。
+            return (200, sse if sse is not None else io.BytesIO(b""))
+        if chat_body is not None:
+            return (200, chat_body)
+        return (500, "boom")
+
+    p._request = _fake_request_factory(handler)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return p.probe("http://x:1/v1", "", "m1", 5)[0]
+    finally:
+        p._request = _orig_request
+
+
+# 模型被我們的預算腰斬 → 未通過，但訊息必須指向**預算**，不是 runtime。
+_truncated = _probe_with(chat_body=_chat_body(content="", finish="length",
+                                              reasoning="好的，用户让我用一个字回答…"))
+_state, _detail = _result(_truncated, "POST /v1/chat/completions")
+assert _state == p.FAIL, "被腰斬的模型不該通過 —— 上層拿到的是 HTTP 200 ＋ 空字串"
+assert str(p.CHAT_MAX_TOKENS) in _detail, \
+    "訊息必須說出預算數字，否則下一個人會去修一個沒壞的 runtime"
+assert "length" in _detail, "要說出被截斷，不能只說『content 為空』"
+
+# 模型自己停了卻什麼都沒說 → 這也是未通過，但訊息與上一條**必須不同**：
+# 這一條才是 D-014 的假通過形狀本身，處方不是調預算。
+_empty_stop = _probe_with(chat_body=_chat_body(content="", finish="stop"))
+_state2, _detail2 = _result(_empty_stop, "POST /v1/chat/completions")
+assert _state2 == p.FAIL, "HTTP 200 ＋ 空 content 是 D-014 的假通過形狀"
+assert _detail2 != _detail, \
+    "被截斷與自己停下來是兩種病，訊息不可相同（下一步完全相反）"
+assert "stop" in _detail2 and str(p.CHAT_MAX_TOKENS) not in _detail2, \
+    "自己停下來的，不該叫使用者去調預算"
+
+# 正常模型照樣通過。
+_ok = _probe_with(chat_body=_chat_body(content="好"), sse=_sse({"content": "好"}))
+assert _result(_ok, "POST /v1/chat/completions")[0] == p.PASS
+assert _result(_ok, "串流（SSE）")[0] == p.PASS
+
+# 兩個 chat 檢查都必須送 CHAT_MAX_TOKENS —— 這是**結構性**的守衛，
+# 不是靠自律：兩處只要有一處漂回寫死的值，這個缺陷就會從那個出口回來。
+_seen = []
+_probe_with(chat_body=_chat_body(content="好"), sse=_sse({"content": "好"}),
+            seen=_seen)
+_budgets = [pl["max_tokens"] for u, pl in _seen if u.endswith("/chat/completions")]
+assert _budgets == [p.CHAT_MAX_TOKENS, p.CHAT_MAX_TOKENS], \
+    f"非串流與串流都要用 CHAT_MAX_TOKENS，實得 {_budgets}"
+
+# 陷阱線，不是推導：防的是有人把它改回 16。真正的判準是 finish_reason。
+assert p.CHAT_MAX_TOKENS >= 512, \
+    "預算要大到能吸收思考型模型（實測需要 200），理由見 CHAT_MAX_TOKENS 的註解"
+
+# 逾時：`--timeout` 是**下限**，生成請求至少拿到 GENERATION_TIMEOUT 秒。
+assert p._generation_timeout(5) == p.GENERATION_TIMEOUT
+assert p._generation_timeout(120) == p.GENERATION_TIMEOUT
+assert p._generation_timeout(99999) == 99999, "--timeout 比下限大時要聽使用者的"
+
+# 串流有 chunk、有 [DONE]，但整條串流沒有一個字進到 content → 未通過。
+# 同一個盲點的第二個出口：只算 chunk 數的話，這裡會通過一個空回答。
+_stream_empty = _probe_with(
+    chat_body=_chat_body(content="好"),
+    sse=_sse({"role": "assistant", "content": "", "reasoning": "好的"},
+             {"content": "", "reasoning": "，"}))
+assert _result(_stream_empty, "串流（SSE）")[0] == p.FAIL, \
+    "整條串流沒有 content 卻判通過 —— 上層顯示的會是一片空白"
+
+# 沒有 [DONE] 仍然是未通過（既有行為，不因這次改動而放寬）。
+_stream_node = _probe_with(chat_body=_chat_body(content="好"),
+                           sse=_sse({"content": "好"}, done=False))
+assert _result(_stream_node, "串流（SSE）")[0] == p.FAIL, "串流沒有正常結束仍是未通過"
+
 # ── 探針只說 OpenAI 協定，不得依賴任何廠商 SDK ──────────────
 # 若它用了廠商 SDK，驗到的就是那個 SDK 的相容性，而不是協定的相容性 ——
 # 那樣「任何相容的 runtime 都能接手」這句話就不成立了。
