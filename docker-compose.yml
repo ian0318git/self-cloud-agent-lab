@@ -27,6 +27,11 @@ services:
       # 寫死會讓「換 VPS 只要改 .env」這件事變成「換 VPS 要改 compose」，
       # 而後者會讓改動散進版控、變得難以回溯。
       #
+      # GPU 也走同一條路（不再是例外）：deploy-vps.sh 依 .env 的 OLLAMA_GPU
+      # 與偵測結果，把 docker-compose.gpu.yml 接到 COMPOSE_FILE 上。所以這個
+      # 檔案本身**仍然沒有任何 device reservation** —— 那是刻意的，CPU 路徑
+      # 一字未改，要 GPU 是「多一個檔案」而不是「改這個檔案」（D-056）。
+      #
       # 同時只載入一個模型，避免在 8GB 機器上把記憶體吃光
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
       # 單一平行請求，降低 KV cache 佔用的記憶體。

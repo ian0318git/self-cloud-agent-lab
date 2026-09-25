@@ -375,9 +375,91 @@ check "env：key 本身是別的鍵的前綴時只改自己" \
   $'A=1\nAB=127.0.0.1' \
   "$(upsert AB $'A=1\nAB=x\n' 127.0.0.1)"
 
+# ═══════════════════════════════════════════════════════════
+# gpu_runtime_registered —— 只認完整的鍵，不認子串
+# ═══════════════════════════════════════════════════════════
+
+check "gpu runtime：沒裝 toolkit 的機器（本機實測的形狀）" "no" \
+  "$(gpu_runtime_registered '{"io.containerd.runc.v2":{},"runc":{}}')"
+check "gpu runtime：裝了 nvidia-container-toolkit 之後" "yes" \
+  "$(gpu_runtime_registered '{"io.containerd.runc.v2":{},"nvidia":{},"runc":{}}')"
+
+# **下面兩條是這個函式存在的理由。** 子串比對會把這兩個都當成 yes，於是
+# 我們把裝置保留區掛上去，compose 再用一個不存在的 runtime 起容器。
+check "gpu runtime：nvidia-experimental 不算（子串比對會誤判）" "no" \
+  "$(gpu_runtime_registered '{"nvidia-experimental":{},"runc":{}}')"
+check "gpu runtime：my-nvidia 不算" "no" \
+  "$(gpu_runtime_registered '{"my-nvidia":{},"runc":{}}')"
+check "gpu runtime：空字串（docker info 失敗）" "no" "$(gpu_runtime_registered '')"
+
+# ═══════════════════════════════════════════════════════════
+# gpu_verdict —— 12 格真值表逐格測。掛不掛 GPU override 全靠它
+# ═══════════════════════════════════════════════════════════
+
+# 有硬體、有 runtime
+check "gpu：有硬體有 runtime，auto → 用 GPU" "gpu" "$(gpu_verdict yes yes auto)"
+check "gpu：有硬體有 runtime，on → 用 GPU" "gpu" "$(gpu_verdict yes yes on)"
+check "gpu：有硬體有 runtime，off → 尊重使用者" "cpu" "$(gpu_verdict yes yes off)"
+
+# **這一列是這次改動的核心。** 有 GPU 但 runtime 沒裝好：那種機器上 compose
+# 起得來、模型載得進、每個請求都答得出來，**只有速度是錯的** —— 沒有症狀的
+# 失敗。所以 auto 也必須擋，不能只警告。
+check "gpu：有硬體但沒 runtime，auto → 擋（核心案例）" "blocked" "$(gpu_verdict yes no auto)"
+check "gpu：有硬體但沒 runtime，on → 擋" "blocked" "$(gpu_verdict yes no on)"
+check "gpu：有硬體但沒 runtime，off → CPU（使用者選的）" "cpu" "$(gpu_verdict yes no off)"
+
+# 沒硬體
+check "gpu：沒硬體，auto → CPU（正常情況）" "cpu" "$(gpu_verdict no no auto)"
+check "gpu：沒硬體，on → 擋（要了卻給不出來）" "blocked" "$(gpu_verdict no no on)"
+check "gpu：沒硬體，off → CPU" "cpu" "$(gpu_verdict no no off)"
+
+# 有 runtime 但沒裝置 —— docker 註冊了這條 runtime 不代表有卡
+check "gpu：有 runtime 但沒硬體，auto → CPU" "cpu" "$(gpu_verdict no yes auto)"
+check "gpu：有 runtime 但沒硬體，on → 擋" "blocked" "$(gpu_verdict no yes on)"
+check "gpu：有 runtime 但沒硬體，off → CPU" "cpu" "$(gpu_verdict no yes off)"
+
+# 全部省略時的預設必須落在「什麼都不改變」那一邊
+check "gpu：參數全省略 → CPU（預設不碰 GPU 設定）" "cpu" "$(gpu_verdict)"
+
+# ═══════════════════════════════════════════════════════════
+# env_remove —— 與 env_upsert 對稱，守的是同一件事：.env 不可以說謊
+# ═══════════════════════════════════════════════════════════
+remove() { printf '%s' "$2" | env_remove "$1"; }
+remove_raw() { printf '%s' "$2" | env_remove "$1"; printf '⟨END⟩'; }
+
+# **為什麼「移除」必須存在**：COMPOSE_FILE 只要存在（即使指向唯一那個檔），
+# compose 就**不再自動載入** docker-compose.override.yml。所以「不用 GPU」
+# 的正確表示是**這行不存在**，不是「這行等於預設值」。
+check "env_remove：生效的行被移除" \
+  $'A=1\nB=2' \
+  "$(remove COMPOSE_FILE $'A=1\nCOMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml\nB=2\n')"
+
+# 重複的生效行要**全部**移除。留一行就是留一個生效的設定，而那正是
+# env_upsert 存在的理由的鏡像。
+check "env_remove：重複的生效行全部移除" \
+  $'A=1' \
+  "$(remove COMPOSE_FILE $'COMPOSE_FILE=a\nA=1\nCOMPOSE_FILE=b\n')"
+
+check "env_remove：本來就沒有這個鍵時原樣不動" \
+  $'A=1\nB=2' \
+  "$(remove COMPOSE_FILE $'A=1\nB=2\n')"
+
+check "env_remove：註解掉的行原樣保留" \
+  $'# COMPOSE_FILE=x\nA=1' \
+  "$(remove COMPOSE_FILE $'# COMPOSE_FILE=x\nA=1\n')"
+
+check "env_remove：前綴相同的鍵不受影響" \
+  $'COMPOSE_FILE_EXTRA=z\nA=1' \
+  "$(remove COMPOSE_FILE $'COMPOSE_FILE_EXTRA=z\nA=1\n')"
+
+# 與 env_upsert 的 upsert_raw 同一個坑：最後一行沒有換行時不可以被吃掉
+check "env_remove：沒有結尾換行的檔案，最後一行還在" \
+  $'A=1\nB=2\n⟨END⟩' \
+  "$(remove_raw COMPOSE_FILE $'A=1\nCOMPOSE_FILE=x\nB=2')"
+
 echo
 if [[ "$FAILED" -gt 0 ]]; then
   fail "$FAILED 個案例沒過，$PASS 個過"
   exit 1
 fi
-ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻與 .env 的每一條邊界都有測試守著"
+ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻、GPU 三態與 .env 的每一條邊界都有測試守著"

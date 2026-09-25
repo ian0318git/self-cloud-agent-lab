@@ -121,6 +121,12 @@ DEFAULT_TIMEOUT = 600
 # 煙霧測試用的 prompt。要求短、可重現、不引發長篇推理。
 SMOKE_PROMPT = "Reply with exactly this word: ok"
 
+# GPU 檢查前那次「把模型載進來」的小生成要保留多久。**這不是效能設定，是
+# 判準的一部分**：載完立刻讀 /api/ps，中間不能有卸載的空窗，所以用明確的
+# keep_alive 而不是讓它取決於 .env 的 OLLAMA_KEEP_ALIVE（判準不可以取決於
+# 一個可設定的值 —— 否則「驗證通過」會與「模型剛好還在」混在一起）。
+GPU_CHECK_KEEP_ALIVE = "5m"
+
 
 # ─────────────────────────────────────────────────────────
 # 純函式（離線可測，見 scripts/test_deploy_smoke_probe.py）
@@ -225,6 +231,38 @@ def smoke_verdict(response, num_predict):
     )
 
 
+def _find_loaded(ps, model, what):
+    """在 /api/ps 的清單裡找出我們問的那個模型。回 (entry, reason)。
+
+    名字比對走 normalize_model —— 與 lib.sh 的同一條規則：使用者寫 `qwen3`、
+    ollama 回報 `qwen3:latest`，那是同一個模型，不該被判成「不在清單裡」。
+
+    `what` 只餵給「無法判定 ___」那半句話。ctx 與 gpu 要問的是同一份清單的
+    同一個模型，只有後半句不同 —— 所以查找留在這裡一份，診斷留在呼叫端。
+    """
+    if not isinstance(ps, dict):
+        return None, "回應不是 JSON 物件（%s）—— 無法判定 %s" % (type(ps).__name__, what)
+
+    models = ps.get("models")
+    if not isinstance(models, list):
+        return None, "回應裡沒有 models 清單 —— 無法判定 %s" % what
+
+    want = normalize_model(model)
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("model") or ""
+        if normalize_model(name) != want:
+            continue
+        return entry, None
+
+    return None, (
+        "模型 %s 不在 /api/ps 的清單裡（目前載入的是 %r）—— 模型可能已被卸載，"
+        "或名字對不上，所以**量不到** %s"
+        % (model, [e.get("name") for e in models if isinstance(e, dict)], what)
+    )
+
+
 def ctx_verdict(ps, model, expected):
     """比對 ollama **目前載入的那個模型**的 context_length。回 (ok, reason)。
 
@@ -238,43 +276,113 @@ def ctx_verdict(ps, model, expected):
     /api/ps 的 context_length 是**現在生效的 num_ctx**，不是模型的最大值
     —— 與 mem0_add_cost_probe.py 的 _ps_lookup() 讀的是同一個欄位。
     """
-    if not isinstance(ps, dict):
-        return None, "回應不是 JSON 物件（%s）—— 無法判定 num_ctx" % type(ps).__name__
+    entry, why = _find_loaded(ps, model, "num_ctx")
+    if entry is None:
+        return None, why
 
-    models = ps.get("models")
-    if not isinstance(models, list):
-        return None, "回應裡沒有 models 清單 —— 無法判定 num_ctx"
+    got = entry.get("context_length")
+    if not isinstance(got, int):
+        return None, (
+            "模型 %s 有載入，但讀不到 context_length（拿到 %r）"
+            "—— 無法判定 num_ctx" % (model, got)
+        )
+    if got == expected:
+        return True, "context_length=%d，與要求的 --num-ctx 相符" % got
+    return False, (
+        "context_length=%d，不是要求的 %d —— 這個設定**沒有生效**。"
+        "堆疊本身是好的、可以用，但 mem0 的抽取 prompt 這下就沒有保障了："
+        "低於 8101 會被**截斷**（D-027），8101～10100 之間雖然進得去、"
+        "但生成途中會被 **context shift** 從中段掏掉一整塊（D-035，"
+        "8192 之下餘裕只有 140 個 token）。要完整需要 >= 10101"
+        % (got, expected)
+    )
 
-    want = normalize_model(model)
-    for entry in models:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name") or entry.get("model") or ""
-        if normalize_model(name) != want:
-            continue
-        got = entry.get("context_length")
-        if not isinstance(got, int):
+
+def gpu_verdict(ps, model):
+    """模型現在有多少比例真的在 GPU 上。回 (ok, reason)。
+
+    ok 沿用本檔既有的三態：True＝確定全部在 GPU、False＝確定**不在** GPU、
+    None＝部分卸載或無法判定。
+
+    **為什麼讀 /api/ps 而不是讀 compose 檔或設定檔**：`deploy.resources
+    .reservations.devices` 是**宣告**，它只證明我們「要求了」GPU，不證明
+    ollama 用上了。這個專案已經在「宣告面 ≠ 執行面」上跌過兩次（endpoint
+    boot 沒加 `-g` 會把 accelerator 覆寫成 cpu、`.env` 的 `KEEP_ALIVE=-1`
+    靜默蓋掉 compose 的 5m），D-055 §二 記著這個堆疊會是第三次 —— 而且這次
+    連症狀都沒有，只是慢。`size_vram` 是 ollama 自己回報的**實際配置**，
+    那是執行面，不是宣告面。
+
+    與 ctx_verdict 讀的是同一份 /api/ps，只是看不同的欄位。
+    """
+    entry, why = _find_loaded(ps, model, "用了多少 GPU")
+    if entry is None:
+        return None, why
+
+    total = entry.get("size")
+    vram = entry.get("size_vram")
+    # bool 是 int 的子類，所以要另外擋 —— 不然 True 會被當成 1 byte。
+    for value in (total, vram):
+        if isinstance(value, bool) or not isinstance(value, int):
             return None, (
-                "模型 %s 有載入，但讀不到 context_length（拿到 %r）"
-                "—— 無法判定 num_ctx" % (model, got)
+                "模型 %s 有載入，但 size/size_vram 不是整數（拿到 %r／%r）"
+                "—— 無法判定用了多少 GPU" % (model, total, vram)
             )
-        if got == expected:
-            return True, "context_length=%d，與要求的 --num-ctx 相符" % got
-        return False, (
-            "context_length=%d，不是要求的 %d —— 這個設定**沒有生效**。"
-            "堆疊本身是好的、可以用，但 mem0 的抽取 prompt 這下就沒有保障了："
-            "低於 8101 會被**截斷**（D-027），8101～10100 之間雖然進得去、"
-            "但生成途中會被 **context shift** 從中段掏掉一整塊（D-035，"
-            "8192 之下餘裕只有 140 個 token）。要完整需要 >= 10101"
-            % (got, expected)
+
+    if total <= 0:
+        return None, (
+            "模型 %s 回報的 size 是 %d —— 這個數字不能用來判斷比例，"
+            "所以**量不到**" % (model, total)
         )
 
+    if vram == total:
+        return True, (
+            "模型 %s：size_vram=%d 等於 size=%d —— 整顆模型都在 GPU 上"
+            % (model, vram, total)
+        )
 
+    if vram == 0:
+        return False, (
+            "模型 %s 在 CPU 上：size_vram=0（size=%d）—— 我們要求了 GPU，"
+            "而 ollama 一個位元組都沒放上去。\n"
+            "  → 這不是「慢」，是「我們宣稱的事沒有發生」。先確認 "
+            "docker-compose.gpu.yml 掛上去了（.env 的 COMPOSE_FILE），"
+            "再確認容器裡看得到裝置：\n"
+            "     docker compose exec ollama nvidia-smi -L\n"
+            "  要刻意跑 CPU 請在 .env 設 OLLAMA_GPU=off，讓它是**選擇**"
+            "而不是意外。" % (model, total)
+        )
+
+    pct = 100.0 * vram / total
     return None, (
-        "模型 %s 不在 /api/ps 的清單裡（目前載入的是 %r）—— 模型可能已被卸載，"
-        "或名字對不上，所以**量不到** num_ctx"
-        % (model, [e.get("name") for e in models if isinstance(e, dict)])
+        "模型 %s 部分卸載：只有 %.0f%%（size_vram=%d／size=%d）在 GPU 上。\n"
+        "  → 這是真的量測，不是判準沒過：GPU 確實在用，但 VRAM 裝不下"
+        "整顆模型，所以 ollama 把剩下的層放到系統記憶體，速度會塌掉"
+        "（README 記的是 10–50× 差，不是 20%% 差）。要修是**縮小模型或"
+        "縮小 context**，不是重跑一次。" % (model, pct, vram, total)
     )
+
+
+# ─────────────────────────────────────────────────────────
+# 共用的請求形狀
+# ─────────────────────────────────────────────────────────
+
+
+def _chat_payload(model, prompt, options, keep_alive=None):
+    """`/api/chat` 的請求本體。兩個呼叫端（煙霧與 GPU）共用這一份。
+
+    `stream` **一定**是 False，而且它只寫在這裡 —— 忘了關的話讀到的是一串
+    NDJSON，判定會安静地錯到底，所以這條規則不該有第二份副本可以漂移。
+    `keep_alive` 只有 GPU 那條路要指定（見 run_gpu）。
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": options,
+    }
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    return payload
 
 
 # ─────────────────────────────────────────────────────────
@@ -317,18 +425,35 @@ def _err_text(parsed):
     return str(parsed)[:400]
 
 
+def _http_error(parsed, status, doing):
+    """ollama 的 HTTP 錯誤分成兩類（D-018）。`doing` 是「我們當時在做什麼」。
+
+    「模型不在」是**環境狀態**（2）—— 還沒拉、或名字拼錯；其他 4xx/5xx 是
+    **我們送的請求有問題**（3）。兩者都會印「失敗」，但該去查的地方相反，
+    所以煙霧與 GPU 兩條路共用這一份分類，不各寫一份（重複的那份會漂移）。
+    """
+    low = _err_text(parsed).lower()
+    detail = "%s（HTTP %d）：%s" % (doing, status, _err_text(parsed))
+    if "not found" in low or "no such model" in low:
+        return EXIT_INDETERMINATE, (
+            "ollama 說找不到模型 —— %s\n"
+            "  → 模型還沒拉，或名字拼錯。這是環境狀態，不是模型答錯。" % detail
+        )
+    return EXIT_BROKEN, (
+        "ollama 回了錯誤 —— %s\n"
+        "  → 這不是「模型答錯」，是請求本身有問題（參數或 API 形狀）。" % detail
+    )
+
+
 def run_smoke(model, num_predict, timeout):
     # **刻意不送 `think`。** 原本送 `think: false` 並附一段「拿掉推理那個
     # 變項」的說明，但實測顯示它只是把推理搬進 `content`、預算照樣被吃掉
     # （三次量測見檔頭）。不送的話既貼近應用程式的真實請求，`content` 也是
     # 乾淨的答案。連帶地那個「舊版 ollama 不認得 think → 拿掉重試」的分支
     # 也就沒有存在的理由了。
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": SMOKE_PROMPT}],
-        "stream": False,
-        "options": {"temperature": 0, "num_predict": num_predict},
-    }
+    payload = _chat_payload(
+        model, SMOKE_PROMPT, {"temperature": 0, "num_predict": num_predict}
+    )
 
     status, parsed = _request("/api/chat", payload, timeout)
 
@@ -340,18 +465,7 @@ def run_smoke(model, num_predict, timeout):
         )
 
     if status >= 400:
-        low = _err_text(parsed).lower()
-        if "not found" in low or "no such model" in low:
-            return EXIT_INDETERMINATE, (
-                "ollama 說找不到模型 %s（HTTP %d）：%s\n"
-                "  → 模型還沒拉，或名字拼錯。這是環境狀態，不是模型答錯。"
-                % (model, status, _err_text(parsed))
-            )
-        return EXIT_BROKEN, (
-            "ollama 回了 HTTP %d：%s\n"
-            "  → 這不是「模型答錯」，是請求本身有問題（參數或 API 形狀）。"
-            % (status, _err_text(parsed))
-        )
+        return _http_error(parsed, status, "煙霧測試要模型 %s" % model)
 
     ok, reason = smoke_verdict(parsed, num_predict)
     if ok is True:
@@ -382,11 +496,57 @@ def run_ctx(model, expected, timeout):
     return EXIT_INDETERMINATE, reason
 
 
+def run_gpu(model, timeout):
+    """把模型載進來，然後問 ollama 它實際上在哪裡跑。
+
+    **刻意自己觸發一次載入**，不依賴前一個 section 留下的狀態：`ctx` 那節跑完
+    之後模型通常還在記憶體裡，但「還在」取決於 `.env` 的 OLLAMA_KEEP_ALIVE。
+    判準不可以取決於一個可設定的值 —— 否則「驗證通過」會與「模型剛好還沒被
+    卸載」混在一起，而那個差別正好是這支探針存在的理由。
+
+    生成刻意只給 1 個 token：這裡要的是**載入**，不是答案。
+    """
+    payload = _chat_payload(
+        model, "hi", {"num_predict": 1}, keep_alive=GPU_CHECK_KEEP_ALIVE
+    )
+    status, parsed = _request("/api/chat", payload, timeout)
+
+    if status is None:
+        return EXIT_INDETERMINATE, (
+            "為了做 GPU 檢查而載入模型 %s 時連不上 ollama（%s）：%s"
+            % (model, _base_url(), _err_text(parsed))
+        )
+    if status >= 400:
+        return _http_error(parsed, status, "GPU 檢查要載入模型 %s" % model)
+
+    status, parsed = _request("/api/ps", None, timeout)
+    if status is None:
+        return EXIT_INDETERMINATE, (
+            "連得上 ollama，但讀 /api/ps 失敗（%s）：%s"
+            % (_base_url(), _err_text(parsed))
+        )
+    if status >= 400:
+        return EXIT_BROKEN, "ollama 回了 HTTP %d：%s" % (status, _err_text(parsed))
+
+    ok, reason = gpu_verdict(parsed, model)
+    if ok is True:
+        return EXIT_PASS, reason
+    if ok is False:
+        # **這裡刻意與 ctx 那邊不同：回 1，不是 2。**
+        # ctx 沒生效時堆疊本身還是好的、只是那個開關沒作用，所以那是「要求的
+        # 狀態未成立」。這裡不一樣：我們**已經告訴使用者這台機器在用 GPU**，
+        # 而它沒有 —— 失效的是我們自己的宣稱，不是環境無從判定。這一條就是
+        # #83 要消滅的東西，所以它必須響，不能混進「無法判定」裡被忽略。
+        return EXIT_FAIL, reason
+    return EXIT_INDETERMINATE, reason
+
+
 def _usage():
     return (
         "用法：\n"
         "  python3 - smoke <model> [num_predict]   （預設 num_predict=%d）\n"
         "  python3 - ctx   <model> <expected_ctx>\n"
+        "  python3 - gpu   <model>\n"
         % DEFAULT_NUM_PREDICT
     )
 
@@ -424,6 +584,12 @@ def main(argv):
         except ValueError:
             return _bad_args("expected_ctx 必須是整數：%r" % argv[3])
         rc, reason = run_ctx(model, expected, timeout)
+
+    elif section == "gpu":
+        if len(argv) < 3:
+            return _bad_args(_usage())
+        model = argv[2]
+        rc, reason = run_gpu(model, timeout)
 
     else:
         return _bad_args("未知的 section：%r\n%s" % (section, _usage()))

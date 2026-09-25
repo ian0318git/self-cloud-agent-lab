@@ -443,12 +443,20 @@ the alternative — renting an 80 GB GPU to save money — does not work.
 
 Things that are easy to miss when moving to a GPU instance:
 
-1. **The instance needs the NVIDIA container runtime**, and the compose file needs
-   a `deploy.resources.reservations.devices` block for the ollama service. Ollama's
-   image detects the GPU on its own once the runtime is there.
+1. **The instance needs the NVIDIA container runtime.** The device reservation
+   itself is no longer something you add by hand: `scripts/deploy-vps.sh` detects
+   the GPU and attaches `docker-compose.gpu.yml` (which carries the
+   `deploy.resources.reservations.devices` block) on its own. Ollama's image
+   detects the GPU once the runtime is there. Control it with `OLLAMA_GPU` in
+   `.env` — `auto` (default), `on`, or `off`. With hardware present but no
+   runtime, the script **stops** rather than silently falling back to CPU. And
+   the deploy finishes only after a real inference plus `/api/ps` confirms
+   `size_vram == size` — device visibility and a registered runtime are still
+   just declarations.
 2. **VRAM is a hard wall.** If weights plus KV cache exceed it, ollama offloads
    layers to system RAM and throughput collapses — often 10–50× worse, not 20%
-   worse. Size for the model **and the context**, not just the model.
+   worse. Size for the model **and the context**, not just the model. The deploy
+   script warns (does not block) when the estimate exceeds the detected VRAM.
 3. **Disk speed shows up in the first answer.** Cold load was 71.8 s here for a
    2.5 GB model; the 70B tier is a 43 GB read.
 4. **Never publish 11434.** Ollama has no authentication at all — the "Securing
@@ -633,7 +641,7 @@ change anything they cover.
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences. Its coverage check used to be the worst case of the defect below — under `set -o pipefail` the `printf \| grep -q` form died of SIGPIPE and reported "coverage not established" *precisely when the window covered the most*; it is now a shell pattern match, and the criterion is stated as what it is: **does the producer write again after the reader leaves** (D-034, corrected in D-038 §7) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
 | `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 65 mutations across the three bash modules and the smoke probe, every one must be caught |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 89 mutations across the three bash modules and the smoke probe, every one must be caught |
 | `bash scripts/verify-phase3-runtime.sh` | That `recursion_limit` counts super-steps (+1), that a tight limit aborts only after all the work is done, and that a persistent job store still drops a due job silently under the 1-second default grace (D-030) |
 | `bash scripts/test_phase3_runtime_probe.py` | That the verdicts above have discriminating power offline — no Docker, no langgraph — with every boundary as its own case |
 | `bash scripts/test_phase3_storage_decisions.sh` | That the storage verdicts separate a named volume, a bind mount and a container's temp directory, and that `unknown` is never read as durable |

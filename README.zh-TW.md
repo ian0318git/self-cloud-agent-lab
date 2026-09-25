@@ -402,12 +402,17 @@ KV cache 那一欄是從 **D-022 的「3B 級模型約 36 KiB/token」**換算�
 
 搬到 GPU 機型時容易漏掉的事：
 
-1. **機器要有 NVIDIA container runtime**，compose 的 ollama 服務要加
-   `deploy.resources.reservations.devices`。runtime 到位後 ollama 映像檔會自己
-   認到 GPU。
+1. **機器要有 NVIDIA container runtime。** 裝置保留區本身不必再手加了：
+   `scripts/deploy-vps.sh` 會自己偵測 GPU，並把帶著
+   `deploy.resources.reservations.devices` 的 `docker-compose.gpu.yml` 接上去。
+   runtime 到位後 ollama 映像檔會自己認到 GPU。開關是 `.env` 的 `OLLAMA_GPU`
+   —— `auto`（預設）／`on`／`off`。**有硬體但沒有 runtime 時腳本會停下來**，
+   不會靜默退回 CPU。而且佈署要等到「真的跑一次推論 ＋ 讀 `/api/ps` 確認
+   `size_vram == size`」才算完成 —— 裝置看得到、runtime 有註冊，兩者都還只是
+   宣告面。
 2. **VRAM 是硬牆。** 權重加 KV cache 一旦超過，ollama 會把層卸載到系統記憶體，
    速度是**崩掉**（常常是差 10–50 倍，不是差 20%）。要照「模型**加 context**」估，
-   不是只估模型。
+   不是只估模型。佈署腳本在估算超過偵測到的 VRAM 時會警告（不擋）。
 3. **磁碟速度會出現在第一句話上。** 這台冷啟動載入 2.5 GB 要 71.8 秒；
    70B 那一級是一次 43 GB 的讀取。
 4. **絕對不要發布 11434。** ollama 完全沒有認證機制 —— 在有公開 IP 的機器上，
@@ -583,7 +588,7 @@ bash scripts/up.sh
 | `bash scripts/test_usage_text.sh` | 每一支腳本的 `--help` 只印**它自己的檔頭**、不印別的，而且「印到哪裡停」的判準是**內容**（一直印到第一行非註解、非空行）而不是位置。原本用位置決定的 9 支裡：**4 支把程式碼當說明印出來**（`source …`／`require_docker`）、**1 支在截斷**（`deploy-vps.sh` 的 110 行檔頭只印了 18 行）、**4 支只是剛好對** —— 而「剛好對」才是危險的那一半：它不會失敗，所以也不會有人說什麼。C 節在暫存專案根裡（接假 docker）真的跑 11 支的 `--help`，與**獨立推導**出來的檔頭（另一種算法）逐字比對；D 節掃描寫死行號有沒有回來、以及有沒有一個 `usage_text` 呼叫搆不到定義 —— 這次改動的第一版就是在 `lib.sh` 載入之前呼叫它，結果**什麼都不印、結束碼還是 0**（D-039） |
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
 | `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 65 道突變，每一個都必須被抓到 |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 89 道突變，每一個都必須被抓到 |
 | `bash scripts/verify-phase3-runtime.sh` | `recursion_limit` 算的是 super-step（+1）、太緊的 limit 會在工作全部做完之後才中止、以及持久化的 job store 在 1 秒預設寬限下仍會安靜地丟掉到期的 job（D-030） |
 | `bash scripts/test_phase3_runtime_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 langgraph —— 而且每個邊界都是獨立一個案例 |
 | `bash scripts/test_phase3_storage_decisions.sh` | 儲存判定分得出 named volume、bind mount 與容器的暫存目錄，而且 `unknown` 永遠不會被讀成 durable |

@@ -438,3 +438,69 @@ env_upsert() {
   done
   if [[ "$found" -eq 0 ]]; then printf '%s=%s\n' "$key" "$value"; return 0; fi
 }
+
+# docker info 有沒有註冊 nvidia runtime。輸入是
+# `docker info --format '{{json .Runtimes}}'` 的輸出，例如
+#   {"io.containerd.runc.v2":{},"nvidia":{},"runc":{}}
+#
+# **比對的是 `"nvidia":` 這個完整的鍵，不是子串 `nvidia`。** 差別不是潔癖：
+# 一個叫 `nvidia-experimental` 或 `my-nvidia` 的 runtime 若被當成同一件事，
+# 我們就會把裝置保留區掛上去，然後 compose 用一個不存在的 runtime 起容器 ——
+# 「形狀正確、結論相反」，正是這個檔案存在的原因（見檔頭）。
+gpu_runtime_registered() {
+  local text="${1:-}"
+  if [[ "$text" == *'"nvidia":'* ]]; then printf 'yes'; return 0; fi
+  printf 'no'
+}
+
+# GPU 的三態判定。**這是這次改動的核心**：它決定要不要把
+# docker-compose.gpu.yml 掛上去，而掛與不掛的差別就是「真的用 GPU」與
+# 「以為用了 GPU」—— 後者已經發生過兩次（endpoint boot 沒加 -g、
+# .env 的 KEEP_ALIVE=-1），D-055 §二 記著這個堆疊會是第三次。
+#
+#   hw   有沒有 NVIDIA 裝置（yes/no）
+#   rt   docker 有沒有註冊 nvidia runtime（yes/no，來自 gpu_runtime_registered）
+#   mode 使用者要不要（auto/on/off，來自 .env 的 OLLAMA_GPU）
+#
+# `blocked` 只發生在兩種情況，而兩者都是「有人該被擋下來」：
+#
+#   1. mode=on 卻拿不到 GPU —— 使用者明確要了。給不出來的時候安靜地跑 CPU，
+#      就是這一整個家族在防的那件事，所以不能只警告。
+#   2. mode=auto 且偵測到硬體但 runtime 沒註冊 —— 有 GPU 卻跑 CPU。這台機器
+#      上 compose 起得來、模型載得進、每個請求都答得出來，**只有速度是錯的**，
+#      所以它沒有任何症狀。把症狀製造出來就是這個函式的用途。
+#
+# mode=off 一律 cpu：使用者明講了，沒有東西要擋（包括 runtime 壞掉的情況 ——
+# 那是他自己選的路）。
+gpu_verdict() {
+  local hw="${1:-no}" rt="${2:-no}" mode="${3:-auto}"
+  if [[ "$mode" == "off" ]]; then printf 'cpu'; return 0; fi
+  if [[ "$hw" == "yes" ]]; then
+    if [[ "$rt" == "yes" ]]; then printf 'gpu'; return 0; fi
+    printf 'blocked'; return 0
+  fi
+  if [[ "$mode" == "on" ]]; then printf 'blocked'; return 0; fi
+  printf 'cpu'
+}
+
+# 把 .env 裡的 key 整行移除，其餘原封不動。stdin 進、stdout 出。
+#
+# **為什麼需要它，而不是寫成 `KEY=` 或 `KEY=<預設值>`**：COMPOSE_FILE 這個鍵
+# 一旦存在（就算是空字串或指向唯一那個檔），compose 就**不再自動載入**
+# docker-compose.override.yml。那是使用者沒要求我們動的行為。所以「不用 GPU」
+# 的正確表示是**這行不存在**，不是「這行等於預設值」—— 缺席才是預設。
+#
+# 與 env_upsert 對稱：只認生效的行（`KEY=` 開頭），`# KEY=...` 這種註解掉的
+# 行原樣保留，前綴相同的鍵（`COMPOSE_FILE_EXTRA`）不會被誤配。
+#
+# 條件反過來寫（`!=`，留下來才印）是刻意的：突變台要求每一條突變的目標
+# 字串在檔案裡**唯一**，而這個檔案的兩個函式天生共用同樣的行。照 env_upsert
+# 的寫法會讓那一行**一字不差地**再出現一次，於是它的既有突變會以「植入失敗」
+# 收場 —— 那是突變台在正確地抱怨（見該檔 :24-26），而這一行讓它不必抱怨。
+env_remove() {
+  local key="$1"
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" != "$key="* ]]; then printf '%s\n' "$line"; fi
+  done
+}

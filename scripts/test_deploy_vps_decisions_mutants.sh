@@ -229,7 +229,7 @@ MUTANTS=(
   "py:煙霧：讀不到 message 時當成空字串|    if not isinstance(message, dict):|    if False:"
   # 讓判定有意義的請求參數，各一條。
   "py:煙霧：不關 streaming（會讀到一串 NDJSON）|        \"stream\": False,|        \"stream\": True,"
-  "py:煙霧：不固定 temperature|        \"options\": {\"temperature\": 0, \"num_predict\": num_predict},|        \"options\": {\"temperature\": 1, \"num_predict\": num_predict},"
+  "py:煙霧：不固定 temperature|        model, SMOKE_PROMPT, {\"temperature\": 0, \"num_predict\": num_predict}|        model, SMOKE_PROMPT, {\"temperature\": 1, \"num_predict\": num_predict},"
   # **把 `think: false` 加回去。** 這是實際踩過的坑：它不會關掉推理，只把
   # 推理從 `thinking` 搬進 `content`，於是「content 非空」可以被推理前言
   # 單獨滿足 —— 一個從頭到尾自言自語、從沒回答的模型也會過關。
@@ -248,17 +248,40 @@ MUTANTS=(
   # test_smoke_default_budget_covers_a_reasoning_model 的範圍斷言）。
   "py:煙霧：預設預算調回 32（推理會吃掉全部預算）|DEFAULT_NUM_PREDICT = 512|DEFAULT_NUM_PREDICT = 32"
   # HTTP 錯誤是「這支探針送的請求有問題」，叫人去查模型等於指錯方向。
-  "py:煙霧：HTTP 錯誤當成模型失敗|        return EXIT_BROKEN, (|        return EXIT_FAIL, ("
+  "py:煙霧：HTTP 錯誤當成模型失敗|    return EXIT_BROKEN, (|    return EXIT_FAIL, ("
   # ── 結束碼的對應：環境 ≠ 上游 ≠ 探針自己壞了（D-018）──
-  "py:煙霧：模型沒拉當成探針壞了|        if \"not found\" in low or \"no such model\" in low:|        if False:"
+  "py:煙霧：模型沒拉當成探針壞了|    if \"not found\" in low or \"no such model\" in low:|    if False:"
   "py:參數：錯誤回 2 而不是 3|    return EXIT_BROKEN  # 參數錯誤是「這支腳本自己壞了」，不是「環境無法判定」|    return EXIT_INDETERMINATE  # 參數錯誤是「這支腳本自己壞了」，不是「環境無法判定」"
   # ── ctx_verdict：一個設了卻沒生效的開關 ──
-  "py:ctx：不符時當成相符|        if got == expected:|        if True:"
+  "py:ctx：不符時當成相符|    if got == expected:|    if True:"
   "py:ctx：名字不正規化（未帶 tag 的會被誤報）|    want = normalize_model(model)|    want = model"
   "py:ctx：不挑模型，用第一筆|        if normalize_model(name) != want:|        if False:"
   # 這一條是**設計決定**本身：num_ctx 沒生效走 2 不走 1。改了它，
   # run_ctx 就再也沒有告訴任何人「堆疊是好的、只是這個設定沒生效」。
   "py:ctx：沒生效當成判準沒過（回 1）|EXIT_CTX_NOT_APPLIED = EXIT_INDETERMINATE|EXIT_CTX_NOT_APPLIED = EXIT_FAIL"
+
+  # ── gpu_verdict / run_gpu：我們說它在 GPU 上，而它其實不在 ──
+  # 這一組全部是**同一個病**的不同入口：把「我們宣稱的事沒有發生」降級成
+  # 「量不到」。降級之後每一條都還是「不通過」，但代價不一樣 —— 部署腳本會
+  # 把它歸類成環境問題（2）而不是自己的宣稱失效（1），於是沒有人去修。
+  "py:GPU：size_vram=0 不算失敗（退化成「量不到」）|    if vram == 0:|    if False:"
+  "py:GPU：全在 GPU 上不認得（判準永遠不通過）|    if vram == total:|    if False:"
+  # 這是最惡的一條：讀不到欄位時給它一個預設值 0，於是**對著好好的 GPU 佈署
+  # 大喊「它跑在 CPU 上」**。會誤報的守衛比沒有守衛更糟。
+  "py:GPU：讀不到 size_vram 當成 0（對好好的 GPU 誤報 CPU）|    vram = entry.get(\"size_vram\")|    vram = entry.get(\"size_vram\", 0)"
+  # bool 是 int 的子類：True == 1，不擋的話會拿「1 個位元組」去算比例。
+  "py:GPU：bool 不擋（True 被當成 1 位元組）|        if isinstance(value, bool) or not isinstance(value, int):|        if not isinstance(value, int):"
+  # size=0 時 0==0 —— 少了這一條，比例失去意義的那一刻會回一個「整顆都在
+  # GPU 上」的**假通過**。
+  "py:GPU：size=0 時 0==0 被當成「整顆在 GPU 上」|    if total <= 0:|    if False:"
+  # keep_alive 縮成 0：模型在回應之後立刻被卸載，於是永遠讀不到它 ——
+  # 判定會從「它在 CPU 上」變成「量不到」，靜默就從這裡回來。
+  "py:GPU：keep_alive 給 0（模型在讀 /api/ps 前就被卸載）|GPU_CHECK_KEEP_ALIVE = \"5m\"|GPU_CHECK_KEEP_ALIVE = \"0\""
+  # 這一條是**設計決定**本身：GPU 明明在跑 CPU 時走 1 不走 2。改了它，
+  # #83 要消滅的靜默失敗就從後門回來了 —— 部署腳本會把它當成「量不到」放過去。
+  "py:GPU：跑在 CPU 上卻回 2（靜默從後門回來）|        # #83 要消滅的東西，所以它必須響，不能混進「無法判定」裡被忽略。
+        return EXIT_FAIL, reason|        # #83 要消滅的東西，所以它必須響，不能混進「無法判定」裡被忽略。
+        return EXIT_INDETERMINATE, reason"
 
   # ── profile-lifecycle.sh：殘留容器與對外連線狀態 ──
   # 這一組的兩個方向都會出錯，而**誤殺比漏清貴**：漏清留下一個還在對外服務
@@ -280,6 +303,36 @@ MUTANTS=(
   "pl:殘留清理：拿掉空 service 守衛（不確定的容器也砍）|    if [[ -z \"\$svc\" ]]; then|    if false; then"
   # 介面契約：呼叫方拿輸出直接餵 `docker rm -f`，回服務名會刪錯東西。
   "pl:殘留清理：回服務名而不是容器名|    printf '%s\\n' \"\$name\"|    printf '%s\\n' \"\$svc\""
+
+  # ── gpu_verdict／gpu_runtime_registered：掛不掛 GPU override 全靠它 ──
+  # 這一組守的是 D-055 §二 那個缺口：這個堆疊在沒有裝置保留區的機器上
+  # **不會報錯**，它會起得來、答得出話，只有速度是錯的。所以下面每一條
+  # 「靜默降級」都必須被測試抓住，否則修正等於沒做。
+  #
+  # 核心案例：有硬體、但 runtime 沒裝好時回 cpu 而不是 blocked —— 那就回到
+  # 修正前的行為，而且連一行警告都沒有。
+  "gpu：有硬體但沒 runtime 時靜默降級成 CPU（核心案例）|    printf 'blocked'; return 0|    printf 'cpu'; return 0"
+  # runtime 的判定翻轉：會在沒註冊 nvidia runtime 的機器上掛裝置保留區，
+  # 於是 compose 起不來 —— 從「安靜地慢」變成「當場壞掉」，一樣沒被擋。
+  "gpu：runtime 判定翻轉（沒裝的機器上掛保留區）|    if [[ \"\$rt\" == \"yes\" ]]; then printf 'gpu'; return 0; fi|    if [[ \"\$rt\" == \"no\" ]]; then printf 'gpu'; return 0; fi"
+  # mode=on 是使用者明確要了。給不出來卻安靜地跑 CPU，就是這一整個家族在防的事。
+  "gpu：mode=on 拿不到 GPU 時靜默降級|  if [[ \"\$mode\" == \"on\" ]]; then printf 'blocked'; return 0; fi|  if [[ \"\$mode\" == \"on\" ]]; then printf 'cpu'; return 0; fi"
+  # mode=off 是使用者唯一的關閉方式；不尊重它就再也關不掉 GPU。
+  "gpu：mode=off 被忽略（使用者關不掉 GPU）|  if [[ \"\$mode\" == \"off\" ]]; then printf 'cpu'; return 0; fi|  if false; then printf 'cpu'; return 0; fi"
+  # 預設值漂到 on 的話，「什麼都沒設定」會變成「要了 GPU」，於是沒卡的機器
+  # 一律被擋 —— 一個把正常情況變成失敗的錯誤預設。
+  "gpu：省略參數時的預設漂成 on|  local hw=\"\${1:-no}\" rt=\"\${2:-no}\" mode=\"\${3:-auto}\"|  local hw=\"\${1:-no}\" rt=\"\${2:-no}\" mode=\"\${3:-on}\""
+  # 子串比對：`nvidia-experimental` 這種 runtime 會被當成 nvidia，於是
+  # compose 用一個不存在的 runtime 起容器。這一條就是那個函式存在的理由。
+  "gpu runtime：改成子串比對（nvidia-experimental 被誤認）|  if [[ \"\$text\" == *'\"nvidia\":'* ]]; then printf 'yes'; return 0; fi|  if [[ \"\$text\" == *nvidia* ]]; then printf 'yes'; return 0; fi"
+  # 讀不到 docker info 的輸出時回 yes —— 無知被當成「有」。
+  "gpu runtime：讀不到時回 yes（無知當成有）|  local text=\"\${1:-}\"|  local text=nvidia"
+
+  # ── env_remove：COMPOSE_FILE 的「不存在」必須是真的不存在 ──
+  # 只要有一行生效的 COMPOSE_FILE，compose 就不再自動載入 override 檔 ——
+  # 那是使用者沒要求我們動的行為。所以「沒刪掉」與「刪錯」都要被抓住。
+  "env_remove：什麼都不移除（關不掉 GPU）|    if [[ \"\$line\" != \"\$key=\"* ]]; then printf '%s\\n' \"\$line\"; fi|    :"
+  "env_remove：少了 =，前綴相同的鍵被誤刪|    if [[ \"\$line\" != \"\$key=\"* ]]; then printf '%s\\n' \"\$line\"; fi|    if [[ \"\$line\" != \"\$key\"* ]]; then printf '%s\\n' \"\$line\"; fi"
 
   # ── tunnel_state_verdict：四態裡只有 stale 是危險的 ──
   # 把 stale 併回 off，就回到修正前的行為 ——「設定檔說關了」被當成「沒連線」，
@@ -433,4 +486,4 @@ if [[ "${#missed[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"
+ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、GPU 的每一個靜默降級、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"

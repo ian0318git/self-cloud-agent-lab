@@ -1,0 +1,32 @@
+# self-cloud-agent-lab — GPU override（由腳本自動掛上，**不要手動編輯**）
+#
+# 這個檔案的存在本身沒有作用。它只有在 `COMPOSE_FILE` 把它接在
+# `docker-compose.yml` 後面時才會生效，而那個變數由 `deploy-vps.sh` 依
+# **偵測結果**寫進 `.env`：
+#
+#   OLLAMA_GPU=auto  偵測到 GPU 硬體＋NVIDIA container runtime → 自動掛上本檔
+#   OLLAMA_GPU=on    同上，但拿不到 GPU 時**硬擋**（不會靜默退回 CPU）
+#   OLLAMA_GPU=off   整個 section 不跑，`COMPOSE_FILE` 這一行會被移除
+#
+# 所以要關掉 GPU 請改 `.env` 的 `OLLAMA_GPU`，不要來改這裡 ——
+# 手改 `COMPOSE_FILE` 是改「推導值」，下一次佈署就會被覆寫回去，
+# 而中間那段時間的狀態沒有任何東西在描述它（D-054 的病灶）。
+#
+# 為什麼是 `deploy.resources.reservations.devices` 而不是 `gpus:`：
+# README 的「When is this a fit?」表格點名的就是前者，文件與實作要指同一個
+# 東西。而且 `deploy` 區塊在 `docker compose up`（非 swarm）下**會**被採用，
+# 這點在 D-056 有記。
+#
+# 沒有這個檔案的話，`docker-compose.yml` 完全沒有任何 device reservation，
+# 於是這個堆疊在任何有 GPU 的機器上都是由建構決定跑 CPU 的，而且**沒有
+# 任何訊號** —— 只會慢。那會是「宣告面 ≠ 執行面」家族的第三次。
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

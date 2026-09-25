@@ -12,9 +12,14 @@
 #   --keep-data         機器上已經有人類的資料時，仍然繼續（見下方說明）
 #   --dry-run           只做前置檢查與 .env 的差異顯示，**不寫任何檔案、不起容器**
 #
-# 結束碼：0 = 佈署完成且通過煙霧測試
-#         1 = 未通過（發現暴露、資料已存在、煙霧測試失敗 —— 都附完整輸出）
-#         2 = 無法判定（容器起不來、模型下載失敗、num_ctx 沒生效）
+# GPU **不是旗標**：唯一的控制點是 `.env` 的 `OLLAMA_GPU`（auto／on／off），
+# 由本腳本依偵測結果決定要不要掛上 docker-compose.gpu.yml。加一個 --gpu 旗標
+# 會造出第二個真相來源 —— 那正是 D-054 的病灶。
+#
+# 結束碼：0 = 佈署完成且通過煙霧測試（有開 GPU 時，也通過「模型真的在 GPU 上」）
+#         1 = 未通過（發現暴露、資料已存在、煙霧測試失敗、說要用 GPU 卻跑在
+#             CPU 上 —— 都附完整輸出）
+#         2 = 無法判定（容器起不來、模型下載失敗、num_ctx 沒生效、GPU 用量量不到）
 #         3 = 這支腳本自己壞掉（參數錯誤）
 
 # ── 為什麼不是直接用 up.sh ──────────────────────────────
@@ -294,6 +299,92 @@ if [[ -n "$VCPU" && "$VCPU" =~ ^[0-9]+$ && "$VCPU" -lt 2 ]]; then
   warn "只有 ${VCPU} 顆 vCPU —— 可以跑，只是慢。不擋（那是慢，不是錯）。"
 fi
 
+# ── GPU：偵測、判定，並讓「有沒有在用 GPU」變成看得到的事 ──
+# 這一節要消滅的是「宣告面 ≠ 執行面」家族的第三次。`docker-compose.yml`
+# 完全沒有任何 device reservation，所以這個堆疊**在任何有 GPU 的機器上都是
+# 由建構決定跑 CPU 的**，而且沒有任何訊號 —— 只是慢。而 README 把「一張
+# 24 GB GPU」標成 sweet spot，並叫使用者自己去 compose 加一個 block。
+#
+# 判定邏輯在純函式裡（deploy-vps-decisions.sh 的 gpu_verdict，12 格真值表
+# 逐格有測試），這裡只做 I/O。**VRAM 只警告、不擋**：裝不下是「慢」，不是
+# 「壞」，與記憶體那條同一個理由。
+GPU_MODE="$(read_env_value OLLAMA_GPU)"
+GPU_MODE="${GPU_MODE:-auto}"
+case "$GPU_MODE" in
+  auto|on|off) : ;;
+  *)
+    warn "OLLAMA_GPU 的值認不得（$GPU_MODE）—— 只認 auto / on / off。"
+    warn "  先用預設值 auto 繼續；要明講請改成三者之一。"
+    GPU_MODE="auto" ;;
+esac
+
+GPU_HW="no"
+GPU_NAME=""
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  GPU_HW="yes"
+  GPU_NAME="$(nvidia-smi -L 2>/dev/null | head -1)"
+elif [[ -e /dev/nvidiactl ]]; then
+  # 驅動裝了、裝置節點在，但 nvidia-smi 不在 PATH。硬體仍然是有的。
+  GPU_HW="yes"
+  GPU_NAME="有 /dev/nvidiactl，但 nvidia-smi 不在 PATH"
+fi
+
+GPU_RT="no"
+if [[ "$GPU_HW" == "yes" ]] && command -v docker >/dev/null 2>&1; then
+  GPU_RT="$(gpu_runtime_registered \
+    "$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)")"
+fi
+
+GPU_VERDICT="$(gpu_verdict "$GPU_HW" "$GPU_RT" "$GPU_MODE")"
+case "$GPU_VERDICT" in
+  gpu)
+    GPU_VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits \
+      2>/dev/null | head -1 | tr -d ' ' || true)"
+    ok "GPU：$GPU_NAME"
+    ok "     NVIDIA container runtime 已註冊 —— 會自動掛上 docker-compose.gpu.yml"
+    if [[ "$GPU_VRAM_MB" =~ ^[0-9]+$ ]]; then
+      GPU_NEED_MB="$(ram_warn_mb "$MODEL_GB" "$NUM_CTX")"
+      if [[ "$GPU_NEED_MB" =~ ^[0-9]+$ ]] && (( GPU_VRAM_MB < GPU_NEED_MB )); then
+        warn "VRAM 偏緊：這張卡有 ${GPU_VRAM_MB} MB，估算需要約 ${GPU_NEED_MB} MB。"
+        warn "  裝不下時 ollama 會**部分卸載**（把放不下的層丟到系統記憶體），"
+        warn "  速度差 10–50×（README 的「When is this a fit?」）—— 那是慢，不是錯，"
+        warn "  所以不擋。要省請縮小模型或 --num-ctx。"
+        warn "  （KV cache 那一項是 D-022 的推測值，與模型的 KV head 數綁定。）"
+      else
+        ok "     VRAM：${GPU_VRAM_MB} MB（估算需要約 ${GPU_NEED_MB} MB）"
+      fi
+    fi ;;
+  cpu)
+    if [[ "$GPU_MODE" == "off" ]]; then
+      info "GPU：OLLAMA_GPU=off —— 刻意跑 CPU，不會掛上 GPU 的那個 compose 檔。"
+    else
+      info "GPU：這台機器沒有 NVIDIA GPU —— 跑 CPU（不需要做任何事）。"
+    fi ;;
+  blocked)
+    fail "GPU：偵測到 NVIDIA 硬體（$GPU_NAME），但 Docker **沒有註冊** NVIDIA"
+    fail "     container runtime —— 容器看不到那張 GPU。"
+    if [[ "$GPU_MODE" == "on" ]]; then
+      echo "  OLLAMA_GPU=on 的意思是「一定要用 GPU」，不是「盡量用」，所以在這裡停下來。"
+    else
+      echo "  OLLAMA_GPU=auto 的定義是「偵測到就啟用」，而這裡偵測到了硬體、卻拿不到它"
+      echo "  —— 那與「這台沒有 GPU」是兩件不同的事，所以不當成沒看到。"
+    fi
+    echo "  靜默退回 CPU 正是這一節要消滅的那件事（沒有訊號，只是慢），"
+    echo "  所以在動到任何檔案或容器之前停在這裡。"
+    echo
+    echo "  裝好它（Debian/Ubuntu，需要 root）："
+    echo "    sudo apt-get install -y nvidia-container-toolkit"
+    echo "    sudo nvidia-ctk runtime configure --runtime=docker"
+    echo "    sudo systemctl restart docker"
+    echo
+    echo "  驗證：docker info --format '{{json .Runtimes}}' 要看得到 nvidia 這個鍵"
+    echo "  然後重跑這支腳本。"
+    echo
+    echo "  這台機器本來就不該用 GPU 的話，在 .env 設 OLLAMA_GPU=off 明講 ——"
+    echo "  讓它是**選擇**，而不是意外。"
+    BLOCKERS=$((BLOCKERS + 1)) ;;
+esac
+
 if [[ "$BLOCKERS" -gt 0 ]]; then
   fail "前置檢查未通過 —— 沒有動到任何檔案或容器。"
   exit 1
@@ -304,15 +395,16 @@ fi
 # `echo >> .env` 會在多跑一次之後留下重複鍵，而重複鍵是**後面那行生效** ——
 # 於是「我已經把 WEBUI_BIND_ADDR 改成 127.0.0.1 了」可以與事實相反，無聲。
 ENV_CHANGES=()
-apply_env() {
-  local key="$1" value="$2" new tmp perms
-  new="$(env_upsert "$key" "$value" < "$ENV_FILE")"
+# 把算好的內容原子性地寫回 .env。回 0 = 真的寫了，回 1 = 沒變或被 dry-run 擋下。
+# 兩個呼叫端（設值與移除）共用這一份，才不會有一邊忘了 chmod 或忘了用 rename。
+_env_commit() {
+  local new="$1" label="$2" tmp perms
   if [[ "$new" == "$(cat "$ENV_FILE")" ]]; then
-    return 0          # 已經是這個值，連 mtime 都不動
+    return 1          # 已經是這個樣子，連 mtime 都不動
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "  （dry-run）會把 $key 設成 $value"
-    return 0
+    echo "  （dry-run）$label"
+    return 1
   fi
   tmp="$(mktemp "$PROJECT_ROOT/.env.tmp.XXXXXX")"
   perms="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo 600)"
@@ -320,13 +412,45 @@ apply_env() {
   chmod "$perms" "$tmp"
   # 同一個檔案系統內的 rename 是原子性的：不會留下「寫到一半的 .env」。
   mv -f "$tmp" "$ENV_FILE"
-  ENV_CHANGES+=("$key=$value")
+  return 0
+}
+
+apply_env() {
+  local key="$1" value="$2" new
+  new="$(env_upsert "$key" "$value" < "$ENV_FILE")"
+  if _env_commit "$new" "會把 $key 設成 $value"; then
+    ENV_CHANGES+=("$key=$value")
+  fi
+}
+
+# 移除是**刪掉那一行**，不是把它設成空字串或某個預設值 —— 見下面 COMPOSE_FILE
+# 的說明。與 env_upsert 對稱：它保證所有重複行一起消失。
+apply_env_remove() {
+  local key="$1" new
+  new="$(env_remove "$key" < "$ENV_FILE")"
+  if _env_commit "$new" "會移除 $key 這一行"; then
+    ENV_CHANGES+=("$key=（已移除）")
+  fi
 }
 
 apply_env WEBUI_BIND_ADDR "$BIND_ADDR"
 apply_env OLLAMA_MODEL "$MODEL"
 apply_env EMBEDDING_MODEL "$EMBED_MODEL"
 apply_env OLLAMA_CONTEXT_LENGTH "$NUM_CTX"
+
+# ── COMPOSE_FILE 是**推導值**，由上面的 GPU 判定決定 ─────
+# 要改的是它的輸入 `OLLAMA_GPU`，不是它自己 —— 推導值被手改之後，沒有任何
+# 東西在描述它與輸入的關係，下一次佈署會把它覆寫回去（D-054 的形狀）。
+#
+# 關閉時刻意是「**移除這一行**」而不是「設成 docker-compose.yml」：只要這個
+# 鍵存在（哪怕只指向 base 檔），compose 就**不會**再自動載入
+# `docker-compose.override.yml` —— 那是使用者沒要求我們動的行為。
+# **缺席才是預設。**
+if [[ "$GPU_VERDICT" == "gpu" ]]; then
+  apply_env COMPOSE_FILE "docker-compose.yml:docker-compose.gpu.yml"
+else
+  apply_env_remove COMPOSE_FILE
+fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
   if [[ ${#ENV_CHANGES[@]} -eq 0 ]]; then
@@ -351,7 +475,13 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   info "（dry-run）到這裡為止。實際執行時接下來會："
   echo "    docker compose up -d --wait --remove-orphans"
-  echo "    然後跑對外暴露閘門、下載模型、煙霧測試與 num_ctx 確認。"
+  if [[ "$GPU_VERDICT" == "gpu" ]]; then
+    echo "    然後跑對外暴露閘門、下載模型、煙霧測試、num_ctx 確認，"
+    echo "    以及 GPU 確認（讀 /api/ps 的 size_vram）。"
+  else
+    echo "    然後跑對外暴露閘門、下載模型、煙霧測試與 num_ctx 確認。"
+    echo "    （GPU 那一段不會跑：判定是 $GPU_VERDICT。）"
+  fi
   exit 0
 fi
 
@@ -609,10 +739,54 @@ case "$CTX_RC" in
 esac
 echo
 
-# ── 12. 完成 ────────────────────────────────────────────
-ok "佈署完成 —— 堆疊已起來、埠只綁 loopback、模型可用、num_ctx 已生效"
+# ── 12. 確認模型真的在 GPU 上（**只有宣稱要用 GPU 時才跑**）──
+# 「裝置可見」與「runtime 已註冊」都還是**宣告面**：它們證明我們要求了 GPU，
+# 不證明 ollama 用上了。`ollama ps` 的 size_vram 是 ollama 自己回報的實際
+# 配置，那才是執行面。這一節送一次極小生成把模型載進去，再讀 /api/ps。
+#
+# **CPU 路徑整個不跑**：沒有宣稱就沒有東西要驗。使用者的選擇（OLLAMA_GPU=off）
+# 或這台機器本來就沒 GPU，都不該在完成清單上多出一行「GPU 檢查」。
+if [[ "$GPU_VERDICT" == "gpu" ]]; then
+  info "確認 ollama 真的把模型放在 GPU 上（讀 /api/ps 的 size_vram）..."
+  GPU_CHECK_RC=0
+  $COMPOSE exec -T open-webui python3 - gpu "$MODEL" < "$SMOKE_PROBE" || GPU_CHECK_RC=$?
+  case "$GPU_CHECK_RC" in
+    0) : ;;
+    1)
+      fail "模型跑在 CPU 上，而我們告訴使用者這台在用 GPU（詳見上方）。"
+      fail "失效的是我們自己的宣稱，不是環境無從判定 —— 所以是 1，不是 2。"
+      fail "上面那段訊息有確診指令（docker compose exec ollama nvidia-smi -L）。"
+      exit 1 ;;
+    2)
+      warn "GPU 使用情形**量不到**（部分卸載、或 /api/ps 讀不到那個欄位）。"
+      warn "  這是真實的量測結果而不是判準沒過：GPU 確實在用，只是無法斷言"
+      warn "  整顆模型都在上面。堆疊可以用。"
+      exit 2 ;;
+    *)
+      fail "GPU 檢查本身壞掉了（結束碼 $GPU_CHECK_RC）。"
+      exit 3 ;;
+  esac
+  echo
+fi
+
+# ── 13. 完成 ────────────────────────────────────────────
+if [[ "$GPU_VERDICT" == "gpu" ]]; then
+  ok "佈署完成 —— 堆疊已起來、埠只綁 loopback、模型可用、num_ctx 已生效、模型在 GPU 上"
+else
+  ok "佈署完成 —— 堆疊已起來、埠只綁 loopback、模型可用、num_ctx 已生效"
+fi
 echo
 "$SCRIPT_DIR/status.sh" || true
+
+if [[ "$GPU_VERDICT" == "gpu" ]]; then
+  cat <<EOF
+
+GPU：$GPU_NAME
+  docker-compose.gpu.yml 已掛上（.env 的 COMPOSE_FILE），而上面那次推論證明
+  模型真的在 GPU 上。要改回 CPU 請在 .env 設 OLLAMA_GPU=off 再重跑 ——
+  **不要手改 COMPOSE_FILE**，那是推導值，下次佈署會被覆寫回去。
+EOF
+fi
 
 cat <<EOF
 

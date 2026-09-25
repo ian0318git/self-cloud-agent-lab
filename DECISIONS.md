@@ -7556,6 +7556,16 @@ ARM VPS（Graviton／Ampere／Oracle ARM）**沒有任何一層被驗證過**。
 **驗證方式（依 D-054 的教訓）**：要看**執行時的輸出** —— `ollama ps` 的 PROCESSOR
 欄、或 ollama 日誌裡的層數 —— 不是讀 compose 檔或設定檔。讀宣告面正是 D-054 的錯。
 
+> ### ⚠ 更正（2026-09-25，同日）：這一節描述的是**修正前**的狀態
+>
+> 上面「零處理」「compose 完全沒有 GPU 區塊」「`.env` 做不到」三句在寫下的當下
+> 都查證為真，但**已經不是現在的事實** —— 見 **D-056**。第六節的第 1 項待決策
+> 也已經拍板（自動偵測並啟用＋ runtime 缺失時硬擋＋佈署後實跑推論驗證）。
+>
+> 留下這一節原文的理由是它記著**決策的依據**（README 承諾與 compose 互相矛盾、
+> 這是「宣告面 ≠ 執行面」家族的第三次）。**讀這一節時請連著 D-056 一起讀**，
+> 不然會以為 GPU 還是個沒處理的洞。
+
 ### 三、磁碟閘門的兩個缺陷（其一已實跑證明）
 
 **(1) 重跑會誤擋 —— 用純函式實跑證明。** `deploy-vps-decisions.sh:372` 的
@@ -7634,3 +7644,180 @@ qwen3:8b  模型 5.2 GB  →  閘門要求 14 GB 可用
   已證的是「零處理」這個事實；未證的是「跑起來會怎樣」。
 - **tunnel 那條路線「關得掉」已證明，「開得起來」仍未驗** —— 需要真實 token，
   而那只能由使用者在自己的機器上完成（D-029 第一節）。
+
+---
+
+## D-056：把「用了 GPU」變成可證明的事 —— `COMPOSE_FILE` 是推導值，而 CPU 那條路必須用**沉默**來選擇
+
+**日期**：2026-09-25
+**狀態**：已實作（離線套件全綠；**真實 GPU 硬體上未驗證**，見第七節）
+
+**收窄了什麼宣稱**：本則**不是**「GPU 支援做好了」。它做的是三件事，而第三件才是重點：
+(1) `docker-compose.yml` 的 GPU 缺口補上，(2) 偵測與硬擋，(3) **讓「我們說它在 GPU 上」
+與「它真的在」變成兩件可分辨的事**。第 (3) 件是 D-055 §二的病灶本身。
+
+### 一、方向不是新的：README 已經回答了它自己
+
+D-055 §六.1 把待決策寫成「支援 GPU **或**宣告 CPU-only」。但查證後發現兩份既有的
+文件早就把答案寫出來了，只是實作兩邊都沒兌現：
+
+- `README.md:431`（zh-TW `:391`）把 **B — one 24 GB GPU 標為 `(sweet spot)`**
+- `README.md:446-448` 已經寫出解法：「the compose file needs a
+  `deploy.resources.reservations.devices` block for the ollama service」
+- 而 `docker-compose.yml:25-28` 自己承諾「**換 VPS 只要改 `.env`**」
+
+**所以文件叫使用者自己手改 compose，而 compose 自己承諾不必改 compose。**
+這次不是決定方向，是**把 README 已經承諾的東西做成真的** —— 而且讓那個承諾成立：
+GPU 也走 `.env`，不再是那句話的例外。
+
+### 二、啟用機制：`COMPOSE_FILE`，走 `COMPOSE_PROFILES` 那條**既有的**路
+
+`.env.example` 已經記著 `COMPOSE_PROFILES` 這條路的理由：「這同時也是 docker compose
+的標準變數，我們的腳本會將它匯出，因此 up.sh / down.sh / status.sh 都看得見這個
+profile」。`lib.sh` 的 `load_env()` 用 `set -a; source .env` 匯出**一切**，所以
+`COMPOSE_FILE` 走的是同一個機制、同一份保證 —— 不必動 `up.sh`／`status.sh`／
+`down.sh`，也不必引入本 repo 從未使用過的 `-f` 旗標（全 repo `-f` 0 命中）。
+
+| `.env` 的鍵 | 角色 | 誰寫 |
+|---|---|---|
+| `OLLAMA_GPU` | **輸入**：`auto`（預設）／`on`／`off` | 使用者（`.env.example` 出貨 `auto`） |
+| `COMPOSE_FILE` | **推導值**：GPU 開啟時 `docker-compose.yml:docker-compose.gpu.yml`，關閉時**整行移除** | `deploy-vps.sh` |
+
+**這一組是刻意照 D-054 的形狀做的。** D-054 的病灶是「一個推導出來的值被當成輸入
+去編輯」；所以這裡把輸入（`OLLAMA_GPU`）與推導值（`COMPOSE_FILE`）分開，並且在
+`.env.example`、`docker-compose.gpu.yml` 檔頭、README 與這則決策裡**四次**寫明
+「不要手改 `COMPOSE_FILE`」。**一個推導值如果沒有被標示成推導值，它就會被手改。**
+
+### 三、關閉時是「移除那一行」，不是「設成 `docker-compose.yml`」——**缺席才是預設**
+
+這是一個不明顯但重要的選擇。compose 有個行為：只要 `COMPOSE_FILE` 這個鍵**存在**
+（哪怕它只指向 base 檔），compose 就**不會**再自動載入 `docker-compose.override.yml`。
+
+「設成 `docker-compose.yml`」於是會**靜默關掉一個使用者沒要求我們動的行為** ——
+而那個 override 檔是 docker compose 的標準慣例，有人會放東西進去。
+
+所以「不用 GPU」必須表示成**那一行不存在**。這需要一個新的純函式 `env_remove()`，
+與既有的 `env_upsert()` 對稱（後者保證重複行收斂成恰好一行，前者保證重複行一起消失）。
+
+> **推廣**：一個「關掉」的動作，如果寫成「把值設成預設值」，那就改變了**這個鍵存在**
+> 這件事本身所攜帶的資訊。要關掉的是鍵，不是值。
+
+### 四、判定：12 格真值表，而 `blocked` 只發生在兩種情況
+
+`gpu_verdict(hw, rt, mode)` 是純函式（`deploy-vps-decisions.sh`，該檔契約是零 I/O）：
+
+| hw | rt | auto | on | off |
+|---|---|---|---|---|
+| yes | yes | `gpu` | `gpu` | `cpu` |
+| yes | **no** | **`blocked`** | **`blocked`** | `cpu` |
+| no | yes | `cpu` | **`blocked`** | `cpu` |
+| no | no | `cpu` | **`blocked`** | `cpu` |
+
+`mode=off` 一律 `cpu`（使用者明講了，沒有東西要擋）；`mode=on` 而拿不到 GPU 一律
+`blocked`。**`auto` 在「有硬體、沒 runtime」時也擋** —— 因為那是「拿不到」而不是
+「沒有」，而靜默退回 CPU 正是這一節要消滅的事。
+
+`gpu_runtime_registered()` 比對的是 `"nvidia":` 這個**鍵**，不是子串 ——
+`nvidia-experimental` 之類的名字不該被當成同一個 runtime。這是那種「形狀正確、
+結論相反」的錯。
+
+**硬擋的訊息本身也是產出的一部分**：`blocked` 會直接印出安裝指令
+（`nvidia-container-toolkit` ＋ `nvidia-ctk runtime configure --runtime=docker`
+＋ 重啟 docker）與驗證方式，並告訴使用者「本來就不該用 GPU 的話，設 `OLLAMA_GPU=off`
+明講」。**一個硬擋如果不附處方，它就只是把問題丟回給人。**
+
+### 五、驗證強度：三層，而只有第三層是執行面
+
+這是本則最重要的一節。同一個問題「有沒有在用 GPU」有三個不同強度的證據：
+
+| 層 | 證據 | 誰能證明 |
+|---|---|---|
+| 宣告 | `docker-compose.gpu.yml` 有 `reservations.devices` | 我們**要求了** GPU |
+| 裝置 | `docker compose exec ollama nvidia-smi -L` 看得到卡 | Docker **傳進去了** |
+| **執行** | **`/api/ps` 的 `size_vram == size`** | **ollama 真的用上了** |
+
+第三層才是判準，而它必須**跑一次真的推論**才讀得到（模型要在記憶體裡）。
+`run_gpu()` 因此自己送一次 `num_predict: 1` ＋ `keep_alive: "5m"` 的極小生成 ——
+**不依賴前一步的殘留**，因為殘留取決於 `.env` 的 `OLLAMA_KEEP_ALIVE`，
+而**判準不可以取決於一個可設定的值**。
+
+| `/api/ps` 讀到 | 回傳 | 結束碼 |
+|---|---|---|
+| `size_vram == size` | `True` | 0 |
+| `size_vram == 0` | `False` | **1** |
+| `0 < size_vram < size` | `None` | 2 |
+| 欄位讀不到／模型不在清單 | `None` | 2 |
+
+### 六、`size_vram == 0` 回 **1**，不是 2 —— 這是刻意的，而且與 `ctx` 那條相反
+
+`run_ctx` 在「`num_ctx` 沒生效」時回 **2**（`EXIT_CTX_NOT_APPLIED`），理由是「堆疊本身
+是好的、只是那個開關沒作用」。**GPU 這裡刻意不同：回 1。**
+
+差別在於**誰做了宣稱**。`num_ctx` 沒生效時，我們沒有告訴使用者任何不實的事 ——
+只是有個旋鈕沒轉動。而 `size_vram == 0` 的意思是：**我們掛了裝置保留區、在完成訊息裡
+告訴使用者這台在用 GPU，而它沒有。**失效的是**我們自己的宣稱**，不是環境無從判定。
+
+把它歸進「無法判定」（2）就是讓它被忽略 —— 而那個忽略**就是** D-055 §二描述的靜默
+失敗，只是換了一個地方發生。**所以這一條必須響。**
+
+### 七、突變台抓到我自己的重複 —— 而修法是**去重**，不是改字串
+
+加了 GPU 那組突變之後，突變台回報 **6 條既有的 `py:` 突變「植入失敗」**。原因是
+`run_gpu`／`gpu_verdict` 與 `run_smoke`／`ctx_verdict` 有**逐字相同**的行
+（`"stream": False,`、`if "not found" in low …`、`want = normalize_model(model)` …），
+而那些行是既有的突變目標 —— 目標字串必須在檔案裡**唯一**。
+
+**這不是突變台的毛病，是它正確地抓到了一個真的重複。**所以修法是把它們抽成共用的
+地方，不是把字串改得看起來不一樣：
+
+- `_chat_payload()` —— `stream: False` 這條規則只寫一份（忘了關會讀到一串 NDJSON）
+- `_find_loaded()` —— 「`/api/ps` 裡哪一筆是我們的模型」只寫一份（`normalize_model` 規則）
+- `_http_error()` —— D-018 的分類（模型不在＝環境 2／其他 HTTP 錯誤＝探針 3）只寫一份
+
+副作用是好的：這三條突變現在**一次弄壞兩條路**（煙霧與 GPU），守到的面反而變大。
+
+> **教訓（與 D-032「突變台的輸出本身也是宣稱」同族）**：一個突變台報「植入失敗」時，
+> 第一個要懷疑的是**受測程式碼**，不是突變清單。這裡它報的是一個真實的
+> double-source-of-truth，而那個重複正是它之所以會漂移的原因。
+
+### 八、實測
+
+離線（三份都綠）：
+
+```
+bash scripts/test_deploy_vps_decisions.sh          152/152 案例
+bash scripts/test_deploy_vps_decisions_mutants.sh   89/89 突變（含 3 份對照組）
+python3 scripts/test_deploy_smoke_probe.py          50/50 案例
+```
+
+**override 檔本身能在沒有 GPU 的機器上被證明會合併**（這是本機唯一做得到的）：
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml docker compose config | grep -A6 reservations
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              driver: nvidia
+              count: -1          ← compose 把 `count: all` 渲染成 -1
+```
+
+五條路徑**走真的 `deploy-vps.sh` 端到端**跑過（用 PATH shim 偽造 `nvidia-smi` 與
+`docker info --format '{{json .Runtimes}}'`，在暫存目錄的 repo 副本上跑，不動本機 `.env`）：
+
+| 情境 | 判定 | 輸出 |
+|---|---|---|
+| 無硬體 + `auto` | `cpu` | 一行說明，**不寫任何鍵** |
+| 硬體 + runtime + `auto` | `gpu` | 掛上 override ＋ VRAM 檢查 |
+| 硬體 + 無 runtime + `on` | `blocked` | 印安裝指令，`exit 1`（先於任何檔案變更） |
+| 硬體 + 無 runtime + `auto` | `blocked` | 同上，但訊息說明的是「拿不到」不是「明講要用」 |
+| `off` | `cpu` | 不跑 GPU 段；若 `.env` 有 `COMPOSE_FILE` 則**移除** |
+| VRAM 4 GB < 需求 5,184 MB | `gpu` | **只警告不擋**（那是慢，不是錯） |
+
+### 九、界線
+
+- **本則的實作只在 x86、無 GPU 的機器上驗證過。** 第七節那張表的「真的在用 GPU」那條
+  路徑**從未在真實 GPU 硬體上跑過一次**。
+- **`nvidia-smi` 的實際輸出格式未經真機驗證** —— 判讀用的 `-L` 與
+  `--query-gpu=memory.total` 是照官方文件寫的。
+- **`count: all` 在真實機器上是否真的把全部 GPU 傳進去，未驗。**
+- **ARM 那一項（D-055 第一節）與 tunnel、Docker 前置都仍未處理**，與本則無關。
