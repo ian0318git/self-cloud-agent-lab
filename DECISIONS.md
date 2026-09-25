@@ -7511,7 +7511,8 @@ new_settings["ngl"] = NGL_DEFAULTS.get(accelerator, 0)
 ## D-055：一鍵佈署的**可移植性**缺口 —— 與 D-028 關掉的那四個是不同的一類
 
 **日期**：2026-09-25
-**狀態**：已決定（記錄分析；三項待決策，見第六節）
+**狀態**：已決定（記錄分析；第六節三項待決策**兩項已結案** —— GPU 見 D-056、
+架構見 D-057；tunnel 仍未決）
 
 **收窄了什麼宣稱**：本則**不是**「一鍵佈署有洞」這種籠統說法。D-028 已經關掉四個
 **設定正確性**的洞（綁定位址、compose 優先序、`OLLAMA_CONTEXT_LENGTH`、`EMBEDDING_MODEL`）。
@@ -7531,6 +7532,27 @@ ARM VPS（Graviton／Ampere／Oracle ARM）**沒有任何一層被驗證過**。
 **跑起來，但行為不同**：`deploy-vps-decisions.sh` 的記憶體估算
 （`ram_warn_mb`，KV cache 用 `KV_KIB_PER_TOKEN_ESTIMATE=36`）、pull 大小、
 實際解碼速率都與模型／硬體綁定。**這些數字在 ARM 上是否成立，沒有任何證據。**
+
+> ### ⚠ 更正（2026-09-25 稍晚，D-057）：上面那句話把**三項之中的一項**列錯了
+>
+> 上面把 `KV_KIB_PER_TOKEN_ESTIMATE=36` 列為「在 ARM 上是否成立沒有證據」。
+> **那一項與 CPU 架構無關，這個列舉是錯的。** 依這個 repo 自己的原則
+> （要寫進文件的因果，先跑一條能推翻它的指令），去讀那個常數自己的來源：
+> `deploy-vps-decisions.sh:60-63` 寫著它是「由 Qwen2.5-3B 的架構推得
+> （36 層 × 2 個 KV head × head_dim 128 × f16）」。實際乘出來：
+> `36 × 2 × 128 × 2(K,V) × 2 位元組 = 36,864 B = 剛好 36 KiB`。
+>
+> **那是模型的算術，不是機器的量測。** 記憶體裡的 KV cache 是同樣那麼多位元組，
+> 不管那些位元組由 x86 還是 ARM 在算。三項裡真正與架構有關的只有**解碼速率**；
+> 「pull 大小」只有映像層相差幾百 MB（同一份 `requirements.txt` 在 arm64 上解析
+> 出的 wheel 不同，但量級不變）。
+>
+> 這條更正不是文字潔癖：**一份把不相關的東西列進「未驗」清單的文件，會讓那份
+> 清單整體失去可信度** —— 而那份清單存在的理由正是「照著它去補驗證」。
+>
+> **另外，本節開頭那句「grep `uname|arch|x86|arm|aarch`，0 命中」現在已經不成立**
+> —— 同日晚間由 **D-057** 補上（四個純函式 ＋ `deploy-vps.sh` 的三層階梯）。
+> 留在這裡是因為它正確描述了**當時**的狀態；今天再 grep 會命中，那不是矛盾。
 
 ### 二、缺口二：GPU（零處理，而且 compose 根本無法使用 GPU）
 
@@ -7631,6 +7653,11 @@ qwen3:8b  模型 5.2 GB  →  閘門要求 14 GB 可用
    ＋ 佈署後驗證真的在用），還是**明確宣告 CPU-only** 並在偵測到 GPU 時警告？
 2. **架構（第一節）**：不認識的架構要**硬擋**（fail-closed，符合這支腳本
    「埠在容器存在之前就已經關上了」的哲學）還是只警告？
+   → **已決定（2026-09-25 稍晚，D-057）**：**警告並繼續**，而這裡寫的
+   fail-closed 方向**是錯的** —— 實查 registry 之後，四個映像檔都出 arm64，
+   「ARM 上跑不動」是假的，硬擋會擋掉一個真的能用的佈署。**唯一會硬擋的是
+   另一件事**：registry 明確列出了清單而裡面**沒有**這個架構（那才是
+   「已知不可能」，與磁碟閘門同一類）。
 3. **tunnel（第四節）**：維持兩段分工、只把完成訊息的下一步寫清楚，
    還是加 `--with-tunnel` 旗標把它納入？（後者會改變對外暴露的面，
    `check-exposure.sh` 的 `strict` 閘門要一起想。）
@@ -7640,8 +7667,10 @@ qwen3:8b  模型 5.2 GB  →  閘門要求 14 GB 可用
 - **本則是一份缺口分析，不是實作計畫**，也沒有任何程式碼變更。第一、二、三節的
   行號與 grep 結果**已逐一查證**（`uname|arch|…` 與 `nvidia|gpu|…` 皆為 0 命中；
   磁碟閘門的兩個函式是**實跑**的，不是閱讀推論）。
-- **第二節的「ARM 行為不同」是推論，不是量測** —— 沒有在 ARM 上跑過任何一次。
+- **第一節的「ARM 行為不同」是推論，不是量測** —— 沒有在 ARM 上跑過任何一次。
   已證的是「零處理」這個事實；未證的是「跑起來會怎樣」。
+  （原文寫「第二節」，是交叉引用的筆誤 —— ARM 是第一節，第二節是 GPU。
+  2026-09-25 依 D-057 一併更正。）
 - **tunnel 那條路線「關得掉」已證明，「開得起來」仍未驗** —— 需要真實 token，
   而那只能由使用者在自己的機器上完成（D-029 第一節）。
 
@@ -7820,4 +7849,199 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml docker compose config | g
 - **`nvidia-smi` 的實際輸出格式未經真機驗證** —— 判讀用的 `-L` 與
   `--query-gpu=memory.total` 是照官方文件寫的。
 - **`count: all` 在真實機器上是否真的把全部 GPU 傳進去，未驗。**
-- **ARM 那一項（D-055 第一節）與 tunnel、Docker 前置都仍未處理**，與本則無關。
+- **ARM 那一項（D-055 第一節）已於同日稍晚由 D-057 處理**（警告並繼續 ＋ 三層
+  階梯）；**tunnel 與 Docker 前置仍未處理**，與本則無關。
+
+---
+
+## D-057：架構檢查 —— 讓「在沒量過的平台上佈署」變成看得見的事
+
+**日期**：2026-09-25
+**狀態**：已實作（`deploy-vps-decisions.sh` 四個純函式、`deploy-vps.sh` 三處；
+192 個離線案例、102 道突變全過）
+**關掉的缺口**：D-055 第一節（架構零處理）。**這是 D-055 六項裡第二個結案的**
+（第一個是 GPU，D-056）。
+
+### 一、開工前先量的三件事，其中兩件改變了題目的形狀
+
+D-055 把方向留成待決策：「不認識的架構要硬擋（fail-closed）還是只警告？」
+**先去量，再決定** —— 而量出來的東西推翻了那個二選一。
+
+**1. 映像檔全部有 arm64。** `docker manifest inspect` 實查（不需要 ARM 機器，
+只要網路）：
+
+| 映像 | 架構 |
+|---|---|
+| `ollama/ollama:latest` | amd64, arm64 |
+| `ghcr.io/open-webui/open-webui:main` | amd64, arm64（＋2 條 attestation 的 `unknown`）|
+| `cloudflare/cloudflared:latest` | amd64, arm64 |
+| `python:3.12-slim`（mcp-server 的 `FROM`）| 386, amd64, arm/v5, arm/v7, arm64, ppc64le, riscv64, s390x |
+
+→ **ARM 上這個堆疊真的會跑起來。** 所以 D-055 §六.2 的「硬擋」是**錯的方向**：
+它會拒絕一個能用的佈署。
+
+**2. D-055 §一 的三項裡有一項是錯的。** 見上面那個 ⚠ 更正塊：
+`KV_KIB_PER_TOKEN_ESTIMATE=36` 是模型幾何，與 CPU 架構無關。
+
+**3. 唯一會「跑得動又不報錯」的架構失敗是模擬執行。** 主機裝了 qemu/binfmt 時，
+Docker 會拿 amd64 映像在 aarch64 上跑 —— 慢 10–100×，而 compose 起得來、
+健康檢查過、模型也答得出話。**沒有其他訊號。** 這是這個家族（宣告面 ≠ 執行面）
+的第四次，前三次是 `endpoint boot` 少了 `-g`、`.env` 的 `KEEP_ALIVE=-1`、
+以及 D-056 的 GPU。
+
+### 二、三層階梯（沿用 D-056 的形狀）
+
+| 層 | 問什麼 | 儀器 | 什麼時候跑 |
+|---|---|---|---|
+| **宣告** | 這台是什麼架構 | `uname -m` → `cpu_arch` → `arch_verdict` | 一律（step 2）|
+| **裝置** | registry 有沒有這個架構 | `docker manifest inspect` → `image_arch_listed` | 可判定時 |
+| **執行** | 本地那份映像是不是這個架構 | `docker image inspect … {{.Architecture}}` → `arch_match_verdict` | 可判定時 |
+
+**「可判定」＝ `ARCH_FAMILY` 是 `arm64`。** amd64 是量過的那條路（沒有宣稱就沒有
+東西要驗），`unknown` 是**問不出來**（見第四節）。x86_64 路徑上整個改動只有一次
+`uname -m` 與一行安靜通過：**零網路呼叫、零新失敗模式、CPU 路徑一字未改。**
+
+### 三、判定與結束碼
+
+- **宣告層**：`verified`（amd64）／`unverified`（arm64）／`unknown`（其餘）。
+  `unverified` **不擋** —— 那是「沒量過」，不是「不能用」。
+- **裝置層**：`yes`／`no`／`unknown`。**`unknown` 不擋**（見下）。
+  這是唯一會**硬擋**的新路徑：`no` 代表 registry 明確列出了清單而裡面沒有我們
+  要的架構（例如 armv7l 主機對上只有 amd64+arm64 的 ollama）。那不是「沒量過」，
+  是**已知不可能** —— 與磁碟閘門同一類（壞在半路），所以擋，並**印出它看到的
+  清單**（D-028：列印解析結果是一次免費的斷言）。
+- **執行層**：`native`／`emulated`／`unknown`。`emulated` → **結束碼 1**，
+  與 D-056 的 `size_vram == 0` 同一個推理：**失效的是我們自己的宣稱**
+  （我們說這疊在原生跑），歸進「無法判定」就是讓它被忽略。`unknown` → 2。
+
+### 四、兩個「不可以猜」的地方，以及一個被實跑抓到的句子
+
+**(a) 讀不到 `architecture` 欄位時，回 `unknown` 而不是 `no`。**
+單一平台的 manifest **完全沒有**這個欄位（實查：`docker manifest inspect` 一個
+digest，輸出用 tab 縮排、`architecture` 出現 **0 次**）。把它讀成 `no` 會對著一台
+**映像檔就在本地、容器剛剛才起來**的機器說「沒有你這個架構的映像檔」並硬擋。
+那是 D-056 的 `size_vram` 同一課：**會誤報的守衛比沒有守衛更糟，因為假警告會
+訓練人忽略警告。**
+
+**(b) `want == "unknown"` 必須短路。** 真實的 manifest 裡**真的有**
+`"architecture": "unknown"`（那是 attestation 的 provenance／SBOM 項目，不是平台）。
+少了那道短路，呼叫端認不得 `uname -m` 時傳進來的 `unknown` 會回 `yes` ——
+把「我認不得這台機器」講成「registry 上有你這個架構」。
+
+**(c) 32 位元 ARM 刻意不映射。** Docker 的 `arm` 還帶一個 `variant`（v5／v6／v7），
+而我們比對的是單一字串，比不出 variant。把 `armv7l` 映射成 `arm` 會讓裝置層
+**只憑「architecture 是 arm」就回 yes**。給 `unknown` 的副作用是好的：唯一能走到
+裝置層的值只有 `amd64`／`arm64`／`unknown` 三種，所以那個 variant 問題
+**不可能**發生，而不是「小心不要讓它發生」。
+
+**(d) 那個「不猜」的決定，第一次實跑就抓到一個 bug —— 但不在它自己身上。**
+用 PATH shim 偽造 `uname -m` 走 riscv64 那條路時，輸出是：
+
+```
+!   registry：0 個映像有 unknown，2 個**查不到**
+```
+
+`unknown` 是**我們自己的標記**，不是架構的名字。它一被插進句子裡就變成
+「unknown 這個架構查不到」——而正確的意思是「我不知道這台是什麼，所以無從問起」。
+修法不只是改字：**認不得的架構根本不去問 registry**（`want=unknown` 對每一份
+manifest 都只可能回 `unknown`，兩次網路呼叫換不到任何資訊）。修完之後
+RISCV64 是「兩層都不跑，只留一句警告」。
+
+同一輪還把「跑不跑」的條件收成**一個推導值** `ARCH_CHECKABLE`：registry 層與
+step 13 都要問同一個問題，寫兩次就會漂移，而漂移的症狀會是「registry 說有、
+step 13 說模擬」這種自相矛盾的輸出（D-054 的形狀）。
+
+### 五、第三層的儀器**換過**（與核可的計畫不同，這裡要講清楚）
+
+核可的計畫寫的是「進容器讀 `platform.machine()`」。**實作時換掉了**，理由是具體的：
+那個值要靠 qemu-user 把 `uname` 假造成被模擬的架構。那個行為**我沒有辦法在這裡
+證明**（本機是 x86，沒有 qemu），而**一個「失效時會安靜地說 native」的檢查比沒有
+檢查更糟**。改用映像的 `.Architecture` —— 那是決定 Docker 挑哪個 manifest 的
+權威欄位，而且是本地中繼資料：**量得到就是判準，不是推論**，也不需要動煙霧探針。
+
+副作用有兩個，都好：`deploy_smoke_probe.py` **完全不用改**（探針不新增
+`arch` section，也就不會出現第二份詞彙映射表），而第三層不需要容器起來。
+
+### 六、順帶修掉的第二個缺陷：GPU 的處方在 ARM 上是錯的
+
+`nvidia-smi` 也存在於 aarch64（Jetson／Grace），而 `deploy-vps.sh` 的 `blocked`
+分支給的是 **x86 的配方**（`apt-get install nvidia-container-toolkit` ＋
+`nvidia-ctk runtime configure`）。ARM 上的 NVIDIA 是另一組套件（Jetson 走 JetPack、
+Grace 走伺服器版），而且那條路這個 lab **一次都沒有量過** —— 上游甚至有 GLIBC
+不符而**安靜退回 CPU** 的案例（與 D-056 的家族同型）。非 amd64 時補一段說明，
+指出不要把上面那三行直接貼過來。**那個訊息在 ARM 上會把人指到錯的方向**，
+這是這一則順帶修掉的東西。
+
+### 七、刻意不做（都是查證後才決定不做的）
+
+- **不加 `OLLAMA_ARCH` 之類的開關**：使用者選的是「警告並繼續」，所以沒有東西
+  需要關掉。加一個只為了消音的鍵會造出**第二個真相來源**（D-054 的病灶）。
+- **不改 `ram_warn_mb`／`model_gb_estimate`／`disk_need_gb`**：`KV_KIB=36` 與
+  GGUF 權重大小都與 CPU 架構無關（第一節的查證結論）。`disk_need_gb` 的 `+4` 是
+  唯一的架構敏感項（映像層大小），但幾百 MB 的差別不值得動一個有突變守著的行。
+- **不動 `scripts/endpoint-ntfy-fixes.patch` 的 `pkill -x cloudflared-linux-amd64`**：
+  那支補丁注入的 notebook 只跑在 Kaggle（x86），**在那裡它是對的**。
+- **不呼叫 `uname -m` 以外的任何東西**判斷架構：沒有 `lscpu`、沒有 `/proc/cpuinfo`
+  —— `verify-throughput.sh:123` 記著 `set -euo pipefail` 下讀那個檔的坑。
+
+### 八、**發現但這次不修**：架構盲的快取鍵
+
+四個 `verify-*.sh` 的 `--label "lab.req-sha256=$REQ_HASH"` 是**架構盲的**：同一份
+`requirements.txt` 在 amd64 與 arm64 上雜湊相同，但解析出的 wheel 不同。所以
+換架構重跑時，快取會命中一個**為另一個架構建出來的 image**。
+
+**這是真的潛在缺陷，但它屬於那四支探針，不屬於這次的 `deploy-vps.sh`。** 記錄
+在這裡是為了不讓它消失；修它要動的是另一組檔案的快取鍵設計（把架構併進雜湊），
+而那個改動的驗證成本與風險都與這則無關。**留給下一個開那四支的人。**
+
+### 九、驗證（實跑，不是推論）
+
+三份離線套件（實跑數字，不是文件上的舊數字）：
+
+| 套件 | 前 | 後 |
+|---|---|---|
+| `test_deploy_vps_decisions.sh` | 152 | **192** |
+| `test_deploy_vps_decisions_mutants.sh` | 89 | **102** |
+| `test_deploy_smoke_probe.py` | 50 | 50（未改動）|
+
+新增的突變裡有兩條是這一則存在的理由：**`arm64 → verified`**（宣稱這個 lab 在
+ARM 上驗證過）與 **`不等時回 native`**（讓模擬執行整個靜默）。另外一條守的是
+誤報方向：**`讀不到 architecture 欄位時回 no`**。
+
+**裝置層對著真 registry 實跑**（本機 x86，不需要 ARM 機器）：`arm64 → yes`、
+`riscv64 → no`、單一平台 manifest → `unknown`（不是 `no`）、`want=unknown` → `unknown`。
+
+**用 PATH shim 偽造 `uname -m`，把真的 `deploy-vps.sh` 走過四條路**
+（與 D-056 用 shim 偽造 `nvidia-smi` 同一個手法；`.env` 的 md5 四次跑完都不變）：
+
+| 情境 | 結束碼 | 結果 |
+|---|---|---|
+| 真 x86_64（對照組）| 0 | 整段安靜，只有 dry-run 摘要的一行 |
+| 偽 aarch64 | 0 | 警告 ＋ registry 查到 2 個映像都有 arm64 → 繼續 |
+| 偽 aarch64 ＋ manifest 只有 amd64 | **1** | 硬擋，並印出「它有的是：amd64」 |
+| 偽 riscv64 | 0 | 兩層都不跑，只留「認不得這台」的警告 |
+
+第三層的儀器另外用**真的本地映像**驗過：
+`docker image inspect ollama/ollama:latest --format '{{.Architecture}}'` → `amd64`；
+餵 `aarch64` 當主機 → `emulated`；映像不存在（空字串）→ `unknown`（**不是 native**）。
+
+### 十、無測試聲明
+
+**aarch64 主機上沒有跑過任何一次。** 本機（以及 D-028／D-055 記的那三次端到端）
+都是 x86_64。有測試守著的是：四個純函式的真值表、對**真實** manifest JSON 的判讀
+（三份是 2026-09-25 抓下來的原樣）、三個判定函式的每一條邊界、以及上面那張 shim 表。
+
+**沒有守著的是：**
+
+1. **`docker manifest inspect` 的輸出格式在別的 registry 上是否一樣。** 三份
+   fixture 都是 Docker Hub 與 ghcr.io；其他 registry（私有、Harbor、ECR）的
+   `architecture` 欄位拼法與縮排**未驗**。判讀已經對空白不敏感、且要求欄位存在，
+   所以最壞情況是回 `unknown`（警告），不是回 `no`（誤擋）—— 但那是**推理**。
+2. **ARM 上 ollama 的實際解碼速率。** 這一則從頭到尾沒有產生任何一個 ARM 上的
+   效能數字，README 的修正是加一句「那些數字是 x86 量的」而不是換一組數字。
+3. **`emulated` 那條路徑的判準是推論，不是量測。** 本機沒有 qemu，所以「qemu
+   模擬時 `.Architecture` 會與主機不同」這句話是**從 Docker 的 manifest 選擇
+   機制推出來的**。它與 D-055 §七 記的「ARM 行為不同是推論」同一個性質。
+   做不到真機驗證的話，至少那個判準會**響**而不是靜默。
+
+**要有人在一台真的 ARM 機器上跑一次 `deploy-vps.sh` 才算證明。**

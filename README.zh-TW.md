@@ -400,6 +400,12 @@ KV cache 那一欄是從 **D-022 的「3B 級模型約 36 KiB/token」**換算�
 不是價格。這個理由本身是對的，而且值得明講 —— 因為反過來做（為了省錢去租
 80 GB GPU）是不會成立的。
 
+**上面那些 token/s 數字全部是在 x86_64 上量的。** 它們是這張表裡唯一與 CPU
+架構有關的一欄，而這個 repo 在 ARM（Graviton／Ampere／Oracle ARM）上**一次
+都沒有跑過**。映像檔是 multi-arch，所以 ARM 機器**會**起來、**會**服務 ——
+只是用一個沒有人量過的速度。`scripts/deploy-vps.sh` 佈署時會把這件事講出來，
+然後繼續跑，因為「沒量過」不是「壞掉」（D-057）。
+
 搬到 GPU 機型時容易漏掉的事：
 
 1. **機器要有 NVIDIA container runtime。** 裝置保留區本身不必再手加了：
@@ -587,8 +593,8 @@ bash scripts/up.sh
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話。它的涵蓋檢查以前正是下面那個缺陷最壞的例子 —— `set -o pipefail` 之下 `printf \| grep -q` 的形式死於 SIGPIPE，於是**偏偏在涵蓋範圍最大的時候**回報「涵蓋不到」。現在它是 shell 的模式比對，而判準被講成它真正的樣子：**讀者離開之後，生產者還會不會再寫**（D-034，於 D-038 第七節更正） |
 | `bash scripts/test_usage_text.sh` | 每一支腳本的 `--help` 只印**它自己的檔頭**、不印別的，而且「印到哪裡停」的判準是**內容**（一直印到第一行非註解、非空行）而不是位置。原本用位置決定的 9 支裡：**4 支把程式碼當說明印出來**（`source …`／`require_docker`）、**1 支在截斷**（`deploy-vps.sh` 的 110 行檔頭只印了 18 行）、**4 支只是剛好對** —— 而「剛好對」才是危險的那一半：它不會失敗，所以也不會有人說什麼。C 節在暫存專案根裡（接假 docker）真的跑 11 支的 `--help`，與**獨立推導**出來的檔頭（另一種算法）逐字比對；D 節掃描寫死行號有沒有回來、以及有沒有一個 `usage_text` 呼叫搆不到定義 —— 這次改動的第一版就是在 `lib.sh` 載入之前呼叫它，結果**什麼都不印、結束碼還是 0**（D-039） |
 | `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
-| `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻與 `.env` 寫入器，每一項都有「該過的過」與「該擋的擋」 |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 89 道突變，每一個都必須被抓到 |
+| `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻、`.env` 寫入器與架構三層，每一項都有「該過的過」與「該擋的擋」—— 192 個案例。架構那幾條讀的是**真實抓下來的 `docker manifest inspect` JSON**，包含兩個坑：單一平台的 manifest **完全沒有** `architecture` 欄位（讀成「沒有」會擋掉一台容器已經起來的機器），以及 `arm` 不可以誤中 `arm64`（D-057） |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 102 道突變，每一個都必須被抓到。架構那組最貴的兩條：`arm64 → verified`（宣稱這個 lab 在 ARM 上驗證過）與 `不等時回 native`（讓 qemu 模擬執行**整個靜默**） |
 | `bash scripts/verify-phase3-runtime.sh` | `recursion_limit` 算的是 super-step（+1）、太緊的 limit 會在工作全部做完之後才中止、以及持久化的 job store 在 1 秒預設寬限下仍會安靜地丟掉到期的 job（D-030） |
 | `bash scripts/test_phase3_runtime_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 langgraph —— 而且每個邊界都是獨立一個案例 |
 | `bash scripts/test_phase3_storage_decisions.sh` | 儲存判定分得出 named volume、bind mount 與容器的暫存目錄，而且 `unknown` 永遠不會被讀成 durable |

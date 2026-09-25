@@ -504,3 +504,114 @@ env_remove() {
     if [[ "$line" != "$key="* ]]; then printf '%s\n' "$line"; fi
   done
 }
+
+# ─────────────────────────────────────────────────────────
+# CPU 架構（D-057）
+# ─────────────────────────────────────────────────────────
+
+# `uname -m` 的輸出 → Docker 的架構詞彙。**這是整份檔案唯一的一張映射表**，
+# 下面兩個函式都經過它 —— 同一份映射寫兩次，改了一邊就會出現「形狀正確、
+# 結論相反」的分歧（#83 那六條「植入失敗」換來的就是這個教訓）。
+#
+# 輸出用 Docker 的詞彙（amd64／arm64）而不是 uname 的（x86_64／aarch64），
+# 因為下游全部是 Docker：manifest 清單、容器回報的 platform，以及要印給人看
+# 的訊息。輸入維持 uname 的詞彙，因為那是它唯一的來源。
+#
+# 先正規化再判斷，而不是把兩種寫法並列在 `case` 的 `|` 兩邊：突變目標行
+# **不可以含有 `|`**（見檔頭），所以那一行會沒辦法被瞄準 —— 而這裡最該被
+# 瞄準的就是「aarch64 被當成 amd64」那一條。與 gpu_verdict 把 `||` 寫成
+# `if` 是同一個理由。
+cpu_arch() {
+  local m="${1:-}"
+  if [[ "$m" == "x86_64" ]]; then m="amd64"; fi
+  if [[ "$m" == "aarch64" ]]; then m="arm64"; fi
+  if [[ "$m" == "amd64" ]]; then printf 'amd64'; return 0; fi
+  if [[ "$m" == "arm64" ]]; then printf 'arm64'; return 0; fi
+  printf 'unknown'
+}
+
+# 這台機器的架構有沒有被量過。D-055 §一 記著：ARM VPS（Graviton／Ampere／
+# Oracle ARM）沒有任何一層被驗證過，而那個缺口**不會報錯** —— 映像是
+# multi-arch，所以它跑得起來，只是每個數字都沒人在上面量過。
+#
+#   verified    amd64：三次端到端都在這裡跑過
+#   unverified  arm64：映像檔有（實查 registry 的 manifest 確認過：
+#               ollama／open-webui／cloudflared 都出 arm64），但這個 lab
+#               沒有在上面跑過任何一次。**只警告，不擋。**
+#   unknown     其餘（armv7l／riscv64／i686…）：連有沒有映像檔都不知道 ——
+#               那要問 registry，不是這裡能回答的。
+#
+# **`unverified` 不擋是刻意的**：D-055 §六.2 原本把方向寫成「不認識的架構要
+# 硬擋（fail-closed）」，但在實查到「四個映像檔全部有 arm64」之後，硬擋等於
+# 擋掉一個真的能用的佈署。那是「沒量過」，不是「不能用」—— 與 vCPU 那條
+# （`deploy-vps.sh`：「可以跑，只是慢。不擋」）同一個判斷。
+arch_verdict() {
+  local a="$(cpu_arch "${1:-}")"
+  if [[ "$a" == "amd64" ]]; then printf 'verified'; return 0; fi
+  if [[ "$a" == "arm64" ]]; then printf 'unverified'; return 0; fi
+  printf 'unknown'
+}
+
+# registry 的 manifest 裡有沒有這個架構。輸入是 `docker manifest inspect
+# <image>` 的輸出，真的長這樣（縮排與空白都保留）：
+#
+#   { "schemaVersion": 2, "mediaType": "…/image.index.v1+json",
+#     "manifests": [ { "platform": { "architecture": "amd64", "os": "linux" } }, … ] }
+#
+# 三態，而**中間那一態是這個函式存在的理由**：
+#
+#   yes      清單裡有這個架構，可以拉
+#   no       清單讀得到，但裡面沒有 —— 這是「已知不可能」，呼叫端會**硬擋**。
+#            例如 armv7l 的主機對上只有 amd64+arm64 的 ollama/ollama：那不是
+#            慢，是 pull 到一半會失敗（與磁碟閘門同一類）。
+#   unknown  **讀不到架構清單**。單一平台的 manifest（不是 index）根本沒有
+#            `architecture` 這個欄位（實查：`docker manifest inspect
+#            ollama/ollama@<digest>` 的輸出裡 0 個）；空輸出、逾時、被
+#            rate limit、需要認證，也都是這一態。
+#
+# **`unknown` 既不能預設成 `no` 也不能預設成 `yes`。** 前者會對著一台好好
+# 的機器說「沒有你這個架構的映像檔」—— 會誤報的守衛比沒有守衛更糟（這是
+# D-056 的 size_vram 那一課）；後者則是放行之後在 pull 才失敗，而那正是這
+# 一層要提前的事。無知就是一態，不是二選一（D-016）。
+#
+# 兩個實作細節都是被真實輸出逼出來的：比對前先把空白全部拿掉（index 用 3 個
+# 空格縮排、單一 manifest 用 tab，兩種都出現過）；比的是**整個引號值**
+# `"architecture":"arm64"`，否則 `arm` 會誤中 `arm64`。
+image_arch_listed() {
+  local json="${1:-}" want="${2:-}"
+  if [[ -z "$want" ]]; then printf 'unknown'; return 0; fi
+  if [[ "$want" == "unknown" ]]; then printf 'unknown'; return 0; fi
+  local flat="${json//[[:space:]]/}"
+  if [[ "$flat" != *'"architecture":'* ]]; then printf 'unknown'; return 0; fi
+  if [[ "$flat" == *'"architecture":"'"$want"'"'* ]]; then printf 'yes'; return 0; fi
+  printf 'no'
+}
+
+# 主機的架構與**另一個來源**回報的架構一不一致 —— 那個來源是本地映像的
+# `.Architecture`（`docker image inspect` 的欄位，Docker 自己的詞彙）。兩個
+# 輸入都會先過 `cpu_arch`，所以 `aarch64` 與 `arm64` 這兩種寫法都吃得下。
+#
+# #82 的落地層：**唯一會「跑得動又不報錯」的架構失敗是模擬執行** —— 主機裝了
+# qemu/binfmt 時，Docker 會拿 amd64 映像在 aarch64 上跑，慢 10–100×，而
+# compose 起得來、健康檢查過、模型也答話，**沒有任何其他訊號**。
+#
+#   native    兩邊讀到且相同
+#   emulated  兩邊讀到但不同 —— 呼叫端回結束碼 1，不是 2。理由與
+#             D-056 的 size_vram==0 相同：**失效的是我們自己的宣稱**（我們說
+#             這一疊在原生的架構上跑），把它歸進「無法判定」就是讓它被忽略。
+#   unknown   任一邊讀不到。無知不是缺陷（D-016），但也不是「沒問題」。
+#
+# **為什麼量的是映像的欄位，而不是進容器問 `platform.machine()`**：後者要靠
+# qemu-user 把 `uname` 假造成被模擬的架構。那個行為我沒有辦法在這裡證明
+# （本機是 x86，沒有 qemu），而**一個「失效時會安靜地說 native」的檢查比沒有
+# 檢查更糟**。映像的 `.Architecture` 是決定 Docker 挑哪個 manifest 的權威欄位，
+# 而且立刻量得到 —— 這一層因此是判準，不是推論（D-057 的界線那節記著這件事）。
+arch_match_verdict() {
+  local host="${1:-}" other="${2:-}"
+  local h="$(cpu_arch "$host")"
+  local o="$(cpu_arch "$other")"
+  if [[ "$h" == "unknown" ]]; then printf 'unknown'; return 0; fi
+  if [[ "$o" == "unknown" ]]; then printf 'unknown'; return 0; fi
+  if [[ "$h" == "$o" ]]; then printf 'native'; return 0; fi
+  printf 'emulated'
+}

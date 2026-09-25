@@ -441,6 +441,13 @@ prices self-hosting is not cheaper than an API.** You buy the data path, not the
 price. That is the correct reason and it is worth being explicit about, because
 the alternative — renting an 80 GB GPU to save money — does not work.
 
+**The token/s figures above were measured on x86_64.** They are the only numbers
+in this table that depend on the CPU architecture, and nothing here has been run
+on ARM (Graviton, Ampere, Oracle ARM). The images are multi-arch, so an ARM box
+**will** come up and serve — it will just do so at a speed nobody has measured.
+`scripts/deploy-vps.sh` says so at deploy time and then keeps going, because
+"unmeasured" is not "broken" (D-057).
+
 Things that are easy to miss when moving to a GPU instance:
 
 1. **The instance needs the NVIDIA container runtime.** The device reservation
@@ -640,8 +647,8 @@ change anything they cover.
 | `bash scripts/test_usage_text.sh` | That every script's `--help` prints **its own header and nothing else**, and that the criterion for where to stop is **content** (print until the first non-comment, non-blank line) rather than a position. Of the nine scripts that decided that by position, **four were printing code** as documentation (`source …`, `require_docker`), **one was truncating** (`deploy-vps.sh` showed 18 of its 110 header lines) and **four were right only by coincidence** — and the coincidences are the dangerous half: nothing fails, so nothing says anything. Section C runs all eleven `--help`s end-to-end in a temp project root with a fake docker and compares them byte-for-byte against a header **derived independently** (a different algorithm); section D scans for a hardcoded range coming back, and for a `usage_text` call that cannot reach its definition — the first version of this change called it before `lib.sh` was loaded, which prints **nothing** and still exits 0 (D-039) |
 | `bash scripts/test_ollama_log_corroboration.sh` | That the server-side log corroboration reports "the instrument is broken" and "no truncation this run" as two different sentences. Its coverage check used to be the worst case of the defect below — under `set -o pipefail` the `printf \| grep -q` form died of SIGPIPE and reported "coverage not established" *precisely when the window covered the most*; it is now a shell pattern match, and the criterion is stated as what it is: **does the producer write again after the reader leaves** (D-034, corrected in D-038 §7) |
 | `bash scripts/deploy-vps.sh --dry-run` | What a deploy would write to `.env` and whether the machine has the disk/RAM — changes nothing |
-| `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds and the `.env` writer each have a "should pass" and a "should block" case |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 89 mutations across the three bash modules and the smoke probe, every one must be caught |
+| `bash scripts/test_deploy_vps_decisions.sh` | That the bind-address policy, the exposure gate's four states, the resource thresholds, the `.env` writer and the three arch layers each have a "should pass" and a "should block" case — 192 cases. The arch ones read **real captured `docker manifest inspect` JSON**, including the trap that a single-platform manifest carries **no** `architecture` field at all (reading that as "no" would block a machine whose container is already up) and that `arm` must not match `arm64` (D-057) |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | That the grader above is actually exercised — 102 mutations across the three bash modules and the smoke probe, every one must be caught. The arch group's two most expensive: `arm64 → verified` (claiming this lab was validated on ARM) and `mismatch → native` (letting qemu emulation go **entirely silent**) |
 | `bash scripts/verify-phase3-runtime.sh` | That `recursion_limit` counts super-steps (+1), that a tight limit aborts only after all the work is done, and that a persistent job store still drops a due job silently under the 1-second default grace (D-030) |
 | `bash scripts/test_phase3_runtime_probe.py` | That the verdicts above have discriminating power offline — no Docker, no langgraph — with every boundary as its own case |
 | `bash scripts/test_phase3_storage_decisions.sh` | That the storage verdicts separate a named volume, a bind mount and a container's temp directory, and that `unknown` is never read as durable |

@@ -457,9 +457,213 @@ check "env_remove：沒有結尾換行的檔案，最後一行還在" \
   $'A=1\nB=2\n⟨END⟩' \
   "$(remove_raw COMPOSE_FILE $'A=1\nCOMPOSE_FILE=x\nB=2')"
 
+
+# ═══════════════════════════════════════════════════════════
+# #82／D-057：CPU 架構的三層階梯（宣告 → 裝置 → 執行）
+# ═══════════════════════════════════════════════════════════
+# 上面每一組守的都是「**同一台已知機器上，設定對不對**」。這一組是第一個
+# 守「**這台機器根本不一樣**」的 —— 而它的失效方式與眾不同：不是壞掉，
+# 是**安靜地跑出不同結果**（跑得起來、健康檢查過、模型也答話）。
+#
+# 所以 `unknown` 必須是**第三個字**，不能被併進任何一邊：
+#   · 併進 yes → 無知當成有（D-016）
+#   · 併進 no  → **對著一台好好的機器說它不能跑** —— D-056 的教訓是
+#     「會誤報的守衛比沒有守衛更糟」，因為假警告會訓練人忽略警告
+check "架構測試的前置：四份受測函式都存在" "4" \
+  "$(for f in cpu_arch arch_verdict image_arch_listed arch_match_verdict; do
+       declare -F "$f" >/dev/null && echo x; done | wc -l | tr -d ' ')"
+
+# ── cpu_arch：整支模組**唯一**的映射表 ──────────────────
+# `uname -m` 的詞彙 → Docker 的詞彙。只寫一次，下面三個判定函式全部經過
+# 它，所以「arm64 打成 am64」這種錯只可能錯在一個地方（#83 的六條「植入
+# 失敗」換來的就是這個形狀：重複的映射會讓突變**對不上任何一行**）。
+check "架構：x86_64 → amd64" "amd64" "$(cpu_arch x86_64)"
+check "架構：amd64 原樣通過（它已經是 Docker 的詞彙）" "amd64" "$(cpu_arch amd64)"
+check "架構：aarch64 → arm64" "arm64" "$(cpu_arch aarch64)"
+check "架構：arm64 原樣通過" "arm64" "$(cpu_arch arm64)"
+
+# **32 位元 ARM 刻意不映射。** Docker 的 `arm` 與 `arm64` 是兩個不同的
+# architecture 值，而 `arm` 還帶一個 `variant`（v5／v6／v7）—— 我們比對的
+# 是單一字串，比不出 variant。把 `armv7l` 映射成 `arm` 會讓裝置層**只憑
+# 「architecture 是 arm」就回 yes**，而實際的 variant 可能不是 v7。
+# 「形狀正確、結論相反」正是這支模組存在的理由（:14-15），所以這裡給
+# `unknown`：查不到就說查不到，不要猜。副作用是唯一能走到裝置層的值只有
+# `amd64`／`arm64`／`unknown` 三種 —— 這條性質讓上面的 variant 問題
+# **不可能**發生，而不是「小心不要讓它發生」。
+check "架構：armv7l 不猜（32 位元 ARM 是**另一個**映像）" "unknown" "$(cpu_arch armv7l)"
+check "架構：riscv64 不猜" "unknown" "$(cpu_arch riscv64)"
+check "架構：i686 不猜" "unknown" "$(cpu_arch i686)"
+check "架構：空字串 → unknown" "unknown" "$(cpu_arch '')"
+check "架構：沒有參數 → unknown（不是當成 x86）" "unknown" "$(cpu_arch)"
+
+# ── arch_verdict：宣告層 ─────────────────────────────────
+# **`aarch64 → unverified` 是這一整組的核心。** 回 `verified` 等於宣稱
+# 「這個 lab 在 ARM 上驗證過」，而那是假的 —— 那個突變就是 #82 存在的理由。
+check "宣告：x86_64 是量過的那條路" "verified" "$(arch_verdict x86_64)"
+check "宣告：aarch64 沒量過（核心案例）" "unverified" "$(arch_verdict aarch64)"
+check "宣告：arm64 寫法也算沒量過" "unverified" "$(arch_verdict arm64)"
+check "宣告：armv7l 連有沒有映像都不知道" "unknown" "$(arch_verdict armv7l)"
+check "宣告：認不得的字串 → unknown" "unknown" "$(arch_verdict 'sparc64')"
+check "宣告：空字串 → unknown" "unknown" "$(arch_verdict '')"
+
+# ── image_arch_listed：裝置層（用**真的** manifest JSON）──
+# 下面幾份 fixture 是 2026-09-25 用 `docker manifest inspect` 抓下來的原樣
+# （單一平台那份是抓 amd64 的 digest），**不是發明的**。判讀的形狀是承重的：
+# 多平台的是 3 空格縮排、冒號後有空白；而單一平台的 manifest **完全沒有
+# platform 區塊**，而且用 tab 縮排。這兩件事都實地確認過。
+MF_OLLAMA='{
+   "schemaVersion": 2,
+   "mediaType": "application/vnd.oci.image.index.v1+json",
+   "manifests": [
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 1065,
+         "digest": "sha256:4be1eaabf0dd0152bfbb780347e2888b5fe86ec25d0faa3eb4b1a956173736fb",
+         "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+         }
+      },
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 1063,
+         "digest": "sha256:cf48fbf1e4ccce713c97b5979772b98a39a55b820afd75a2855be1c190803c2b",
+         "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+         }
+      }
+   ]
+}'
+MF_SINGLE='{
+	"schemaVersion": 2,
+	"mediaType": "application/vnd.oci.image.manifest.v1+json",
+	"config": {
+		"mediaType": "application/vnd.oci.image.config.v1+json",
+		"digest": "sha256:7fe01b0ef22e342fcbcb61e89d39de511609f078c30754a3a0bee7bb0f20a5c2",
+		"size": 19379
+	},
+	"layers": [
+		{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest": "sha256:edd1ed89f0d443580bd42e5a10cd8736aba5a3438b2a0645c2ebb50119bb0eba",
+			"size": 29764116
+		},
+		{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest": "sha256:82a236c8a9d6bc9c998a94e3338dd1b050a58dd2141882a0c5270b21d259c6f6",
+			"size": 102377289
+		},
+		{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest": "sha256:b17cc8e5c9c73ed08c9d6757e0be194d445d879b48bb5946436fedb16a659317",
+			"size": 10763277
+		},
+		{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest": "sha256:b060533c4dae4f223176aaadd2ef5b8098a141f3ca39d3de453814310cd63b05",
+			"size": 3607580134
+		}
+	]
+}'
+MF_OPENWEBUI='{
+   "schemaVersion": 2,
+   "mediaType": "application/vnd.oci.image.index.v1+json",
+   "manifests": [
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 3898,
+         "digest": "sha256:34d884bba14a22a9745b00303f343cbdcfcbc16c004b4fe78af07c275b99a236",
+         "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+         }
+      },
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 1114,
+         "digest": "sha256:0b0683b0bac7805964fd9ccbde8070e433eb587c8e47e9fab433a35aeb87fc82",
+         "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+         }
+      },
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 3898,
+         "digest": "sha256:070c0674358d2cddd97dd7579a231fa933bd42e52a104bcc87f32175cb9b23a8",
+         "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+         }
+      },
+      {
+         "mediaType": "application/vnd.oci.image.manifest.v1+json",
+         "size": 1114,
+         "digest": "sha256:4d55802bba427cc4ef9eae51f508e31150fb14d4a09765db42674a6a69851869",
+         "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+         }
+      }
+   ]
+}'
+
+check "裝置：真 manifest 有 arm64 → yes" "yes" "$(image_arch_listed "$MF_OLLAMA" arm64)"
+check "裝置：真 manifest 有 amd64 → yes" "yes" "$(image_arch_listed "$MF_OLLAMA" amd64)"
+check "裝置：真 manifest 沒有 riscv64 → no" "no" "$(image_arch_listed "$MF_OLLAMA" riscv64)"
+
+# **`arm` 不誤中 `arm64`。** ollama 的 manifest 裡**有** arm64 而**沒有** arm
+# —— 子串比對會在這裡回 yes，而正確答案是 no。這不是假想的陷阱：真實的
+# registry 資料裡 `"architecture": "arm"`（python:3.12-slim，帶 variant）與
+# `"architecture": "arm64"` 是並存的兩個值。
+check "裝置：arm 不誤中 arm64（真資料裡兩個值並存）" "no" "$(image_arch_listed "$MF_OLLAMA" arm)"
+check "裝置：open-webui（有 arm64 ＋ 兩條 attestation）→ yes" "yes" "$(image_arch_listed "$MF_OPENWEBUI" arm64)"
+check "裝置：open-webui 也沒有 riscv64 → no" "no" "$(image_arch_listed "$MF_OPENWEBUI" riscv64)"
+
+# **最貴的一條**：單一平台的 manifest 沒有 architecture 欄位。把它讀成 `no`
+# 會對著一台**映像檔就在本地、而且剛剛才起來**的機器說「沒有你這個架構的
+# 映像檔」並硬擋。那是 D-056 的 size_vram 同一課。
+check "裝置：沒有 architecture 欄位 → unknown，不是 no" "unknown" "$(image_arch_listed "$MF_SINGLE" arm64)"
+check "裝置：單一平台 manifest 對 amd64 也是 unknown" "unknown" "$(image_arch_listed "$MF_SINGLE" amd64)"
+check "裝置：空字串（指令失敗／逾時）→ unknown" "unknown" "$(image_arch_listed '' arm64)"
+check "裝置：完全不是 JSON → unknown" "unknown" "$(image_arch_listed 'not json at all' arm64)"
+check "裝置：沒有第二個參數 → unknown" "unknown" "$(image_arch_listed "$MF_OLLAMA")"
+check "裝置：want 是空字串 → unknown" "unknown" "$(image_arch_listed "$MF_OLLAMA" '')"
+
+# **`want=unknown` 必須短路。** 真實的 manifest 裡**真的有**
+# `"architecture": "unknown"`（那是 attestation 的 provenance／SBOM 項目，
+# 不是平台）。少了那道短路，`want=unknown` 會回 `yes` —— 那是把「我認不得
+# 這台機器」講成「registry 上有你這個架構」。而 `unknown` 正是呼叫端在
+# 認不得 `uname -m` 時唯一會傳進來的值。
+check "裝置：fixture 裡真的有兩條 architecture=unknown（否則下面那條是空的）" "2" \
+  "$(printf '%s' "$MF_OPENWEBUI" | grep -c '"architecture": "unknown"')"
+check "裝置：want=unknown 短路成 unknown，不去命中那個 attestation" "unknown" \
+  "$(image_arch_listed "$MF_OPENWEBUI" unknown)"
+
+# 空白：真的 `docker manifest inspect` 是 3 空格縮排 ＋ 冒號後有空白，所以
+# 比對前必須去空白。反過來（緊湊的 JSON）也要吃得下 —— 別的 registry 或
+# 別的 CLI 版本可能不排版。
+check "裝置：緊湊 JSON（沒有空白）也要能讀" "yes" \
+  "$(image_arch_listed "$(printf '%s' "$MF_OLLAMA" | tr -d '[:space:]')" arm64)"
+
+# ── arch_match_verdict：執行層 ───────────────────────────
+# 這一層問的是「本地那份映像是不是主機的架構」。**唯一會跑得動又不報錯的
+# 架構失敗就是這一個**：主機裝了 qemu/binfmt 時，amd64 映像會在 aarch64
+# 上跑 —— 慢 10–100×，而 compose 起得來、健康檢查過、模型也答話。
+check "執行：x86_64 主機 ＋ amd64 映像 → native" "native" "$(arch_match_verdict x86_64 amd64)"
+check "執行：aarch64 主機 ＋ arm64 映像 → native（跨詞彙也認得）" "native" "$(arch_match_verdict aarch64 arm64)"
+check "執行：**aarch64 主機 ＋ amd64 映像 → emulated**（核心案例）" "emulated" "$(arch_match_verdict aarch64 amd64)"
+check "執行：x86_64 主機 ＋ arm64 映像 → emulated（反方向也要叫）" "emulated" "$(arch_match_verdict x86_64 arm64)"
+check "執行：riscv64 主機 → unknown（不知道，不是「沒問題」）" "unknown" "$(arch_match_verdict riscv64 amd64)"
+check "執行：映像讀不到（空字串）→ unknown" "unknown" "$(arch_match_verdict aarch64 '')"
+check "執行：主機讀不到 → unknown" "unknown" "$(arch_match_verdict '' arm64)"
+check "執行：兩邊都讀不到 → unknown" "unknown" "$(arch_match_verdict '' '')"
+check "執行：armv7l 主機 → unknown" "unknown" "$(arch_match_verdict armv7l arm64)"
+
 echo
 if [[ "$FAILED" -gt 0 ]]; then
   fail "$FAILED 個案例沒過，$PASS 個過"
   exit 1
 fi
-ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻、GPU 三態與 .env 的每一條邊界都有測試守著"
+ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻、GPU 三態、架構三層（宣告／裝置／執行），以及 .env 的每一條邊界都有測試守著"

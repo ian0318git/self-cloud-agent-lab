@@ -299,6 +299,112 @@ if [[ -n "$VCPU" && "$VCPU" =~ ^[0-9]+$ && "$VCPU" -lt 2 ]]; then
   warn "只有 ${VCPU} 顆 vCPU —— 可以跑，只是慢。不擋（那是慢，不是錯）。"
 fi
 
+# ── CPU 架構：宣告層 ＋ 裝置層（D-057）─────────────────────
+# D-055 §一 記著：ARM VPS（Graviton／Ampere／Oracle ARM）沒有任何一層被驗證過。
+# 這個缺口的形狀與 GPU 那個同屬一個家族 —— **不會報錯，只會安靜地跑出不同
+# 結果**：映像是 multi-arch，所以 compose 起得來、健康檢查過、模型答得出話，
+# 只有速度與 README 上那些數字是錯的。
+#
+# 但**不擋**。實查 registry 的 manifest（`docker manifest inspect`，不需要
+# ARM 機器）之後，「arm64 上跑不動」是假的：ollama／open-webui／cloudflared
+# 都出 arm64。硬擋會擋掉一個真的能用的佈署 —— D-055 §六.2 原本把方向寫成
+# 「不認識的架構要 fail-closed」，那是錯的（見 D-057）。
+#
+# 這裡唯一會硬擋的是裝置層的 `no`：registry **明確列出了清單而裡面沒有**
+# 這個架構。那不是「沒量過」，是「已知不可能」—— 與磁碟閘門同一類（壞在半路）。
+#
+# **只有可判定時才往下查**（見下面的 ARCH_CHECKABLE）：x86_64 是量過的那條路，
+# 多問一次 registry 只是多一個網路相依與失敗模式。CPU 路徑上這整段就是一次
+# uname 加一行安靜通過 —— **零網路呼叫、零新失敗模式。**
+HOST_MACHINE="$(uname -m 2>/dev/null || true)"
+ARCH_FAMILY="$(cpu_arch "$HOST_MACHINE")"
+
+# 下面兩層（registry、step 13）都要問「這台機器是不是某個**具體的** Docker
+# 架構」，而這個問題有兩種問不成的理由，處置完全不同：
+#   · amd64 → 量過的那條路，沒東西要驗
+#   · unknown（armv7l／riscv64／認不得的字串）→ **問不出來**：我們不知道
+#     這台在 Docker 的詞彙裡叫什麼，所以沒有東西可以拿去比
+# 兩種都**不跑**。這兩個條件寫成一個推導值而不是在兩處各寫一次 —— 同一個
+# 事實寫兩次就會漂移（D-054 的形狀），而漂移的症狀會是「registry 說有、
+# step 13 說模擬」這種自相矛盾的輸出。
+ARCH_CHECKABLE=0
+if [[ "$ARCH_FAMILY" == "arm64" ]]; then ARCH_CHECKABLE=1; fi
+
+case "$(arch_verdict "$HOST_MACHINE")" in
+  verified) : ;;
+  unverified)
+    warn "CPU 架構：${HOST_MACHINE}（ARM64）—— 這個 lab 只在 x86_64 上驗證過。"
+    warn "  映像檔有 arm64，所以它會跑起來。**不擋** —— 那是「沒量過」，不是"
+    warn "  「不能用」。但下面這些在 ARM 上沒有證據："
+    warn "    · README 尺寸表的吞吐量（5–10 token/s 那幾欄）是 x86 量的"
+    warn "    · README「When is this a fit?」的 GPU 建議是另一條沒驗過的路"
+    warn "  跑完之後 step 13 會再量一次**本地那份映像**的架構，確認不是模擬執行。" ;;
+  *)
+    warn "CPU 架構：認不得 \`uname -m\` 的輸出（${HOST_MACHINE:-讀不到}）—— 只認得"
+    warn "  x86_64 與 aarch64。不知道這台在 Docker 的詞彙裡叫什麼，所以下面"
+    warn "  **兩層都不會跑**：沒有東西可以拿去跟 registry 或映像比。它會跑，"
+    warn "  但這個 lab 的數字（含 README 的吞吐量）在這台上是沒有證據的。" ;;
+esac
+
+# 裝置層：registry 有沒有這個架構的映像檔。
+if [[ "$ARCH_FAMILY" == "unknown" ]]; then
+  # 認不得這台機器時**不去問 registry**。理由有兩個，第二個才是關鍵：
+  #   1. `want=unknown` 對每一份 manifest 都只可能回 unknown（那條短路是
+  #      刻意的）—— 兩次網路呼叫換不到任何資訊。
+  #   2. 把 `$ARCH_FAMILY` 直接塞進句子裡會生出「0 個映像有 unknown」這種
+  #      句子：`unknown` 是**我們自己的標記**，不是架構的名字。它一被講成
+  #      架構名，讀的人就會以為「unknown 這個架構查不到」——
+  #      而正確的意思是「我不知道這台是什麼，所以無從問起」。
+  warn "  registry 查詢：認不得這台的架構，所以**沒辦法問** —— 這是「不知道」，"
+  warn "  不是「沒問題」。拉的時候才會知道。"
+elif [[ "$ARCH_CHECKABLE" == "1" ]]; then
+  # 映像清單取自 compose 自己的模型，不是寫死一份 —— 寫死會在 compose 改了之後
+  # **無聲地檢查錯的東西**。用 `image:` 那幾行而不是 `config --images`：後者會
+  # 多出本地建的那個（mcp-test-server 只有 build、沒有 image），而 registry
+  # 當然查不到它 —— 那會變成每次非 amd64 佈署都出現一次的**假警告**，而假警告
+  # 會訓練人忽略警告。
+  ARCH_IMAGES="$(cd "$PROJECT_ROOT" && $COMPOSE config 2>/dev/null \
+    | grep -oE '^[[:space:]]+image:.*' \
+    | sed 's/^[[:space:]]*image:[[:space:]]*//' | sort -u || true)"
+  if [[ -z "$ARCH_IMAGES" ]]; then
+    warn "  registry 查詢：讀不到 compose 的映像清單 —— 跳過。這是「不知道」，"
+    warn "  不是「沒問題」：pull 的時候才會知道。"
+  else
+    ARCH_BAD=""
+    ARCH_UNKNOWN=0
+    ARCH_OK=0
+    while IFS= read -r ARCH_IMG; do
+      [[ -n "$ARCH_IMG" ]] || continue
+      ARCH_MANIFEST="$(timeout 20 docker manifest inspect "$ARCH_IMG" 2>/dev/null || true)"
+      case "$(image_arch_listed "$ARCH_MANIFEST" "$ARCH_FAMILY")" in
+        yes) ARCH_OK=$((ARCH_OK + 1)) ;;
+        no)
+          ARCH_SEEN="$(printf '%s' "$ARCH_MANIFEST" \
+            | grep -oE '"architecture":[[:space:]]*"[a-z0-9_]+"' \
+            | sed 's/.*"\([a-z0-9_]*\)"$/\1/' | sort -u | paste -sd'/' -)"
+          ARCH_BAD+="  · ${ARCH_IMG} —— 它有的是：${ARCH_SEEN:-（讀不到）}"$'\n' ;;
+        *)
+          ARCH_UNKNOWN=$((ARCH_UNKNOWN + 1)) ;;
+      esac
+    done <<< "$ARCH_IMAGES"
+
+    if [[ -n "$ARCH_BAD" ]]; then
+      fail "CPU 架構：registry 上沒有 ${ARCH_FAMILY} 的映像檔 —— 這不是「沒量過」，"
+      fail "  是「拉不下來」。它看到的架構清單是："
+      printf '%s' "$ARCH_BAD"
+      echo "  pull 會**中途失敗**（有時是無聲的）—— 與磁碟閘門同一類，所以擋。"
+      echo "  換一台機器，或改用有出這個架構的映像檔。"
+      BLOCKERS=$((BLOCKERS + 1))
+    elif [[ "$ARCH_UNKNOWN" -gt 0 ]]; then
+      warn "  registry：${ARCH_OK} 個映像有 ${ARCH_FAMILY}，${ARCH_UNKNOWN} 個**查不到**"
+      warn "  （網路、逾時、需要認證，或那個映像根本不是從 registry 拉的）。"
+      warn "  查不到就是查不到 —— 不當成「沒有」（那會誤擋），也不當成「有」。"
+    else
+      ok "  registry：${ARCH_OK} 個映像都有 ${ARCH_FAMILY} —— 拉得下來。"
+    fi
+  fi
+fi
+
 # ── GPU：偵測、判定，並讓「有沒有在用 GPU」變成看得到的事 ──
 # 這一節要消滅的是「宣告面 ≠ 執行面」家族的第三次。`docker-compose.yml`
 # 完全沒有任何 device reservation，所以這個堆疊**在任何有 GPU 的機器上都是
@@ -382,6 +488,13 @@ case "$GPU_VERDICT" in
     echo
     echo "  這台機器本來就不該用 GPU 的話，在 .env 設 OLLAMA_GPU=off 明講 ——"
     echo "  讓它是**選擇**，而不是意外。"
+    if [[ "$ARCH_FAMILY" != "amd64" ]]; then
+      echo
+      echo "  ⚠ 但這台是 ${HOST_MACHINE}，上面那三行是 **x86 的配方**。ARM 上的"
+      echo "    NVIDIA 是另一組套件（Jetson 走 JetPack、Grace 走伺服器版），"
+      echo "    而且那條路這個 lab **一次都沒有量過** —— 上游甚至有 GLIBC 不符"
+      echo "    而安靜退回 CPU 的案例（D-057）。不要把上面的指令直接貼過來。"
+    fi
     BLOCKERS=$((BLOCKERS + 1)) ;;
 esac
 
@@ -481,6 +594,14 @@ if [[ "$DRY_RUN" == "1" ]]; then
   else
     echo "    然後跑對外暴露閘門、下載模型、煙霧測試與 num_ctx 確認。"
     echo "    （GPU 那一段不會跑：判定是 $GPU_VERDICT。）"
+  fi
+  if [[ "$ARCH_FAMILY" == "amd64" ]]; then
+    echo "    （架構那一段不會跑：這台是 x86_64，也就是量過的那條路。）"
+  elif [[ "$ARCH_CHECKABLE" == "1" ]]; then
+    echo "    以及架構確認（比對本地映像的 .Architecture 與主機，確認不是模擬執行）。"
+  else
+    echo "    （架構那一段只到警告為止：認不得 ${HOST_MACHINE:-這台}，"
+    echo "      沒有東西可以拿去跟 registry 或映像比。）"
   fi
   exit 0
 fi
@@ -769,7 +890,81 @@ if [[ "$GPU_VERDICT" == "gpu" ]]; then
   echo
 fi
 
-# ── 13. 完成 ────────────────────────────────────────────
+# ── 13. 確認本地那份映像就是主機的架構（**只有可判定時才跑**）──
+# 前三層裡，前面兩層都還是**宣告面**：`uname -m` 說的是主機，`docker manifest
+# inspect` 說的是 registry 上有什麼。這一層問的是**這台機器上、剛剛被拿去跑的
+# 那份映像**是哪個架構 —— 那才是 Docker 真正拿去執行的位元。
+#
+# **儀器刻意不是「進容器讀 platform.machine()」**：那個值要靠 qemu-user 把
+# `uname` 假造成被模擬的架構。那個行為我沒有辦法在這裡證明（本機是 x86，沒有
+# qemu），而**一個「失效時會安靜地說 native」的檢查比沒有檢查更糟** ——
+# 與 D-056 的 size_vram 同一課。映像的 `.Architecture` 是決定 Docker 挑哪個
+# manifest 的權威欄位，而且是本地中繼資料：量得到就是判準，不是推論。
+#
+# 沒有宣稱就沒有東西要驗：amd64 主機整個不跑（與 GPU 那一節同一條規則）。
+# 認不得的架構也不跑 —— 那時連「主機的 Docker 架構叫什麼」都不知道，比不出
+# 東西；跑了只會每次都回 2（無法判定），而那種判準沒有資訊（見 ARCH_CHECKABLE）。
+if [[ "$ARCH_CHECKABLE" == "1" ]]; then
+  info "確認跑起來的映像是原生架構（讀各映像的 .Architecture）..."
+  ARCH_CHECK_RC=0
+  ARCH_EMULATED=""
+  ARCH_NOLOCAL=""
+  # `${ARCH_IMAGES:-}` 而不是 `$ARCH_IMAGES`：它是在 step 2 算的，離這裡五百
+  # 多行，而 lib.sh 開了 `set -u`。多一層預設值讓「有人把上面那行移走」的症狀
+  # 是「這一層說無法判定」，不是「整支腳本在某一行爆掉」。
+  if [[ -z "${ARCH_IMAGES:-}" ]]; then
+    warn "  讀不到映像清單（上面 compose config 沒給出 image:）—— 這一層無法判定。"
+    ARCH_CHECK_RC=2
+  else
+    while IFS= read -r ARCH_IMG; do
+      [[ -n "$ARCH_IMG" ]] || continue
+      ARCH_LOCAL="$(timeout 20 docker image inspect "$ARCH_IMG" \
+        --format '{{.Architecture}}' 2>/dev/null || true)"
+      case "$(arch_match_verdict "$HOST_MACHINE" "$ARCH_LOCAL")" in
+        native) ok "  $ARCH_IMG → $ARCH_LOCAL（原生）" ;;
+        emulated)
+          fail "  $ARCH_IMG → $ARCH_LOCAL —— 與主機（$HOST_MACHINE）不符"
+          ARCH_EMULATED+="  · ${ARCH_IMG} —— 映像 ${ARCH_LOCAL}，主機 $HOST_MACHINE"$'\n' ;;
+        *)
+          warn "  $ARCH_IMG → 讀不到架構（映像不在本地？）"
+          ARCH_NOLOCAL+="  · ${ARCH_IMG}"$'\n' ;;
+      esac
+    done <<< "$ARCH_IMAGES"
+
+    if [[ -n "$ARCH_EMULATED" ]]; then
+      echo
+      fail "══ 這份映像不是主機的架構 —— 它**正在被模擬執行** ══"
+      printf '%s' "$ARCH_EMULATED"
+      echo
+      echo "  這種失敗沒有任何其他訊號：compose 起得來、健康檢查過、模型也答話，"
+      echo "  只是慢 10–100× —— 所以上面那幾層都攔不到它。"
+      echo "  兩個可能的原因，都不在 compose 檔裡："
+      echo "    · 環境有 DOCKER_DEFAULT_PLATFORM（或 build 時下了 --platform）"
+      echo "    · 拉的時候用了 --platform linux/amd64，而本地留著那一份"
+      echo "  確診：docker image inspect <上面那顆映像> --format '{{.Architecture}}'"
+      echo "  修法：docker rmi 那份，再讓這次佈署重新拉一次。"
+      ARCH_CHECK_RC=1
+    elif [[ -n "$ARCH_NOLOCAL" ]]; then
+      echo
+      warn "══ 有映像在本地讀不到架構 —— 這一層**無法判定** ══"
+      printf '%s' "$ARCH_NOLOCAL"
+      echo "  注意這不是「沒問題」：讀不到就是不知道它是不是原生。"
+      echo "  但容器已經起來了，所以它至少跑得動 —— 不擋。"
+      ARCH_CHECK_RC=2
+    fi
+  fi
+
+  case "$ARCH_CHECK_RC" in
+    0) : ;;
+    1)
+      fail "失效的是我們自己的宣稱（我們說這一疊在原生的架構上跑），所以是 1，不是 2。"
+      exit 1 ;;
+    2) exit 2 ;;
+  esac
+  echo
+fi
+
+# ── 14. 完成 ────────────────────────────────────────────
 if [[ "$GPU_VERDICT" == "gpu" ]]; then
   ok "佈署完成 —— 堆疊已起來、埠只綁 loopback、模型可用、num_ctx 已生效、模型在 GPU 上"
 else
@@ -788,9 +983,19 @@ GPU：$GPU_NAME
 EOF
 fi
 
-cat <<EOF
+# 認不得的架構**不印這段**：下面那三句「確認過了」在有跑那兩層時才是真的，
+# 沒跑就印會是這個 repo 最貴的那種錯（宣告面冒充執行面）。
+if [[ "$ARCH_CHECKABLE" == "1" ]]; then
+  cat <<EOF
 
-Open WebUI 位址：
+CPU 架構：$HOST_MACHINE（$ARCH_FAMILY）
+  映像有這個架構，pull 拉到了，跑起來的也是原生架構 —— 那些都確認過了。
+  但**這個 lab 的數字全部是 x86 量的**：README 尺寸表的吞吐量、GPU 那一節的
+  建議，在 $ARCH_FAMILY 上都沒有證據。它會跑，跑多快沒人知道。
+EOF
+fi
+
+cat <<EOF
   • 本機／SSH 通道：http://localhost:3000
   • 對外：一律走 Cloudflare Tunnel + Access（見 .env.example 的
     CLOUDFLARE_TUNNEL_TOKEN 段落）。**不要**為了方便把埠開出去。

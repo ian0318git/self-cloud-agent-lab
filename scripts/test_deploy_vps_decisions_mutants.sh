@@ -24,6 +24,10 @@
 #   · 資源門檻的邊界（含端點、unknown 不當 0）→ 假失敗／假通過
 #   · context 門檻的 +1 → D-027 的結論本身，差一個 token 就是砍掉 1 個 token
 #   · .env 的每一條邊界 → 改的是使用者唯一的設定檔，且失敗後會被重跑
+#   · 架構三層 → 前六組全是「同一台已知機器上設定對不對」，這一組是第一個
+#     「這台機器根本不一樣」。它的失效方式是**安靜地跑出不同結果**：
+#     `arm64 → verified` 是把沒量過講成量過；`不等時回 native` 是讓 qemu
+#     模擬執行整個靜默；`讀不到欄位回 no` 則是對著一台好機器硬擋
 #
 # 做法：把模組與測試複製到暫存目錄、用字串取代植入突變，從那份副本跑測試。
 # 原始檔從頭到尾不被修改。
@@ -339,6 +343,47 @@ MUTANTS=(
   # 而容器還在跟 Cloudflare 邊緣保持連線。
   "pl:對外：stale 併入 off（說關了其實還開著）|      printf 'stale'|      printf 'off'"
   "pl:對外：profile 的判定翻轉（四態全部錯位）|  if [[ \"\$profile\" == \"yes\" ]]; then|  if [[ \"\$profile\" != \"yes\" ]]; then"
+
+  # ── cpu_arch：唯一的映射表，錯一個字整條階梯都歪 ──
+  # 這四條與 GPU 那組的形狀不同：它們錯的時候**不會有任何症狀** —— 佈署
+  # 照樣成功，只是「在沒量過的平台上」那句話沒被說出來（或反過來，被說成
+  # 「量過了」）。架構是這個 repo 裡第一個「換一台機器」類的判準。
+  "架構：x86_64 不映射（x86 主機被當成認不得）|  if [[ \"\$m\" == \"x86_64\" ]]; then m=\"amd64\"; fi|  :"
+  "架構：aarch64 映射成 amd64（ARM 主機被當成 x86）|  if [[ \"\$m\" == \"aarch64\" ]]; then m=\"arm64\"; fi|  if [[ \"\$m\" == \"aarch64\" ]]; then m=\"amd64\"; fi"
+
+  # **這一條就是 #82 存在的理由**：把 arm64 講成 verified，等於宣稱
+  # 「這個 lab 在 ARM 上驗證過」。上面全部的吞吐量數字都是 x86 量的。
+  "宣告：arm64 回 verified（宣稱在 ARM 上驗證過）|  if [[ \"\$a\" == \"arm64\" ]]; then printf 'unverified'; return 0; fi|  if [[ \"\$a\" == \"arm64\" ]]; then printf 'verified'; return 0; fi"
+  # 反方向：x86 反而變成「沒量過」，於是量過的那條路上也多一句假警告 ——
+  # 而假警告會訓練人忽略警告（D-056）。
+  "宣告：amd64 回 unverified（量過的那條路變成沒量過）|  if [[ \"\$a\" == \"amd64\" ]]; then printf 'verified'; return 0; fi|  if [[ \"\$a\" == \"amd64\" ]]; then printf 'unverified'; return 0; fi"
+
+  # ── image_arch_listed：這一組的失效方式全都是「對著好機器說它不能跑」 ──
+  # **代價最高的一條。** 單一平台的 manifest 沒有 architecture 欄位，讀成
+  # `no` 就會對一台映像檔明明在本地、容器也起來了的機器硬擋，並印出「它有的
+  # 是：」後面接一句空白。那是 D-056 的 size_vram 同一課。
+  "裝置：讀不到 architecture 欄位時回 no（誤擋一台好好的機器）|  if [[ \"\$flat\" != *'\"architecture\":'* ]]; then printf 'unknown'; return 0; fi|  if [[ \"\$flat\" != *'\"architecture\":'* ]]; then printf 'no'; return 0; fi"
+  # 少了短路，`want=unknown` 會命中 manifest 裡**真的存在**的
+  # `\"architecture\": \"unknown\"`（attestation，不是平台）→ 回 yes。
+  # 而 unknown 正是呼叫端認不得 uname -m 時唯一會傳進來的值。
+  "裝置：want=unknown 不短路（attestation 被當成平台）|  if [[ \"\$want\" == \"unknown\" ]]; then printf 'unknown'; return 0; fi|  true"
+  "裝置：want 是空字串時回 yes（無知當成有）|  if [[ -z \"\$want\" ]]; then printf 'unknown'; return 0; fi|  if [[ -z \"\$want\" ]]; then printf 'yes'; return 0; fi"
+  # 真實的 `docker manifest inspect` 是 3 空格縮排，不去空白就永遠比不中 ——
+  # 症狀是每個映像都被判成「沒有這個架構」。
+  "裝置：不去空白（排版的 JSON 永遠比不中）|  local flat=\"\${json//[[:space:]]/}\"|  local flat=\"\$json\""
+  # 子串比對：ollama 有 arm64 而沒有 arm，但 \"arm64\" 這個字串裡有 \"arm\"。
+  # 這是這個 repo 的老題目 —— 形狀正確、結論相反。
+  "裝置：改成子串比對（arm 誤中 arm64）|  if [[ \"\$flat\" == *'\"architecture\":\"'\"\$want\"'\"'* ]]; then printf 'yes'; return 0; fi|  if [[ \"\$flat\" == *\"\$want\"* ]]; then printf 'yes'; return 0; fi"
+
+  # ── arch_match_verdict：唯一「跑得動又不報錯」的架構失敗 ──
+  # **這是整份清單裡最貴的一條架構突變**：不等時回 native，就等於 qemu 模擬
+  # 執行**完全靜默**。compose 起得來、健康檢查過、模型也答話，只是慢 10–100×。
+  "執行：不等時回 native（**模擬執行整個靜默**）|  printf 'emulated'|  printf 'native'"
+  "執行：相等時回 emulated（原生被判成模擬）|  if [[ \"\$h\" == \"\$o\" ]]; then printf 'native'; return 0; fi|  if [[ \"\$h\" == \"\$o\" ]]; then printf 'emulated'; return 0; fi"
+  # 兩邊讀不到時回 native：把「不知道」講成「沒問題」。D-016 說無知不是缺陷，
+  # 但它也不是「沒問題」—— 上面那兩條測試盯的就是這個第三個字。
+  "執行：主機讀不到時回 native（無知當成沒問題）|  if [[ \"\$h\" == \"unknown\" ]]; then printf 'unknown'; return 0; fi|  if [[ \"\$h\" == \"unknown\" ]]; then printf 'native'; return 0; fi"
+  "執行：映像讀不到時回 native（同一課的另一邊）|  if [[ \"\$o\" == \"unknown\" ]]; then printf 'unknown'; return 0; fi|  if [[ \"\$o\" == \"unknown\" ]]; then printf 'native'; return 0; fi"
 )
 
 caught=0
@@ -486,4 +531,4 @@ if [[ "${#missed[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、GPU 的每一個靜默降級、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"
+ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、GPU 的每一個靜默降級、架構三層（含「模擬執行整個靜默」與「讀不到就誤擋」兩個方向）、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"
