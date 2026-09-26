@@ -17,6 +17,7 @@
 - [硬體規劃](#硬體規劃)
 - [架構](#架構)
 - [快速開始](#快速開始)
+- [Kaggle 實作手冊](#kaggle-實作手冊)
 - [對外連線的安全性](#對外連線的安全性)
 - [驗證清單](#驗證清單)
 - [額度管理](#額度管理)
@@ -568,6 +569,7 @@ bash scripts/up.sh
 
 接上 GPU runtime（Kaggle + Endpoint，或 VPS + vLLM）另有一份專門的指南：
 [`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md) · [`docs/ENDPOINT.md`](docs/ENDPOINT.md)。
+Kaggle 的實際操作手冊在[下面](#kaggle-實作手冊)。
 
 ### 證據腳本
 
@@ -604,6 +606,177 @@ bash scripts/up.sh
 | `bash scripts/verify-throughput.sh` | 七個條件的解碼速率矩陣、**兩組** `num_ctx` 下的截斷上限實測、以及按模型分組的 KV cache 斜率 —— 而且當七次重複彼此不一致時，它**拒絕把任何數字叫做基準線**（D-031、D-032、D-033）。它的 prefill 欄是刻意標成不可引用的：探針控制不了 prefix cache 的重用，所以它報 306–14,710 t/s，而真實的冷 prefill 約 25 t/s。**D-033 查出基準線不只是「還沒量到」，是「到不了」**：長 prompt 那一臂的取樣次數被寫死成 2，而穩定度規則要求 ≥ 5，所以判定對**任何**可能的執行都是 `unstable` —— D-031 與 D-033 兩輪在跑之前就註定失敗，而「機器吵」只講對了一半。**這一條已經修好**（那一臂現在和其他臂取一樣多的樣本；D-033 第五節），它讓判準**可滿足、不等於被滿足**：真正吵的那 5 個條件完全沒被碰到，所以下一輪仍然可能合理地失敗 |
 | `bash scripts/test_throughput_probe.py` | 上限公式、截斷判定、「上限會不會隨 `num_predict` 移動」的判定、以及 KV 分組，每一個都會咬人 —— 259 項斷言，不碰 Docker。**它最後一節與上面每一條都不同類**：它把一個 stub client 餵進**真的 `measure()`**，斷言的是**探針自己組出來的那份矩陣**。上面測的全是法官，那一節測的是**法官實際會拿到的那個案子**（D-033）。裡面有一條專案**從來沒觀測過**的 `num_keep`，因為一個在每個已觀測輸入上都等價的化簡，靠觀測是殺不掉的 |
 | `bash scripts/test_throughput_probe_mutants.sh` | 上面四個判定真的被操到 —— 73 條針對自身準則的突變，每一條都必須被抓到。其中有兩條守的是**接線**而不是判定：長 prompt 臂的取樣次數改回寫死的 `2`，以及它的一般化形態（取樣器自己靜默夾住次數）。突變台自己的輸出也是一句斷言，所以它也被檢查：準則不只要被取代**弄壞**，還要壞在**有斷言會叫**的地方 —— 一個 no-op 的取代、被切錯的欄位、或植入後語法就不合法，三者都會讓測試「失敗」，但什麼都沒守住（D-032） |
+
+---
+
+## Kaggle 實作手冊
+
+這裡是**照著做**的操作手冊：從一個空的瀏覽器，做到一個能用的 GPU runtime。
+**為什麼**、**安全取捨**、以及**疑難排解表**在
+[`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md) —— 這一節不重複它們。
+
+**你會得到**：第二個 LLM runtime，跑在 Kaggle 的免費 GPU 上（T4 ×2，約可到 70B
+參數），以 OpenAI-compatible 端點的形式暴露出來。它上面的每一層只看到一個
+`--base-url` 的差別。
+**代價**：不用錢。它消耗 Kaggle 的 GPU 額度（30 小時/週），而且 runtime 會自己消失。
+
+> **已經設好一部分了？** 兩條指令告訴你現在站在哪裡：`endpoint doctor`（設定讀得到
+> 嗎？）與 `bash scripts/apply-endpoint-ntfy-fixes.sh --verify`（notebook 產生器補丁
+> 還在嗎？）。下面第 1–4 步是一次性的。
+
+### 第 1 步 —— 申請 Kaggle 帳號（一次）
+
+1. 到 <https://www.kaggle.com> 註冊（Google 或 email）。
+2. **完成手機驗證** —— <https://www.kaggle.com/settings> → *Phone Verification*。
+
+   **這是第一次最常見的卡點。** 沒有驗證過的手機，Kaggle 不給你 API 存取、不給
+   GPU 加速器、也不給 Internet 開關 —— 而且它**不會當場報錯**，是之後才失敗，
+   長成「boot 跑完但網址一直不出現」。
+3. TPU 另外需要 *persona/identity* 驗證。**T4 ×2 不需要。**
+
+### 第 2 步 —— 取得 API 權杖（一次）
+
+<https://www.kaggle.com/settings> → **API** → **Create New Token**。
+
+- 開頭是 `kgat_`。舊式的 *username + key* 組合**已經不被接受**。
+- 放進你的 shell rc 檔 —— **絕不進這個 repo**：
+
+  ```bash
+  # ~/.bashrc 或 ~/.zshrc
+  export KAGGLE_API_TOKEN='kgat_xxxxxxxxxxxxxxxx'
+  ```
+
+> **那個權杖是一份憑證。** 本 repo 的 `.gitignore` 涵蓋 `.env`，**涵蓋不到你的
+> shell rc 檔**。貼到任何地方之前先想一想。
+
+然後**開一個新的終端機**。許多發行版的 `.bashrc` 對非互動 shell 會提早 return，
+所以 `bash -c '...'` 看不到那個變數，即使你的提示字元看得到。
+
+### 第 3 步 —— 安裝 CLI 並設定（一次）
+
+```bash
+uv tool install endpoint-vps   # 套件叫 endpoint-vps，執行檔叫 endpoint
+endpoint init                  # 互動式：Kaggle 使用者名稱、kernel slug、預設模型
+endpoint doctor                # 確認設定真的被讀到了
+```
+
+`endpoint --help` 會列出所有加速器與指令。`init` 與 `boot` **都是互動式的**，
+不能接進排程、CI 或任何非互動的工具裡。
+
+### 第 4 步 —— 在**第一次 boot 之前**修補 notebook 產生器
+
+這一項是本 repo 專屬的，而且不是選配。`endpoint boot` 跑的 notebook 是已安裝的
+套件**產生**出來的，而那個產生器有兩個缺陷（D-050），會讓一次健康的開機看起來
+像死掉的。
+
+```bash
+bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run   # 只檢查，不動任何檔案
+bash scripts/apply-endpoint-ntfy-fixes.sh             # 備份 → 雜湊關卡 → 套用 → 重驗
+bash scripts/apply-endpoint-ntfy-fixes.sh --verify    # 驗行為，不只是驗雜湊
+```
+
+跳過它的症狀是：**boot 成功，但 tunnel 網址一直不出現**，而 kernel 會在約
+32 分鐘後自殺。
+
+### 第 5 步 —— 起飛
+
+```bash
+endpoint -g boot
+```
+
+- **`-g` 要放在 `boot` 前面。** `endpoint boot --gpu` 會失敗。
+- `-g` = **GPU T4 ×2**。其他：`endpoint boot`（CPU）、`endpoint -t boot`（TPU v5e-8）。
+- **它會問你要佈署哪個模型。** 那是刻意的；`--no-watch` 是「不要串流狀態」，
+  **不是**「不要問問題」。
+- 大概要 **5～10 分鐘**：Kaggle 開機、建 `llama.cpp`、載入模型。
+
+它跑的期間，用瀏覽器打開 Kaggle：
+
+```
+https://www.kaggle.com/code/<你的帳號>/<你的-kernel-slug>
+```
+
+這些是 `boot` 透過 Kaggle API 設定的 —— 你應該不需要自己按任何東西。它們是
+出問題時要去看的地方：
+
+| 在哪裡 | 應該要是 |
+|---|---|
+| 右上 **Accelerator** | **GPU T4 ×2** |
+| **Settings → Internet** | **On** —— 沒有網路就沒有 tunnel |
+| **Input → Datasets** | 掛著模型資料集 |
+
+cell 輸出出現 **`TUNNEL ACQUIRED`**，就是網址到手了。
+
+### 第 6 步 —— 拿網址與金鑰
+
+```bash
+endpoint base-url
+```
+
+你要兩樣東西：一個結尾是 `trycloudflare.com` 的網址（後面加 `/v1`），以及 API
+金鑰。把金鑰放到本 repo 腳本會讀的地方 —— **`.env`，它已被 gitignore**：
+
+```bash
+ENDPOINT_API_KEY=<貼在這裡>
+```
+
+### 第 7 步 —— 接線**之前**先驗證
+
+```bash
+bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1 --check
+```
+
+`--check` 只跑相容性探針，**不做任何變更**。這個順序就是重點：先接再測的話，
+失敗時你已經把平台唯一的模型來源指向一個壞掉的服務了 —— 而 Open WebUI 不會
+因此抗議，它只會顯示一個空的模型清單。
+
+### 第 8 步 —— 接上
+
+```bash
+bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1
+```
+
+腳本會先跑探針，**未通過就拒絕繼續**；它把 `openai.enable` /
+`openai.api_base_urls` / `openai.api_keys` 寫進**資料庫** —— 不是 `.env`，那在
+第一次開機之後就是無效的（D-017）—— 重啟 Open WebUI，然後用**應用程式自己的
+`Config.get_many` 路徑**讀回設定，而不是回頭讀自己剛寫的那一列。
+
+### 第 9 步 —— 只有你能做的那一步
+
+**打開 <http://localhost:3000>，看模型選單。**
+
+Open WebUI 對設定的端點是**延遲抓取** —— 只有在已登入的使用者打開模型清單時
+才會發出請求。2026-09-19 用誘餌服務驗證過：重啟後 `openai.enable=true` 且指向
+誘餌，**在有人要求模型清單之前，一個請求都沒有到達**。所以腳本證明得了
+「**設定**指向你的 runtime」，證明不了「**模型**真的抓到了」。那只有你親眼看到
+才算。
+
+沒出現的話：`docker compose logs --tail=50 open-webui`。
+
+### 第 10 步 —— 收工
+
+```bash
+endpoint stop
+```
+
+`endpoint kill-all` 會終止**帳號上所有在跑的 Kaggle kernel** —— 當你有一台手動
+開的 notebook 正在默默吃額度時它很有用，而那也正是它是散彈槍而不是步槍的原因。
+
+### 會咬人的地方
+
+| 風險 | 它實際上是什麼 |
+|---|---|
+| 額度 | GPU T4 ×2 = **30 小時/週**、單次 session 約 **12 小時**、**閒置 60 分鐘會自己關機**釋放 GPU。而且只算**成功的推論** —— 用 `/v1/models` 輪詢**不會**續命。 |
+| 網址每次都不一樣 | Quick Tunnel 的網址是隨機的。那是隱蔽性，**不是認證**：任何知道網址**和金鑰**的人都能用你的 GPU。不要在任何東西上寫死它。 |
+| 升級 `endpoint-vps` 會蓋掉第 4 步 | 那個補丁動的是 package manager 的檔案。每次升級後重跑 `--verify`。 |
+| `endpoint status` 說 `offline` | 它會說謊 —— 狀態檔說 kernel 死了，runtime 其實還在答話。改成去探端點。 |
+| `boot` 成功但沒有網址 | 幾乎都是沒套補丁的限流（第 4 步），或 Internet 開關沒開。 |
+| `GET /v1/apikey` | 上游文件提到這條路由。**是否需要認證，本專案尚未驗證** —— 若不需要，光有網址就足以取得金鑰。啟動後自己用 `curl` 驗一次。 |
+
+**使用條款。** Kaggle 的條款把服務限定為個人、非商業用途。那讓 Kaggle 成為
+「**量測大模型能跑到什麼程度**」的正確工具，而**不是**公司內部助理的產品路徑。
+完整的判讀 —— 包括那些條款裡哪些查證過、哪些沒有 —— 在
+[`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md)。
 
 ---
 

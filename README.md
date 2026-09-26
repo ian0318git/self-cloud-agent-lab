@@ -17,6 +17,7 @@ running your own LLM, reading your own data, using tools over MCP, and letting a
 - [Hardware sizing](#hardware-sizing)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
+- [Kaggle hands-on manual](#kaggle-hands-on-manual)
 - [Securing remote access](#securing-remote-access)
 - [Verification checklist](#verification-checklist)
 - [Quota management](#quota-management)
@@ -616,11 +617,12 @@ Open <http://localhost:3000>.
 | `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | Check whether the two ntfy fixes in endpoint's notebook generator are needed, and whether they still apply. Changes nothing |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh` | Patch that generator (backup → hash gate → apply → re-verify). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
 | `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | The verifier behind the above — drives the code the generator *emits* against a simulated ntfy token bucket. **Fails against the pristine file on purpose**; that failure is the demonstration (D-050) |
+| `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
+| `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 
 Attaching a GPU runtime (Kaggle + Endpoint, or a VPS + vLLM) has its own guide:
 [`docs/ENDPOINT.md`](docs/ENDPOINT.md) · [`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md).
-| `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
-| `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
+The hands-on Kaggle walkthrough is [below](#kaggle-hands-on-manual).
 
 ### Evidence scripts
 
@@ -658,6 +660,186 @@ change anything they cover.
 | `bash scripts/verify-throughput.sh` | Decode rates across a seven-condition matrix, the truncation ceiling measured at **two** `num_ctx` values, and the KV-cache slope by model — and it **refuses to call any of it a baseline** when the seven repeats disagree with each other (D-031, D-032, D-033). Its prefill column is marked unquotable on purpose: the probe cannot control for prefix-cache reuse, so it reports 306–14,710 t/s where the real cold prefill is ~25 t/s. **D-033 found the baseline was not merely unmeasured but *unreachable*:** the long-prompt arm was hardcoded to 2 samples while the stability rule needs ≥ 5, so the verdict was `unstable` for *every* possible run — D-031 and D-033 were both doomed before they were measured, and "the machine is noisy" was only half the story. **That is now fixed** (the arm takes the same sample count as every other; D-033 §5), which makes the criterion **satisfiable, not satisfied**: the five conditions that were genuinely noisy are untouched, so the next run can still legitimately fail |
 | `bash scripts/test_throughput_probe.py` | That the ceiling formula, the truncation verdict, the "does the ceiling move with `num_predict`" verdict and the KV grouping each bite — 259 assertions, no Docker. **Its last section is different in kind from every other assertion here:** it feeds a stub client into the real `measure()` and asserts on the matrix the probe assembles *itself*. Everything above it tests a grader; that section tests **the case the grader is actually handed** (D-033). It includes a `num_keep` the project has never observed, because a simplification that is equivalent on every observed input cannot be killed by observation |
 | `bash scripts/test_throughput_probe_mutants.sh` | That the four graders above are actually exercised — 73 mutations of their own criteria, every one must be caught. Two of them guard the **wiring** rather than a grader: the long-prompt arm's sample count reverted to the hardcoded `2`, and its general form (the sampler silently capping itself). A mutation harness's own output is a claim, so it is checked too: the criteria must not merely be *broken* by the substitution, they must be broken **in a way an assertion notices** — a no-op substitution, a mangled field or a syntax error all "fail the tests" without guarding anything (D-032) |
+
+---
+
+## Kaggle hands-on manual
+
+This is the **walkthrough**: an empty browser to a working GPU runtime, in order.
+The *reasoning*, the *security trade-offs* and the *troubleshooting table* live in
+[`docs/ENDPOINT.md`](docs/ENDPOINT.md) — this section does not repeat them.
+
+**What you get:** a second LLM runtime on Kaggle's free GPU (T4 ×2, up to ~70B
+parameters), exposed as an OpenAI-compatible endpoint. Everything above it sees only a
+`--base-url` change.
+**What it costs:** no money. It spends Kaggle's GPU quota (30 h/week), and the runtime
+disappears on its own.
+
+> **Already partly set up?** Two commands tell you where you stand:
+> `endpoint doctor` (is the config readable?) and
+> `bash scripts/apply-endpoint-ntfy-fixes.sh --verify` (is the notebook generator
+> patched?). Steps 1–4 below are one-time.
+
+### Step 1 — Create the Kaggle account (once)
+
+1. Sign up at <https://www.kaggle.com> (Google or email).
+2. **Complete phone verification** — <https://www.kaggle.com/settings> →
+   *Phone Verification*.
+
+   **This is the most common first-time blocker.** Without a verified phone, Kaggle
+   gives you no API access, no GPU accelerator and no Internet toggle — and it does
+   not fail loudly. It fails later, as a boot that never produces a URL.
+3. TPU access additionally needs *persona/identity* verification. **T4 ×2 does not.**
+
+### Step 2 — Get the API token (once)
+
+<https://www.kaggle.com/settings> → **API** → **Create New Token**.
+
+- It starts with `kgat_`. The legacy *username + key* pair is **no longer accepted**.
+- Put it in your shell rc file — **never in this repo**:
+
+  ```bash
+  # ~/.bashrc or ~/.zshrc
+  export KAGGLE_API_TOKEN='kgat_xxxxxxxxxxxxxxxx'
+  ```
+
+> **That token is a credential.** This repo's `.gitignore` covers `.env`; it does
+> **not** cover your shell rc file. Think before you paste it anywhere.
+
+Then open a **new terminal**. On many distros `.bashrc` returns early for
+non-interactive shells, so `bash -c '...'` will not see the variable even though your
+prompt does.
+
+### Step 3 — Install the CLI and configure it (once)
+
+```bash
+uv tool install endpoint-vps   # the package is endpoint-vps; the binary is `endpoint`
+endpoint init                  # interactive: Kaggle username, kernel slug, default model
+endpoint doctor                # confirm the config was actually read
+```
+
+`endpoint --help` lists every accelerator and command. Both `init` and `boot` are
+**interactive** and cannot be put into a scheduler, CI, or any non-interactive tool.
+
+### Step 4 — Patch the notebook generator, **before** the first boot
+
+Repo-specific, and not optional. `endpoint boot` runs a notebook that the installed
+package *generates*; that generator has two defects (D-050) which make a healthy boot
+look like a dead one.
+
+```bash
+bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run   # check only, changes nothing
+bash scripts/apply-endpoint-ntfy-fixes.sh             # backup → hash gate → apply → re-verify
+bash scripts/apply-endpoint-ntfy-fixes.sh --verify    # behaviour, not just the hash
+```
+
+Skip this and the symptom is: **the boot succeeds but the tunnel URL never appears**,
+and the kernel kills itself after about 32 minutes.
+
+### Step 5 — Boot
+
+```bash
+endpoint -g boot
+```
+
+- **`-g` goes *before* `boot`.** `endpoint boot --gpu` fails.
+- `-g` = **GPU T4 ×2**. Others: `endpoint boot` (CPU), `endpoint -t boot` (TPU v5e-8).
+- **It asks which model to deploy.** That is by design; `--no-watch` means "do not
+  stream status", **not** "do not ask questions".
+- Expect **5–10 minutes**: Kaggle boots, builds `llama.cpp`, loads the model.
+
+While it runs, open Kaggle in the browser:
+
+```
+https://www.kaggle.com/code/<your-username>/<your-kernel-slug>
+```
+
+`boot` sets these through the Kaggle API — you should not have to click anything. They
+are what to check when something is wrong:
+
+| Where | What it must say |
+|---|---|
+| **Accelerator** (top right) | **GPU T4 ×2** |
+| **Settings → Internet** | **On** — no internet, no tunnel |
+| **Input → Datasets** | the model dataset is attached |
+
+When the cell output shows **`TUNNEL ACQUIRED`**, the URL exists.
+
+### Step 6 — Take the URL and the key
+
+```bash
+endpoint base-url
+```
+
+You need two things: a URL that ends in `trycloudflare.com` (append `/v1`), and the
+API key. Put the key where this repo's scripts read it — **`.env`, which is
+gitignored**:
+
+```bash
+ENDPOINT_API_KEY=<paste it here>
+```
+
+### Step 7 — Verify **before** you wire it in
+
+```bash
+bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1 --check
+```
+
+`--check` runs the conformance probe and **changes nothing**. The order is the whole
+point: wire first and test later, and by the time it fails you have already pointed
+the platform's only model source at a broken service — and Open WebUI will not
+complain, it will just show an empty model list.
+
+### Step 8 — Attach it
+
+```bash
+bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1
+```
+
+The script probes first and **refuses to continue if the probe fails**. It writes
+`openai.enable` / `openai.api_base_urls` / `openai.api_keys` into the **database** —
+not `.env`, which stops mattering after the first boot (D-017) — restarts Open WebUI,
+and reads the configuration back through the application's own `Config.get_many` path
+rather than re-reading the row it just wrote.
+
+### Step 9 — The step only you can do
+
+**Open <http://localhost:3000> and look at the model menu.**
+
+Open WebUI fetches a configured endpoint **lazily** — only when a signed-in user opens
+the model list. Verified against a decoy service on 2026-09-19: after a restart with
+`openai.enable=true` pointing at the decoy, **not one request arrived** until someone
+asked for the model list. So the script can prove the *configuration* points at your
+runtime; only your eyes can prove the *models* came back.
+
+Nothing there? `docker compose logs --tail=50 open-webui`.
+
+### Step 10 — When you are done
+
+```bash
+endpoint stop
+```
+
+`endpoint kill-all` terminates **every running Kaggle kernel on the account** — useful
+when a manually-opened notebook is quietly burning quota, and exactly why it is a
+shotgun rather than a rifle.
+
+### What will bite you
+
+| Risk | What it actually is |
+|---|---|
+| Quota | GPU T4 ×2 = **30 h/week**, a session ends at ~**12 h**, and **60 minutes idle shuts it down** to free the GPU. Only *successful inference* counts — polling `/v1/models` does **not** keep it alive. |
+| The URL changes every boot | Quick Tunnel URLs are random. That is obscurity, **not authentication**: anyone with the URL *and* the key can use your GPU. Never hardcode it. |
+| An `endpoint-vps` upgrade erases step 4 | The patch edits a package-manager file. Re-run `--verify` after every upgrade. |
+| `endpoint status` says `offline` | It can lie — the status file says the kernel is dead while the runtime is still answering. Probe the endpoint instead. |
+| `boot` succeeded but no URL | Almost always the unpatched rate limiter (step 4), or the Internet toggle is off. |
+| `GET /v1/apikey` | Upstream documents this route. **Whether it requires authentication has not been verified by this project** — if it does not, the URL alone is enough to obtain the key. Check it yourself with `curl` after boot. |
+
+**Terms of use.** Kaggle's terms limit the service to personal, non-commercial use.
+That makes Kaggle the right tool for *measuring what a larger model can do*, and
+**not** the product path for a company assistant. The full reading — including which
+parts of those terms were actually verified and which were not — is in
+[`docs/ENDPOINT.md`](docs/ENDPOINT.md).
 
 ---
 
