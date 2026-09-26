@@ -3,11 +3,15 @@
 #
 # 用法：
 #   bash scripts/deploy-vps.sh [--model NAME] [--embed-model NAME]
-#                              [--num-ctx N] [--expose] [--keep-data] [--dry-run]
+#                              [--num-ctx N] [--model-gb N]
+#                              [--expose] [--keep-data] [--dry-run]
 #
 #   --model NAME        對話模型（預設沿用 .env 的 OLLAMA_MODEL）
 #   --embed-model NAME  嵌入模型（預設沿用 .env 的 EMBEDDING_MODEL）
 #   --num-ctx N         伺服器端的 context 長度，**預設 16384**（見下方說明）
+#   --model-gb N        這個模型要多少 GB 磁碟。**只有查表查不到的模型才需要它**
+#                       —— 表外的模型不給這個值時，磁碟閘門會明印「不知道」而
+#                       不是猜一個數字（見下方說明）
 #   --expose            刻意綁 0.0.0.0。**這是對一個真實取捨的確認，不是方便旗標**
 #   --keep-data         機器上已經有人類的資料時，仍然繼續（見下方說明）
 #   --dry-run           只做前置檢查與 .env 的差異顯示，**不寫任何檔案、不起容器**
@@ -18,7 +22,7 @@
 #
 # 結束碼：0 = 佈署完成且通過煙霧測試（有開 GPU 時，也通過「模型真的在 GPU 上」）
 #         1 = 未通過（發現暴露、資料已存在、煙霧測試失敗、說要用 GPU 卻跑在
-#             CPU 上 —— 都附完整輸出）
+#             CPU 上、**磁碟不足** —— 都附完整輸出）
 #         2 = 無法判定（容器起不來、模型下載失敗、num_ctx 沒生效、GPU 用量量不到）
 #         3 = 這支腳本自己壞掉（參數錯誤）
 
@@ -58,6 +62,32 @@
 # 刻意**不用**「volume 存不存在」或「模型下載了沒」當判準：那樣子一次在
 # 煙霧測試失敗的佈署，會讓腳本自己不能再跑第二次，而「跑到一半失敗」正是
 # 佈署最常見的狀態。模型與 volume 都是可以重建的產物；帳號與對話不是。
+#
+# ── 磁碟閘門為什麼分成兩段（D-058）──────────────────────
+#
+# 上面那條原則（不看「下載了沒」）原本只套用在資料閘門上，而磁碟閘門**正在
+# 犯同一個錯**：舊公式是 `2 × 模型 + 4`，與「這次要不要下載」無關。於是模型
+# 已經在本機的重跑仍然被要求兩倍空間而被擋下來 —— 卡在它自己說最該支援的
+# 那個處境上。
+#
+# 修法是把它拆成兩段，而**分段不是偏好，是順序逼出來的**：
+#
+#   第 2 步（容器還不存在）—— 只判**無條件**需要的量：映像 ＋ 系統餘裕。
+#     `docker images` 是本地查詢，不需要容器也不需要網路，所以問得到。
+#     模型那一份**不在這個數字裡**，訊息會明講。
+#
+#   第 8 步（下載之前）—— 模型在不在，只有 ollama 容器起來之後才問得到。
+#     所以硬擋放在真的會下載的那條分支上：`pull_if_missing` 已經有一份
+#     「在不在」的判斷，閘門就長在同一條分支上，兩者不可能漂移。
+#
+# 兩段的 `unknown` 都**不擋**，但一定會印出來 —— 「我不知道」不是「沒問題」，
+# 也不是「有問題」。
+#
+# `--model-gb` 是為了表外的模型。`model_gb_estimate()` 只認得 `.env.example`
+# 列出的那幾個；`llama3:70b` 這種查不到的，不給旗標時閘門會明印「不知道」，
+# **不會猜一個數字**（D-055 §3(2)：修這個缺陷的時候不可以把它改成靜默通過）。
+# 猜錯的方向有兩種，而兩種都貴：猜太小 = 放行到 pull 中途失敗，猜太大 = 對著
+# 一台空間夠的機器誤擋。
 #
 # ── --num-ctx 為什麼預設 16384 ──────────────────────────
 #
@@ -126,6 +156,7 @@ SMOKE_PROBE="$SCRIPT_DIR/deploy_smoke_probe.py"
 MODEL_OVERRIDE=""
 EMBED_OVERRIDE=""
 NUM_CTX_RAW=""
+MODEL_GB_RAW=""
 EXPOSE=0
 KEEP_DATA=0
 DRY_RUN=0
@@ -143,6 +174,7 @@ while [[ $# -gt 0 ]]; do
     --model)       need_value "$1" "${2:-}"; MODEL_OVERRIDE="$2"; shift 2 ;;
     --embed-model) need_value "$1" "${2:-}"; EMBED_OVERRIDE="$2"; shift 2 ;;
     --num-ctx)     need_value "$1" "${2:-}"; NUM_CTX_RAW="$2"; shift 2 ;;
+    --model-gb)    need_value "$1" "${2:-}"; MODEL_GB_RAW="$2"; shift 2 ;;
     --expose)      EXPOSE=1; shift ;;
     --keep-data)   KEEP_DATA=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
@@ -169,6 +201,34 @@ case "$NUM_CTX_CHECK" in
     fail "--num-ctx 驗證回了一個意料外的結果：$NUM_CTX_CHECK"
     exit 3 ;;
 esac
+
+# --model-gb 的驗證。**沒給旗標時整段不跑** —— 空字串是合法的「沒明講」，
+# 不是一個壞掉的值。這與 num_ctx 不同：num_ctx 有預設值，所以它一定要驗；
+# 而模型大小沒有預設值，硬給一個就是 D-055 §3(2) 禁止的那件事。
+MODEL_GB_OVERRIDE=""
+if [[ -n "$MODEL_GB_RAW" ]]; then
+  MODEL_GB_CHECK="$(model_gb_verdict "$MODEL_GB_RAW")"
+  case "$MODEL_GB_CHECK" in
+    ok\ *) MODEL_GB_OVERRIDE="${MODEL_GB_CHECK#ok }" ;;
+    not_number)
+      fail "--model-gb 必須是數字（GB）：${MODEL_GB_RAW}"
+      echo "  整數或小數都可以，例如 --model-gb 40 或 --model-gb 7.5。"
+      exit 3 ;;
+    not_positive)
+      fail "--model-gb 必須大於 0（收到 ${MODEL_GB_RAW}）。"
+      echo "  填 0 會讓磁碟閘門算出「需要 0 GB」—— 那比**不填**這個旗標更寬鬆，"
+      echo "  等於是把閘門關掉卻以為自己設定了它。"
+      echo "  不知道模型多大時就不要給：閘門會明印「不知道」，那才是誠實的。"
+      exit 3 ;;
+    too_large)
+      fail "--model-gb 太大（${MODEL_GB_RAW} GB）—— 上限 ${MODEL_GB_MAX} GB。"
+      echo "  最常見的原因是**把 MB 當成 GB**：qwen3:8b 是 5,200 MB，所以是 5.2。"
+      exit 3 ;;
+    *)
+      fail "--model-gb 驗證回了一個意料外的結果：$MODEL_GB_CHECK"
+      exit 3 ;;
+  esac
+fi
 
 require_docker
 detect_compose
@@ -258,26 +318,83 @@ if [[ -n "$BIND_OVERRIDDEN" ]]; then
 fi
 
 # ── 2. 資源前置檢查：**只有磁碟會硬擋** ─────────────────
-# 磁碟不足不會優雅地變慢，它會在 pull 到一半的時候中止（README 已經記了
-# 「需要約 2 倍空間，否則 pull 會失敗，有時是無聲的」）。CPU 與記憶體不足
+# 磁碟不足不會優雅地變慢，它會在 pull 到一半的時候中止。CPU 與記憶體不足
 # 是「慢」，磁碟不足是「壞在半路」—— 這個差別才是阻擋的理由，不是嚴重程度。
-MODEL_GB="$(model_gb_estimate "$MODEL")"
-DISK_FREE_GB="$(df -Pk "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')"
-DISK_NEED_GB="$(disk_need_gb "$MODEL_GB")"
+#
+# **這一段只看「無條件」需要的量**（D-058）：映像 ＋ 系統餘裕。模型那一份要
+# 等 ollama 容器起來才問得到「在不在」（第 5 步才建容器），所以它歸第 8 步。
+# 舊版在這裡就把模型算進去，於是模型已經在本機的**重跑照樣被擋** —— 而那
+# 正是這支腳本在 :56-58 說最該支援的處境。分段是順序逼出來的，不是偏好。
+MODEL_GB="$(model_gb_resolve "$MODEL_GB_OVERRIDE" "$MODEL")"
+EMBED_GB="$(model_gb_resolve "" "$EMBED_MODEL")"
+
+# 磁碟量的是 **DockerRootDir**，不是專案目錄 —— 模型 blob 與映像層都落在
+# 那裡。舊版量 $PROJECT_ROOT，在兩者分屬不同裝置的機器上是**錯的裝置**
+# （本機同一個檔案系統，所以現在看不出來）。讀不到就退回專案目錄並講明。
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+if [[ -n "$DOCKER_ROOT" && -d "$DOCKER_ROOT" ]]; then
+  DISK_PATH="$DOCKER_ROOT"
+else
+  DISK_PATH="$PROJECT_ROOT"
+  warn "讀不到 DockerRootDir —— 磁碟量的是專案目錄（$PROJECT_ROOT），"
+  warn "  而那不一定是映像與模型實際落地的那個檔案系統。"
+fi
+
+# 每一個替換都要 `|| true`：set -euo pipefail 之下，df 一失敗會在**賦值那一行**
+# 被 errexit 殺掉，而那一行是「檢查」，不是「動作」。
+DISK_FREE_GB="$(df -Pk "$DISK_PATH" 2>/dev/null \
+  | awk 'NR==2 {printf "%d", $4/1024/1024}' || true)"
+
+# 這次要拉的映像：取自 compose 自己的模型，不是寫死一份 —— 寫死會在 compose
+# 改了之後**無聲地檢查錯的東西**（與下面 ARCH_IMAGES 同一個理由）。
+IMG_WANTED="$(cd "$PROJECT_ROOT" && $COMPOSE config 2>/dev/null \
+  | grep -oE '^[[:space:]]+image:.*' \
+  | sed 's/^[[:space:]]*image:[[:space:]]*//' | sort -u || true)"
+IMG_LOCAL="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)"
+
+# **這裡與第 5 步的 `up -d` 有一個必須同步的耦合**：`$COMPOSE config` 不含
+# 未啟用 profile 的服務（實測：tunnel profile 沒開時 `cloudflare/cloudflared:latest`
+# 不在清單裡）。那**現在是對的** —— 第 5 步的 `up -d` 也沒有 `--profile tunnel`，
+# 所以那次真的不會拉 cloudflared。但**如果有一天 `up` 那行加上了 profile，
+# 這一行必須跟著加** —— 否則閘門會少算一個真的會被拉的映像，而且是往寬鬆
+# 那邊錯。（那正是任務 #84 要動的地方。）
+
+# 本機已經有的映像不會被重拉（compose 的 pull_policy 預設是 missing），所以
+# 它們**不算進需求** —— 這與模型那一份是同一個修法。
+IMG_NEED_GB="$(image_need_gb "$IMG_LOCAL" "$IMG_WANTED")"
+DISK_NEED_GB="$(disk_unconditional_need_gb "$IMG_NEED_GB")"
 
 BLOCKERS=0
 case "$(disk_verdict "${DISK_FREE_GB:-}" "${DISK_NEED_GB:-}")" in
   sufficient)
-    ok "磁碟：${DISK_FREE_GB} GB 可用（需要約 ${DISK_NEED_GB} GB）" ;;
+    ok "磁碟：${DISK_FREE_GB} GB 可用（映像與系統需要約 ${DISK_NEED_GB} GB）" ;;
   insufficient)
-    fail "磁碟不足：只有 ${DISK_FREE_GB} GB 可用，這個模型需要約 ${DISK_NEED_GB} GB。"
-    echo "  pull 會佔用下載暫存與展開後的本體（約 2 倍），空間不夠會**中途失敗**，"
-    echo "  有時是無聲的。請先清出空間，或換一個較小的模型（--model）。"
+    fail "磁碟不足：只有 ${DISK_FREE_GB} GB 可用，光是要拉的映像就需要約 ${DISK_NEED_GB} GB。"
+    echo "  這一項是 image（第 5 步 compose 要拉的），**不含模型** —— 模型那一份"
+    echo "  要等容器起來才問得到在不在，所以第 8 步會在下載前再擋一次。"
+    echo "  空間不夠的話 pull 會**中途失敗**，有時是無聲的。"
+    echo "  請先清出空間，或先把映像準備好（本機已有的映像不會被重拉）。"
     BLOCKERS=$((BLOCKERS + 1)) ;;
   unknown)
-    warn "磁碟：無法從模型名稱（$MODEL）估出大小，跳過檢查 —— 這不是「足夠」，是「不知道」。"
-    echo "      可用空間 ${DISK_FREE_GB:-?} GB。要自己確認。" ;;
+    warn "磁碟：讀不到可用空間或讀不到映像清單，跳過檢查 —— 這不是「足夠」，是「不知道」。"
+    echo "      可用空間 ${DISK_FREE_GB:-?} GB、映像需求 ${DISK_NEED_GB:-?} GB。要自己確認。" ;;
 esac
+
+# 模型那一份**不在上面的數字裡**，所以這裡單獨把它講出來 —— 否則「磁碟：
+# 2 GB 足夠」會被讀成「連模型都夠了」。第 8 步會在下載前用同一個值再擋一次，
+# 那時候「在不在」才問得到。
+case "$MODEL_GB" in
+  unknown)
+    warn "  模型（$MODEL）的磁碟需求：**不知道** —— 表上沒有這個模型，而腳本"
+    warn "  不從 tag 猜大小（猜太小 = 放行到 pull 中途失敗，猜太大 = 對著一台"
+    warn "  空間夠的機器誤擋）。要讓第 8 步擋得住，請用 --model-gb N 明講。" ;;
+  *)
+    info "  模型（$MODEL）約 ${MODEL_GB} GB —— 第 8 步下載前會再確認一次。" ;;
+esac
+
+# 第 8 步的基準：映像 ＋ 系統餘裕（**不含模型**）。在那裡它與「這次真的要
+# 下載的那個模型」相加，才是完整的磁碟需求。
+DISK_BASE_GB="$DISK_NEED_GB"
 
 AVAIL_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)"
 RAM_NEED_MB="$(ram_warn_mb "$MODEL_GB" "$NUM_CTX")"
@@ -595,6 +712,16 @@ if [[ "$DRY_RUN" == "1" ]]; then
     echo "    然後跑對外暴露閘門、下載模型、煙霧測試與 num_ctx 確認。"
     echo "    （GPU 那一段不會跑：判定是 $GPU_VERDICT。）"
   fi
+  # 上面那個磁碟數字**不含模型那一份** —— 那要等容器起來才問得到「在不在」。
+  # dry-run 走不到第 8 步，所以這件事必須在這裡講清楚，否則「磁碟：2 GB 足夠」
+  # 會被讀成「連模型都夠了」。
+  echo "    另外，第 8 步在下載模型之前會**再擋一次**磁碟 —— 那一次才算進模型。"
+  if [[ "$MODEL_GB" == "unknown" ]]; then
+    echo "    而 $MODEL 的大小是「不知道」（表上沒有），所以那一次沒有判準；"
+    echo "    要它擋得住，請加 --model-gb N 明講。"
+  else
+    echo "    那次會用 $MODEL_GB GB（$MODEL）。"
+  fi
   if [[ "$ARCH_FAMILY" == "amd64" ]]; then
     echo "    （架構那一段不會跑：這台是 x86_64，也就是量過的那條路。）"
   elif [[ "$ARCH_CHECKABLE" == "1" ]]; then
@@ -739,32 +866,98 @@ fi
 echo
 
 # ── 8. 下載模型（兩個，都冪等）──────────────────────────
-pull_if_missing() {
-  local name="$1" want installed line
+#
+# 這個模型在不在本機。**三態，而中間那一態是 D-058 才加的。**
+#
+# 舊版只有兩態：讀不到 `ollama list` 就落到「不在」，於是會多拉一次 —— 舊版
+# 無害。但這條分支現在要**硬擋**，同一個收斂就變成「對著一台好好的機器說它
+# 空間不夠」—— 一個會誤報的守衛比沒有守衛更糟（D-056 的 size_vram 那一課）。
+#
+# 用**結束碼**區分，不是用輸出：`ollama list` 在一個模型都沒有的機器上只印
+# 一行表頭，那與「指令失敗」在輸出上長得一樣。結束碼分得出來。
+model_installed() {
+  local name="$1" want list rc=0 line
   want="$(normalize_model "$name")"
-  installed=false
+  list="$($COMPOSE exec -T ollama ollama list 2>/dev/null)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then printf 'unknown'; return 0; fi
   while IFS= read -r line; do
     if [[ -n "$line" && "$(normalize_model "$line")" == "$want" ]]; then
-      installed=true; break
+      printf 'yes'; return 0
     fi
-  done <<<"$($COMPOSE exec -T ollama ollama list 2>/dev/null | awk 'NR>1 {print $1}')"
-  if [[ "$installed" == "true" ]]; then
-    ok "模型 $name 已存在，略過下載"
+  done <<<"$(awk 'NR>1 {print $1}' <<<"$list")"
+  printf 'no'
+}
+
+# 下載前的磁碟閘門（D-058 的第二段）。**放在真的會下載的那條分支上。**
+#
+# 為什麼是這裡而不是第 2 步：模型在不在，只有 ollama 容器起來（第 5 步）
+# 之後才問得到。而把檢查放在「真的會做」的那條分支上，兩者就不可能漂移。
+#
+# **不足時直接 `exit 1`，不是 `return`。** 呼叫端是 `pull_if_missing ... || exit 2`，
+# 而 2 是「無法判定」—— 磁碟不足是**確定的失敗**（D-018）。`exit` 直接結束
+# 行程，不會被呼叫端的 `||` 蓋成 2。
+#
+# **不在這裡呼叫 down.sh**：第 7 步已經證明過綁定是關的，留著堆疊讓使用者
+# 清完空間就能重跑 —— 而「跑到一半失敗」正是這支腳本最常被用到的路徑。
+# 訊息會明講「這一步沒有開始下載」。
+pull_if_missing() {
+  local name="$1" gb="${2:-unknown}" state free need recheck
+  state="$(model_installed "$name")"
+
+  if [[ "$state" == "yes" ]]; then
+    ok "模型 $name 已存在，略過下載（不需要額外空間）"
     return 0
   fi
+  if [[ "$state" == "unknown" ]]; then
+    warn "讀不到 ollama 的模型清單 —— 當成「不確定」，直接嘗試下載。"
+    warn "  這裡刻意不擋：把「讀不到」當成「空間不夠」是假失敗（D-016）。"
+  fi
+
+  # 每一次都重新讀 df（不是第 2 步讀一次）—— 第二個模型要看到第一個已經
+  # 吃掉的空间。
+  free="$(df -Pk "$DISK_PATH" 2>/dev/null \
+    | awk 'NR==2 {printf "%d", $4/1024/1024}' || true)"
+  need="$(disk_need_gb "$gb" yes "$DISK_BASE_GB")"
+
+  case "$(disk_verdict "${free:-}" "${need:-}")" in
+    insufficient)
+      fail "磁碟不足：要下載 $name 需要約 ${need} GB，而只有 ${free} GB 可用。"
+      echo "  （與第 2 步那個數字的差別：那個不含模型，因為容器還沒起來、"
+      echo "   問不到它在不在；這一個才是這次真的要寫進磁碟的量。）"
+      echo "  **這一步沒有開始下載** —— 堆疊維持在目前狀態。清出空間之後直接"
+      echo "  重跑這支腳本即可，已下載的模型不會重拉。"
+      exit 1 ;;
+    unknown)
+      warn "磁碟：$name 要多少空間無法判定（讀不到可用空間或算不出需求）——"
+      warn "  這是「不知道」，不是「足夠」。繼續下載，但失敗時請先懷疑空間。" ;;
+    *)
+      ok "磁碟：$name 需要約 ${need} GB，可用 ${free} GB" ;;
+  esac
+
   info "下載 $name ..."
   if ! $COMPOSE exec -T ollama ollama pull "$name"; then
     fail "模型 $name 下載失敗。堆疊本身已起來，可稍後重試：bash scripts/pull-model.sh $name"
+    # 失敗的線索：重新讀一次 df。已經不足的話就講出來 —— 空間是最常見的
+    # 成因，而 pull 自己的錯誤訊息不會那樣說。
+    recheck="$(df -Pk "$DISK_PATH" 2>/dev/null \
+      | awk 'NR==2 {printf "%d", $4/1024/1024}' || true)"
+    if [[ -n "$need" && "$recheck" =~ ^[0-9]+$ ]] && (( recheck < need )); then
+      echo "  線索：現在只剩 ${recheck} GB，而這個下載需要約 ${need} GB ——"
+      echo "  這次失敗**很可能是空間**，不是網路或 registry。"
+    fi
     return 1
   fi
   ok "模型 $name 下載完成"
 }
 
-pull_if_missing "$MODEL" || exit 2
+pull_if_missing "$MODEL" "$MODEL_GB" || exit 2
 # 嵌入模型**一定要拉**：mem0 的 OllamaEmbedding 遇到不存在的嵌入模型會
 # 自己 pull（見 verify-chroma-dims.sh），那會讓一次「驗證」變成一次數 GB 的
 # 下載；而 chroma 的維度一旦改變，既有的向量庫就全部作廢。
-pull_if_missing "$EMBED_MODEL" || exit 2
+#
+# `$EMBED_GB` 一定要傳：漏了的話 `set -u` 會在這裡大聲失敗（那正是我們要的
+# —— 安靜地少一個守衛才是壞事）。
+pull_if_missing "$EMBED_MODEL" "$EMBED_GB" || exit 2
 
 # ── 9. 下載後的記憶體檢查：用**實測**的模型大小 ─────────
 # 上面那次用的是從 tag 查表估出來的數字。這裡讀 /api/tags 的 size 欄位，

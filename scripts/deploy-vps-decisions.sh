@@ -62,6 +62,47 @@ MEM0_ADD_HOLD_CTX=10101
 # 帶說明文字的警告，永遠不能單獨構成阻擋**。
 KV_KIB_PER_TOKEN_ESTIMATE=36
 
+# ── 磁碟閘門的三個常數（D-058）───────────────────────────
+#
+# 舊版把四件事混進一個 `2 * g + 4`，所以每一個數字都沒有名字、也沒有地方
+# 單獨改它。拆開之後，**這三個常數就是那個公式僅有的三個魔數**。
+#
+# `DISK_SYSTEM_MARGIN_GB` —— 第 5 步起的容器、volume 與系統本身。**這是斷言
+# 值，不是量測值**（D-022 的 KV cache 同一個處置：沒量過的數字要自己講）。
+# 它吸收的是 `df` 的整數截斷（每個數字最多少算 1 GB，四個數字就是 4 GB 的
+# 最壞情況，這裡刻意不假裝算得準）。
+DISK_SYSTEM_MARGIN_GB=2
+
+# `DISK_IMAGE_GB` —— 三個 image。**這一個是 D-058 之前最錯的數字**：舊版的
+# 「4GB 給三個 image」實測是錯的，ollama/ollama:latest 單獨就 9.19 GB、
+# open-webui:main 7.16 GB，兩個加起來 16.4 GB，差了約 4 倍。
+#
+# **但這裡刻意先寫 2，不改大。** 因為把它直接改成 17 而**不讓它變成有條件的**，
+# 會讓一次「映像都在本機」的重跑被要求 17 GB —— 那比現在的誤擋更糟。修法是
+# 「問機器」（image_need_gb：全部都在就回 0），而那個修法**不需要先知道正確
+# 的數字**。所以先落地結構，真值等量測（提交 2）。
+#
+# 2 ＋ 上面的 2 ＝ 舊版的 `+4`，所以**這一個提交沒有任何數字移動**。
+DISK_IMAGE_GB=2
+
+# `DISK_PULL_PEAK_MULTIPLIER` —— 下載期間的峰值倍數。
+#
+# 舊版的 2 倍來自 README 的一列表格，那列**沒有引註、也沒有 D-0xx**，而
+# deploy-vps-decisions.sh 本身又反過來說「2 倍是 README 既有的記載」——
+# 自我引用的閉環。本機實測（靜止狀態）：blob 大小與 `ollama list` 宣告值
+# 一對一相等、`du` 11 GB、0 個 partial 檔，blob 就是成品。
+#
+# **所以這個 2 是既有的猜測值，不是量到的值 —— 它只是先維持行為不變。**
+# 提交 2 會真的拉一次並採樣，量出峰值再定它；若量到 ≤1.05 就**刪掉這個
+# 常數**，模型項直接寫 `g`（一個沒有作用的 1.0 倍與那則沒有引註的 2 倍
+# 是同一種罪）。
+DISK_PULL_PEAK_MULTIPLIER=2
+
+# `--model-gb` 的上限。用途不是「模型不可能這麼大」，而是**接住單位錯誤**：
+# `qwen3:8b` 是 5,200 MB，把 MB 當 GB 填進來就是 5200。1024 給合法的最大
+# 模型（llama3.1:405b 約 231 GB）留了四倍餘裕，同時擋掉那個錯誤。
+MODEL_GB_MAX=1024
+
 # ─────────────────────────────────────────────────────────
 # 純函式
 # ─────────────────────────────────────────────────────────
@@ -348,31 +389,164 @@ ram_verdict() {
   printf 'ok'
 }
 
+# 一個「GB 的數字」長什麼樣。**這一條判斷只寫在這裡。**
+#
+# 三個地方需要它：`--model-gb` 的旗標驗證、`model_gb_estimate` 的查表輸出、
+# 以及 `disk_need_gb` 的輸入檢查。寫三次的話，改了一處就會出現「旗標收了
+# 一個值、閘門卻說它讀不懂」這種分歧 —— 而且症狀是「閘門靜默地跳過檢查」。
+is_gb_number() {
+  local v="${1:-}"
+  if [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]]; then printf 'yes'; return 0; fi
+  printf 'no'
+}
+
 # 模型大小（GB）。**只查表，不從 tag 猜。**
 #
-# 表裡五個數字來自 .env.example 既有的大小註解（0.6b=523MB、1.7b=1.4GB、
-# 4b=2.5GB、8b=5.2GB、14b=9.3GB），不是這裡新發明的。猜不出來就回 unknown，
-# 而 unknown 只會產生警告、不會阻擋 —— 「我不知道這個模型多大」推論不出
-# 「這個模型放不下」。
+# 表裡六個數字全部來自 `.env.example` 既有的大小註解，不是這裡新發明的：
+# 對話模型那五格在「模型」區的尺寸清單（0.6b=523MB、1.7b=1.4GB、4b=2.5GB、
+# 8b=5.2GB、14b=9.3GB），嵌入模型那一格在 `EMBEDDING_MODEL` 上方（639MB）。
+# 猜不出來就回 unknown。
+#
+# **`qwen3-embedding:0.6b` 那一格是 D-058 加的**：嵌入模型由 deploy-vps.sh
+# **無條件下載**（:767），所以缺這一格的話，一次全新佈署在下載前的閘門會
+# 每次都印「不知道」—— 一個永遠亮著的警告與沒有警告是一樣的（D-056）。
 model_gb_estimate() {
   local m="${1:-}"
   case "$m" in
-    qwen3:0.6b) printf '0.5'; return 0 ;;
-    qwen3:1.7b) printf '1.4'; return 0 ;;
-    qwen3:4b)   printf '2.5'; return 0 ;;
-    qwen3:8b)   printf '5.2'; return 0 ;;
-    qwen3:14b)  printf '9.3'; return 0 ;;
+    qwen3:0.6b)           printf '0.5'; return 0 ;;
+    qwen3:1.7b)           printf '1.4'; return 0 ;;
+    qwen3:4b)             printf '2.5'; return 0 ;;
+    qwen3:8b)             printf '5.2'; return 0 ;;
+    qwen3:14b)            printf '9.3'; return 0 ;;
+    qwen3-embedding:0.6b) printf '0.6'; return 0 ;;
   esac
   printf 'unknown'
 }
 
-# 需要多少磁碟：2 × 模型 + 4GB。2 倍是 README 既有的記載（pull 會同時佔用
-# 下載暫存與展開後的本體），4GB 給三個 image（ollama、open-webui、本地建的
-# mcp-test-server）與系統餘裕。讀不到模型大小就回空字串，呼叫端據此走 unknown。
+# 這次要用哪個模型大小：**使用者明講的 > 查表**。
+#
+# 優先序只寫在這裡。磁碟閘門與記憶體警告都經過它，所以兩邊不可能算出不同
+# 的模型大小 —— 那種分歧的症狀是「同一次佈署裡磁碟說夠、記憶體說不夠」，
+# 而兩個數字都自稱是模型大小（D-054）。
+#
+# 空字串的 override 是**合法的「沒明講」**，不是錯誤：旗標沒給就是空的。
+model_gb_resolve() {
+  local override="${1:-}" model="${2:-}"
+  if [[ -n "$override" ]]; then printf '%s' "$override"; return 0; fi
+  model_gb_estimate "$model"
+}
+
+# `--model-gb` 的參數驗證。比照 num_ctx_verdict：非 `ok` 一律對到結束碼 3。
+#
+# **`0` 要擋，而且理由是閘門的方向。** 不給旗標時模型大小是 `unknown`，
+# 而 unknown 會讓閘門印出「不知道」。填一個 0 進去則會讓它算出「需要 0 GB」
+# —— 比什麼都不填**更寬鬆**。把 fail-open 做成一個可選的選項，就是給人一個
+# 關掉閘門卻以為自己設定了它的方法。
+model_gb_verdict() {
+  local raw="${1:-}"
+  if [[ "$(is_gb_number "$raw")" != "yes" ]]; then printf 'not_number'; return 0; fi
+  if ! awk -v v="$raw" 'BEGIN { exit !(v > 0) }'; then printf 'not_positive'; return 0; fi
+  if ! awk -v v="$raw" -v m="$MODEL_GB_MAX" 'BEGIN { exit !(v <= m) }'; then
+    printf 'too_large'
+    return 0
+  fi
+  printf 'ok %s' "$raw"
+}
+
+# 本機的映像清單裡有沒有這一個。三態，而**中間那一態是它存在的理由**：
+#
+#   yes      清單裡有
+#   no       清單讀得到，確實沒有
+#   unknown  **清單讀不到**（docker 不在、指令失敗、回空）。讀不到 ≠ 不在 ——
+#            把它讀成 `no` 會讓閘門對著一台映像檔都在本機的機器硬擋，
+#            而那是 D-056 的 size_vram 同一課：會誤報的守衛比沒有守衛更糟。
+#
+# 比對**只認全等**，不做子串。`ollama/ollama-x:latest` 不命中
+# `ollama/ollama:latest` —— `nvidia` 與 `nvidia-experimental` 已經教過一次
+# （見 gpu_runtime_registered）。compose 裡三個 image 都帶明確的 tag
+# （`docker-compose.yml` 的 `:latest`／`:main`），所以全等比對是對的；
+# 若哪天有人寫成不帶 tag 的 `image: ollama/ollama`，這裡會說它「不在」
+# —— 方向是保守的（多要空間、可能誤擋），不是放行。
+#
+# **這裡刻意不檢查 `want` 是不是空的。** 「沒有東西要找」那一態屬於呼叫端
+# （image_missing_list 已經處理，那裡也有測試），寫在這裡會與
+# image_arch_listed 的同名檢查**逐字重複** —— 而逐字重複的行會讓突變台的
+# 目標字串變成 NOT_UNIQUE，那個守衛就靜默地消失了（#83 那六條「植入失敗」
+# 就是這個形狀，修法是去重，不是改字串）。
+image_in_list() {
+  local list="${1:-}" want="${2:-}" line
+  if [[ -z "$list" ]]; then printf 'unknown'; return 0; fi
+  while IFS= read -r line; do
+    if [[ "$line" == "$want" ]]; then printf 'yes'; return 0; fi
+  done <<<"$list"
+  printf 'no'
+}
+
+# 清單裡**不在本機**的那些，一行一個。全部都在就什麼都不印。
+#
+# 讀不到本機清單時印 `unknown` —— 呼叫端據此走保守值（見 image_need_gb），
+# 而不是走「都在」。
+image_missing_list() {
+  local local_list="${1:-}" wanted="${2:-}" img state missing=""
+  if [[ -z "$wanted" ]]; then printf 'unknown'; return 0; fi
+  if [[ -z "$local_list" ]]; then printf 'unknown'; return 0; fi
+  while IFS= read -r img; do
+    if [[ -z "$img" ]]; then continue; fi
+    state="$(image_in_list "$local_list" "$img")"
+    if [[ "$state" != "yes" ]]; then missing+="${img}"$'\n'; fi
+  done <<<"$wanted"
+  printf '%s' "$missing"
+}
+
+# 這些映像要吃掉多少磁碟。**問機器，不是猜。**
+#
+# 全部都在本機 → `0`：compose 的 pull_policy 預設是 `missing`，本機有的映像
+# 不會被重拉，所以一次重跑真的不需要為它們留空間。這是 D-058 修掉的那半個
+# 誤擋。
+#
+# 有缺、**或讀不到清單** → 常數。讀不到時走保守值而不是 0：那是「不知道」，
+# 而不知道不可以變成「不需要」。
+image_need_gb() {
+  local missing
+  missing="$(image_missing_list "${1:-}" "${2:-}")"
+  if [[ -z "$missing" ]]; then printf '0'; return 0; fi
+  printf '%s' "$DISK_IMAGE_GB"
+}
+
+# 無條件需要的磁碟：映像 ＋ 系統餘裕。**第 2 步只看這個數字。**
+#
+# 「無條件」是這整個設計的關鍵字：第 2 步在 ollama 容器存在之前跑，所以它
+# **問不到**模型在不在（那是第 8 步的事）。它問得到的是映像 —— `docker images`
+# 是本地查詢，不需要容器、不需要網路。兩個問題在兩個不同的時間點才可回答，
+# 這就是閘門分成兩段的原因，不是偏好。
+disk_unconditional_need_gb() {
+  local img_gb="${1:-}"
+  if [[ "$(is_gb_number "$img_gb")" != "yes" ]]; then printf ''; return 0; fi
+  printf '%d' "$(( img_gb + DISK_SYSTEM_MARGIN_GB ))"
+}
+
+# 這次下載一個模型要多少磁碟：peak × 模型 ＋ 基準。
+#
+# `will_download` 是**這次會不會真的下載**。只有字面上的 `no` 會少算 ——
+# 那代表模型已經在本機（`df` 本來就沒算已在磁碟上的 blob，所以模型那一項
+# 是 0，只剩基準）。其餘一律（**包括空字串**）當成「會下載」：預設必須落在
+# 會擋的那一邊，因為把「不知道」算成「不需要」正是 D-055 §3(1) 那個 bug。
+#
+# 舊版的 `2 × 模型 + 4` 把四件事混在一起，而且**其中兩件是錯的**：`2×` 沒有
+# 引註（見 DISK_PULL_PEAK_MULTIPLIER），`4` 對三個 image 少了約 4 倍
+# （見 DISK_IMAGE_GB）。拆開之後每個數字都有自己的名字與自己的來源。
 disk_need_gb() {
-  local gb="$1"
-  if [[ ! "$gb" =~ ^[0-9]+([.][0-9]+)?$ ]]; then printf ''; return 0; fi
-  awk -v g="$gb" 'BEGIN { printf "%d", 2 * g + 4 }'
+  # `base_gb` 用 `${3:-}` 而不是 `${3:-0}`：**明確傳進來的空字串不是 0。**
+  # `${3:-0}` 會把「呼叫端說它不知道基準」收斂成「基準是 0」，於是閘門算出
+  # 一個太小的需求、說 sufficient —— 那就是 fail-open，而且無聲。
+  # 空字串會落到下面的檢查、回空、讓呼叫端走 unknown（印「不知道」）。
+  # （這一條是測試抓到的：`disk_need_gb 2.5 yes ''` 原本回 5。）
+  local gb="$1" will_download="${2:-}" base_gb="${3:-}"
+  if [[ "$(is_gb_number "$gb")" != "yes" ]]; then printf ''; return 0; fi
+  if [[ ! "$base_gb" =~ ^[0-9]+$ ]]; then printf ''; return 0; fi
+  if [[ "$will_download" == "no" ]]; then printf '%d' "$base_gb"; return 0; fi
+  awk -v g="$gb" -v b="$base_gb" -v m="$DISK_PULL_PEAK_MULTIPLIER" \
+    'BEGIN { printf "%d", m * g + b }'
 }
 
 # 建議的記憶體下限（MB）：模型本體 + KV cache 估算 + 2GB 的 Open WebUI 與系統。

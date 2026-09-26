@@ -254,9 +254,131 @@ check "記憶體：非數字不會被當成 0（0 會變成 tight 這個假失�
 check "模型大小：qwen3:4b 查得到" "2.5" "$(model_gb_estimate qwen3:4b)"
 check "模型大小：表格外的模型 → unknown（不用 tag 猜）" "unknown" "$(model_gb_estimate llama3:70b)"
 check "模型大小：空字串 → unknown" "unknown" "$(model_gb_estimate '')"
+# 嵌入模型由 deploy-vps.sh **無條件下載**，所以它一定要查得到 —— 缺這一格的話，
+# 一次全新佈署在「下載前」的閘門會每次都印「不知道」，而那是一個永遠亮著的警告。
+check "模型大小：嵌入模型查得到（它每次都會被下載）" "0.6" "$(model_gb_estimate qwen3-embedding:0.6b)"
 
-check "磁碟需求：2×模型 + 4GB" "9" "$(disk_need_gb 2.5)"
-check "磁碟需求：模型大小未知 → 空（呼叫端據此走 unknown）" "" "$(disk_need_gb unknown)"
+# ═══════════════════════════════════════════════════════════
+# is_gb_number —— 這一條判斷只寫一次，三個呼叫端共用
+# ═══════════════════════════════════════════════════════════
+check "GB 字面：整數" "yes" "$(is_gb_number 5)"
+check "GB 字面：小數" "yes" "$(is_gb_number 5.2)"
+check "GB 字面：空字串（那是「沒明講」，不是 0）" "no" "$(is_gb_number '')"
+check "GB 字面：unknown" "no" "$(is_gb_number unknown)"
+check "GB 字面：負數" "no" "$(is_gb_number -1)"
+check "GB 字面：小數點開頭（.5）" "no" "$(is_gb_number .5)"
+check "GB 字面：小數點結尾（5.）" "no" "$(is_gb_number 5.)"
+check "GB 字面：兩個小數點" "no" "$(is_gb_number 2.5.1)"
+check "GB 字面：夾帶單位（5GB）" "no" "$(is_gb_number 5GB)"
+
+# ═══════════════════════════════════════════════════════════
+# model_gb_resolve / model_gb_verdict —— 缺陷 (2) 的修法
+#
+# 這兩條合起來回答的是同一個問題的兩半：**旗標給了就信旗標，沒給就誠實地
+# 說不知道**。中間那個「猜一個數字出來」是 D-055 §3(2) 明文禁止的方向。
+# ═══════════════════════════════════════════════════════════
+check "模型大小解析：明講的值優先於查表" "7.5" "$(model_gb_resolve 7.5 qwen3:4b)"
+check "模型大小解析：沒明講就查表" "2.5" "$(model_gb_resolve '' qwen3:4b)"
+# **這一條是整個 #85 最重要的一條斷言。** 表外的模型 + 沒有旗標，唯一正確的
+# 答案就是「不知道」—— 把它變成任何一個數字（不管是查表的近似值、tag 裡撈到
+# 的、還是一個保守的猜測）都是把「我沒查到」講成「我查過了」。
+check "模型大小解析：表外模型 ＋ 沒旗標 → unknown（紅線）" "unknown" "$(model_gb_resolve '' llama3:70b)"
+check "模型大小解析：表外模型 ＋ 有旗標 → 用旗標" "7.5" "$(model_gb_resolve 7.5 llama3:70b)"
+check "模型大小解析：空模型名 ＋ 沒旗標 → unknown" "unknown" "$(model_gb_resolve '' '')"
+
+check "model-gb：正常值" "ok 7.5" "$(model_gb_verdict 7.5)"
+check "model-gb：整數" "ok 5" "$(model_gb_verdict 5)"
+check "model-gb：上限含端點" "ok 1024" "$(model_gb_verdict 1024)"
+check "model-gb：非數字" "not_number" "$(model_gb_verdict abc)"
+check "model-gb：空字串（沒給旗標時**不會**呼叫到這裡）" "not_number" "$(model_gb_verdict '')"
+check "model-gb：unknown 不是數字" "not_number" "$(model_gb_verdict unknown)"
+# 0 會讓閘門算出「需要 0 GB」—— 比不給旗標（unknown）**更寬鬆**。那是把
+# fail-open 做成一個選項，所以它必須與 abc 一樣被擋下來。
+check "model-gb：0 要擋（它比不填更寬鬆）" "not_positive" "$(model_gb_verdict 0)"
+check "model-gb：0.0 也要擋（形狀不同，結論一樣）" "not_positive" "$(model_gb_verdict 0.0)"
+check "model-gb：00 也要擋" "not_positive" "$(model_gb_verdict 00)"
+# 5200 是把 qwen3:8b 的 5,200 **MB** 當成 GB 填進來的長相 —— 單位錯誤。
+check "model-gb：把 MB 當 GB 填（5200）" "too_large" "$(model_gb_verdict 5200)"
+check "model-gb：超過上限" "too_large" "$(model_gb_verdict 1025)"
+
+# ═══════════════════════════════════════════════════════════
+# 映像清單 —— 「問機器，不是猜」
+#
+# 這一組守的是 #85 的另一半：`+4` 對三個 image 少了約 4 倍（實測 16.4 GB），
+# 但**把它改大反而更糟** —— 除非它同時變成有條件的。所以這裡的核心不是
+# 「數字對不對」，而是「本機已經有的映像不可以被算進需求裡」。
+# ═══════════════════════════════════════════════════════════
+IMGS='ollama/ollama:latest
+ghcr.io/open-webui/open-webui:main'
+
+check "映像：清單裡有 → yes" "yes" "$(image_in_list "$IMGS" ollama/ollama:latest)"
+check "映像：清單裡沒有 → no" "no" "$(image_in_list "$IMGS" nginx:latest)"
+# 讀不到清單 ≠ 不在。讀成 no 會對著一台映像檔都在本機的機器硬擋。
+check "映像：清單讀不到 → unknown（不是 no）" "unknown" "$(image_in_list '' ollama/ollama:latest)"
+# 「沒有東西要找」那一態屬於呼叫端（image_missing_list）；這一層不重複那條
+# 檢查，理由寫在 image_in_list 的註解裡（逐字重複的行會弄掉突變台的守衛）。
+check "映像：呼叫端沒問哪一個時，這一層回 no（真正的守衛在 image_missing_list）" "no" \
+      "$(image_in_list "$IMGS" '')"
+# **只認全等。** 這三條是刻意挑的：子串比對會讓它們全部翻成 yes，而每一個
+# 都是一個真的會發生的誤配 —— 與 nvidia / nvidia-experimental 同一個形狀。
+#   1. 少了 tag：`image: ollama/ollama` 對上本機的 `ollama/ollama:latest`
+#   2. 多了後綴：`ollama/ollama-x`
+#   3. 共用前綴：open-webui 對上 open-webui-extra
+check "映像：只認全等（沒有 tag 的查詢不命中帶 tag 的）" "no" \
+      "$(image_in_list 'ollama/ollama:latest' 'ollama/ollama')"
+check "映像：只認全等（ollama/ollama-x 不命中 ollama/ollama）" "no" \
+      "$(image_in_list 'ollama/ollama-x:latest' ollama/ollama:latest)"
+check "映像：只認全等（共用的前綴不算）" "no" \
+      "$(image_in_list 'ghcr.io/open-webui/open-webui-extra:main' ghcr.io/open-webui/open-webui:main)"
+
+check "映像缺哪些：都在 → 什麼都不印" "" "$(image_missing_list "$IMGS" "$IMGS")"
+check "映像缺哪些：缺一個就列出它" "nginx:latest" \
+      "$(image_missing_list "$IMGS" "nginx:latest")"
+check "映像缺哪些：本機清單讀不到 → 印 unknown" "unknown" \
+      "$(image_missing_list '' "$IMGS")"
+check "映像缺哪些：沒有想要的清單 → unknown" "unknown" "$(image_missing_list "$IMGS" '')"
+
+check "映像需求：都在本機 → 0（重跑真的不需要為它們留空間）" "0" "$(image_need_gb "$IMGS" "$IMGS")"
+check "映像需求：缺一個 → 常數" "$DISK_IMAGE_GB" "$(image_need_gb "$IMGS" "nginx:latest")"
+# 讀不到清單走**保守值**，不是 0。「不知道」不可以變成「不需要」。
+check "映像需求：清單讀不到 → 常數，不是 0" "$DISK_IMAGE_GB" "$(image_need_gb '' "$IMGS")"
+
+check "無條件需求：映像都在 → 只剩餘裕" "2" "$(disk_unconditional_need_gb 0)"
+check "無條件需求：映像要拉 → 映像 ＋ 餘裕" "4" "$(disk_unconditional_need_gb 2)"
+check "無條件需求：讀不到映像需求 → 空（呼叫端走 unknown）" "" "$(disk_unconditional_need_gb unknown)"
+# **這一條釘住「提交 1 不動任何數字」**：映像 ＋ 餘裕必須等於舊版那個寫死的 4。
+# 提交 2 量到真值之後這一條會改 —— 那是它應該發生的事，不是它壞了。
+check "無條件需求：提交 1 的總和 ＝ 舊版的 +4" "4" \
+      "$((DISK_IMAGE_GB + DISK_SYSTEM_MARGIN_GB))"
+
+# ═══════════════════════════════════════════════════════════
+# disk_need_gb —— 缺陷 (1)：重跑誤擋
+#
+# 舊版是 `2 × 模型 ＋ 4`，**與「這次要不要下載」無關**。於是模型已經在本機的
+# 重跑仍然被要求 2 倍的空間，而那正是這支腳本自己說最該支援的處境。
+# ═══════════════════════════════════════════════════════════
+check "磁碟需求：會下載 → 峰值 × 模型 ＋ 基準" "24" "$(disk_need_gb 2.5 yes 19)"
+check "磁碟需求：基準 4 時與舊公式等價（2×2.5+4=9）" "9" "$(disk_need_gb 2.5 yes 4)"
+# **缺陷 (1) 本身。** 不會下載時模型那一項是 0：模型已經在磁碟上了，`df`
+# 本來就把它算成已用空間，再要一次就是重複計算 —— 而那個重複計算就是誤擋。
+check "磁碟需求：不會下載 → 模型那一項不算，只剩基準" "19" "$(disk_need_gb 2.5 no 19)"
+check "磁碟需求：不會下載且映像都在 → 只剩餘裕" "2" "$(disk_need_gb 5.2 no 2)"
+# 空字串必須與 yes 同路。**這一條是 fail-closed 的預設**：漏傳參數的後果
+# 必須是「多要一點空間」，不是「靜默地不檢查」。
+check "磁碟需求：空字串當成「會下載」，不是「不會」" "24" "$(disk_need_gb 2.5 '' 19)"
+check "磁碟需求：認不得的字串也當成「會下載」" "24" "$(disk_need_gb 2.5 maybe 19)"
+check "磁碟需求：模型大小未知 → 空（呼叫端據此走 unknown）" "" "$(disk_need_gb unknown yes 4)"
+check "磁碟需求：基準不是整數 → 空（不當成 0）" "" "$(disk_need_gb 2.5 yes '')"
+check "磁碟需求：基準是 unknown → 空" "" "$(disk_need_gb 2.5 yes unknown)"
+check "磁碟需求：沒給基準 → 空（不知道其他消費者要多少，不當成 0）" "" "$(disk_need_gb 2.5 yes)"
+
+# ═══════════════════════════════════════════════════════════
+# 旗標與其他判準的接線
+# ═══════════════════════════════════════════════════════════
+# --model-gb 不可以只餵磁碟 —— 記憶體那條警告用的是同一個推導值，否則會
+# 出現「磁碟說 7 GB、記憶體說 unknown」這種自相矛盾的輸出（D-054）。
+check "旗標接線：明講的大小也餵記憶體警告" "9504" \
+      "$(ram_warn_mb "$(model_gb_resolve 7 llama3:70b)" 8192)"
 
 # KV cache 那一項是**估算值**，所以它只餵警告。這個數字同時也是那條警告
 # 講得出「為什麼」的來源：8192 × 36KiB/1024 = 288MB。

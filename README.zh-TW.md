@@ -535,8 +535,8 @@ bash scripts/up.sh
 
 | 指令 | 用途 |
 |---|---|
-| `bash scripts/deploy-vps.sh --model M --num-ctx N` | **在全新 VPS 上一鍵佈署。** 先安全地寫 `.env`**再**載入它、起堆疊、以真實埠綁定過閘門、下載兩個模型，然後證明堆疊生成得出東西、且 `num_ctx` 真的生效。只做全新安裝 —— 資料庫已有帳號或對話時會拒絕 |
-| `bash scripts/deploy-vps.sh --dry-run` | 同樣的前置檢查與 `.env` 差異，但不寫任何東西 |
+| `bash scripts/deploy-vps.sh --model M --num-ctx N [--model-gb G]` | **在全新 VPS 上一鍵佈署。** 先安全地寫 `.env`**再**載入它、起堆疊、以真實埠綁定過閘門、下載兩個模型，然後證明堆疊生成得出東西、且 `num_ctx` 真的生效。只做全新安裝 —— 資料庫已有帳號或對話時會拒絕。**`--model-gb G`** 用來明講內建表不認識的模型要多少磁碟；不給的話磁碟閘門會說「不知道」，而它**不會從 tag 猜**（D-058） |
+| `bash scripts/deploy-vps.sh --dry-run` | 同樣的前置檢查與 `.env` 差異，但不寫任何東西。它印的磁碟數字**只含無條件需要的那一份** —— 這次會拉的 compose 映像，加上系統餘裕。模型刻意**不在**那個數字裡：模型在不在要等容器起來才問得到，所以那一半會在下載前**再確認一次**（D-058） |
 | `bash scripts/deploy-vps.sh --expose` | 刻意把 Open WebUI 發布在 `0.0.0.0`，並把閘門降級成警告。**這會繞過 Cloudflare Access** —— 它是給真的在邊緣有過濾的機器用的，不是方便旗標 |
 | `bash scripts/up.sh` | 啟動堆疊 + 確保模型存在（冪等） |
 | `bash scripts/down.sh` | 停止容器，**保留**模型與對話紀錄 |
@@ -592,9 +592,9 @@ bash scripts/up.sh
 | `bash scripts/test_verify_mem0_add_cost_guard.sh` | 上面那個守衛真的**接上去了**，而且是**四支**會即時掛載探針的腳本（`verify-mem0-add-cost` / `-chroma-dims` / `-langgraph-tools` / `-phase3-runtime`）：`changed` 蓋得過 `--sections` 的結束碼 2，而真正的 2 不會被誤報；雜湊讀不到時只警告不失敗（D-016）；「結束碼 2 是預期的」這句在 rc=3 時不會再印出來；以及讀得到的 `OLLAMA_CONTEXT_LENGTH` 會以 `--ctx` 抵達探針，讀不到時是**完全不給旗標**加一則警告（D-037、D-038 第六節） |
 | `bash scripts/test_ollama_log_corroboration.sh` | 伺服器端日誌的旁證會把「儀器壞掉」與「這一輪沒有截斷」講成兩句不同的話。它的涵蓋檢查以前正是下面那個缺陷最壞的例子 —— `set -o pipefail` 之下 `printf \| grep -q` 的形式死於 SIGPIPE，於是**偏偏在涵蓋範圍最大的時候**回報「涵蓋不到」。現在它是 shell 的模式比對，而判準被講成它真正的樣子：**讀者離開之後，生產者還會不會再寫**（D-034，於 D-038 第七節更正） |
 | `bash scripts/test_usage_text.sh` | 每一支腳本的 `--help` 只印**它自己的檔頭**、不印別的，而且「印到哪裡停」的判準是**內容**（一直印到第一行非註解、非空行）而不是位置。原本用位置決定的 9 支裡：**4 支把程式碼當說明印出來**（`source …`／`require_docker`）、**1 支在截斷**（`deploy-vps.sh` 的 110 行檔頭只印了 18 行）、**4 支只是剛好對** —— 而「剛好對」才是危險的那一半：它不會失敗，所以也不會有人說什麼。C 節在暫存專案根裡（接假 docker）真的跑 11 支的 `--help`，與**獨立推導**出來的檔頭（另一種算法）逐字比對；D 節掃描寫死行號有沒有回來、以及有沒有一個 `usage_text` 呼叫搆不到定義 —— 這次改動的第一版就是在 `lib.sh` 載入之前呼叫它，結果**什麼都不印、結束碼還是 0**（D-039） |
-| `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西 |
-| `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻、`.env` 寫入器與架構三層，每一項都有「該過的過」與「該擋的擋」—— 192 個案例。架構那幾條讀的是**真實抓下來的 `docker manifest inspect` JSON**，包含兩個坑：單一平台的 manifest **完全沒有** `architecture` 欄位（讀成「沒有」會擋掉一台容器已經起來的機器），以及 `arm` 不可以誤中 `arm64`（D-057） |
-| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 102 道突變，每一個都必須被抓到。架構那組最貴的兩條：`arm64 → verified`（宣稱這個 lab 在 ARM 上驗證過）與 `不等時回 native`（讓 qemu 模擬執行**整個靜默**） |
+| `bash scripts/deploy-vps.sh --dry-run` | 一次佈署會寫哪些東西進 `.env`，以及這台機器的磁碟／記憶體夠不夠 —— 不變更任何東西。D-058 之後它印的磁碟數字**只含無條件需要的那一份**（映像 ＋ 餘裕），所以模型那一份會另外講，而表外模型會被**指名為不知道**，不會被混進那個數字裡 |
+| `bash scripts/test_deploy_vps_decisions.sh` | 綁定位址政策、暴露閘門的四個狀態、資源門檻、`.env` 寫入器、架構三層與**兩階段的磁碟閘門**，每一項都有「該過的過」與「該擋的擋」—— 245 個案例。架構那幾條讀的是**真實抓下來的 `docker manifest inspect` JSON**，包含兩個坑：單一平台的 manifest **完全沒有** `architecture` 欄位（讀成「沒有」會擋掉一台容器已經起來的機器），以及 `arm` 不可以誤中 `arm64`（D-057）。磁碟那幾條釘住兩個「往寬鬆那邊錯」的方向：表外模型必須維持 `unknown`、**絕不可以回一個數字**（D-055 §3(2) 的紅線），以及明確傳進來的空字串 `will_download` 要算成「會下載」，不是重跑（D-058） |
+| `bash scripts/test_deploy_vps_decisions_mutants.sh` | 上面的評分器真的有在被執行 —— 對三個 bash 模組與煙霧探針做 121 道突變，每一個都必須被抓到。架構那組最貴的兩條：`arm64 → verified`（宣稱這個 lab 在 ARM 上驗證過）與 `不等時回 native`（讓 qemu 模擬執行**整個靜默**）。磁碟那組的三條骨幹：表外模型靜默回一個數字、映像清單讀不到被當成「沒有東西要拉」，以及第二階段從 `exit 1` 退化成 `return`（呼叫端會把它變成「無法判定」）（D-058） |
 | `bash scripts/verify-phase3-runtime.sh` | `recursion_limit` 算的是 super-step（+1）、太緊的 limit 會在工作全部做完之後才中止、以及持久化的 job store 在 1 秒預設寬限下仍會安靜地丟掉到期的 job（D-030） |
 | `bash scripts/test_phase3_runtime_probe.py` | 上面那些判定在離線時就有區辨力 —— 不需要 Docker、不需要 langgraph —— 而且每個邊界都是獨立一個案例 |
 | `bash scripts/test_phase3_storage_decisions.sh` | 儲存判定分得出 named volume、bind mount 與容器的暫存目錄，而且 `unknown` 永遠不會被讀成 durable |
@@ -1442,7 +1442,7 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
 |---|---|
 | **永遠沒有 GPU** | Codespaces 的 GPU 機器類型已於 **2025-08-29 下架**。所有推論都是 CPU-only。 |
 | **推論很慢** | 3B–4B Q4 模型在共享 vCPU 上約為個位數 tokens/sec —— 舊的 2 vCPU 機器與現在的 4 vCPU 機器都量到這個數量級（D-014、D-031、D-033）。Open WebUI 預設的 300 秒 HTTP timeout 可能被長回答觸發。 |
-| **下載需要約 2 倍磁碟** | 模型下載需要同時容納壓縮檔與解壓後的檔案，因此接近全滿的 volume 會下載失敗 —— 有時是靜默失敗。 |
+| **下載需要額外磁碟 —— 但多少沒量過** | 模型下載需要容納進來的資料與已經在裡面的東西，因此接近全滿的 volume 會下載失敗 —— 有時是靜默失敗。**這一列原本寫的「約 2 倍」沒有量測根據**，而且它與同一列的推論互相矛盾：ollama 支援續傳，所以任何時刻都不會同時存在壓縮檔與解壓檔兩份。D-058 會把它真正量出來。**已經知道的是**：重跑時若模型已下載，額外需求幾乎是零 —— 而佈署閘門現在會**問機器**，不再假設一定會下載。 |
 | **可能先耗盡的是儲存** | 各方說法不一致：儲存究竟計費「實際使用」還是「32GB 配置量」。若是後者，一個 codespace 存活一個月就是 32 GB-month，對上 15 GB-month 的額度，會在**約兩週**內耗盡 —— 比 compute 更早。請盯緊帳單頁面。 |
 | **`localhost` 不是主機** | 在 devcontainer 內，要連到主機服務需用 `host.docker.internal`（Linux 上需加 `--add-host=host.docker.internal:host-gateway`），或像本 repo 一樣把 Ollama 做成 compose 服務，以 `http://ollama:11434` 存取。 |
 | **不存在 Ollama 的 devcontainer feature** | 沒有 `ghcr.io/devcontainers/features/ollama` 這個東西。所有做法都是透過 `onCreateCommand` 安裝、做成 compose 服務、或指向主機實例。本 repo 採用 compose 服務做法。 |
@@ -1465,7 +1465,8 @@ bash scripts/verify-phase3-runtime.sh --json   # 機器可讀，走 stdout
 bash scripts/pull-model.sh
 ```
 
-Ollama 支援中斷續傳。
+Ollama 支援中斷續傳。這也正是為什麼「模型已經在」的重跑幾乎不需要額外磁碟 ——
+佈署閘門現在會把這兩種情況分開，不再假設一定會下載（D-058）。
 
 ### 回答速度很慢
 

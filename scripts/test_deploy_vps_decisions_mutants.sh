@@ -186,8 +186,7 @@ MUTANTS=(
   "記憶體：非數字當成 0（會變成假的 tight）|  if [[ ! \"\$avail_mb\" =~ ^[0-9]+\$ ]]; then printf 'unknown'; return 0; fi|  if false; then printf 'unknown'; return 0; fi"
 
   # ── 估算與需求 ──
-  "模型大小：4b 查到錯的數字|    qwen3:4b)   printf '2.5'; return 0 ;;|    qwen3:4b)   printf '0.0'; return 0 ;;"
-  "磁碟需求：忘了 pull 要兩倍空間|  awk -v g=\"\$gb\" 'BEGIN { printf \"%d\", 2 * g + 4 }'|  awk -v g=\"\$gb\" 'BEGIN { printf \"%d\", g + 4 }'"
+  "模型大小：4b 查到錯的數字|    qwen3:4b)             printf '2.5'; return 0 ;;|    qwen3:4b)             printf '0.0'; return 0 ;;"
   "記憶體需求：KV cache 那項不算進去|    'BEGIN { printf \"%d\", g * 1024 + (c * kv) / 1024 + 2048 }'|    'BEGIN { printf \"%d\", g * 1024 + 2048 }'"
 
   # ── ctx_meets_mem0：D-027 的結論本身 ──
@@ -384,6 +383,72 @@ MUTANTS=(
   # 但它也不是「沒問題」—— 上面那兩條測試盯的就是這個第三個字。
   "執行：主機讀不到時回 native（無知當成沒問題）|  if [[ \"\$h\" == \"unknown\" ]]; then printf 'unknown'; return 0; fi|  if [[ \"\$h\" == \"unknown\" ]]; then printf 'native'; return 0; fi"
   "執行：映像讀不到時回 native（同一課的另一邊）|  if [[ \"\$o\" == \"unknown\" ]]; then printf 'unknown'; return 0; fi|  if [[ \"\$o\" == \"unknown\" ]]; then printf 'native'; return 0; fi"
+
+  # ══════════════════════════════════════════════════════════
+  # 磁碟閘門（D-058）
+  # ══════════════════════════════════════════════════════════
+  # 這一組的形狀與上面每一組都不同：**它的失效方向有一半是「誤擋」**。
+  # 上面那些判準壞掉時大多會靜默放行（安全問題）；磁碟閘門壞掉的兩個方向
+  # 都貴 —— 放行 = pull 中途失敗（有時是無聲的），誤擋 = 對著一台好好的
+  # 機器說它空間不夠，而那正是這支腳本最該支援的「重跑失敗的佈署」。
+  #
+  # 所以下面三條是骨幹，缺一條這整套修正就等於沒做：
+  #   · 表外模型靜默回一個數字（D-055 §3(2) 明文禁止的那個突變）
+  #   · 缺映像／讀不到清單也當成 0（fail-open）
+  #   · 漏傳 will_download 時當成「不會下載」（同一個 fail-open 的另一邊）
+
+  # **缺陷 (1) 本體。** 少了這條分支，模型已經在本機的重跑仍然被要求 2 倍
+  # 空間 —— 也就是回到修正前的行為，而所有輸出都照常。
+  "磁碟需求：不會下載時仍然算模型那一份（重跑誤擋，缺陷 1 本體）|  if [[ \"\$will_download\" == \"no\" ]]; then printf '%d' \"\$base_gb\"; return 0; fi|  if false; then printf '%d' \"\$base_gb\"; return 0; fi"
+  # fail-closed 的預設。漏傳參數的後果必須是「多要一點空間」，不是「靜默地
+  # 不檢查」—— 前者看得到，後者要等到 pull 壞在半路才知道。
+  "磁碟需求：漏傳 will_download 時當成「不會下載」（fail-open）|  if [[ \"\$will_download\" == \"no\" ]]; then printf '%d' \"\$base_gb\"; return 0; fi|  if [[ \"\$will_download\" != \"yes\" ]]; then printf '%d' \"\$base_gb\"; return 0; fi"
+  # 基準是「其他消費者要多少」。空字串收斂成 0 會算出一個太小的需求。
+  "磁碟需求：基準空字串當成 0（fail-open）|  if [[ ! \"\$base_gb\" =~ ^[0-9]+\$ ]]; then printf ''; return 0; fi|  base_gb=0"
+  # 模型大小未知時唯一正確的答案就是空字串（呼叫端據此走 unknown 並印出來）。
+  "磁碟需求：模型大小未知也照算（把不知道講成一個數字）|  if [[ \"\$(is_gb_number \"\$gb\")\" != \"yes\" ]]; then printf ''; return 0; fi|  if false; then printf ''; return 0; fi"
+  # 舊版的 2 倍沒有引註。把它拿掉會讓下載期間的峰值不被算進去 —— 這是
+  # 這條突變在舊世界裡的位置（原本瞄準 `2 * g + 4` 那一行，公式拆開之後
+  # 目標移到常數上）。
+  "磁碟需求：忘了 pull 要兩倍空間|DISK_PULL_PEAK_MULTIPLIER=2|DISK_PULL_PEAK_MULTIPLIER=1"
+  "無條件需求：忘了加系統餘裕|  printf '%d' \"\$(( img_gb + DISK_SYSTEM_MARGIN_GB ))\"|  printf '%d' \"\$img_gb\""
+  # **這條第一版寫成 `if false`，結果是個 no-op**：往下掉會進到算術展開，
+  # 而 `set -u` 讓 `$(( unknown + 2 ))` 當場失敗、輸出**也是空的** —— 與正確
+  # 答案一模一樣，所以它「存活」了。症狀是「測試有洞」，其實是突變自己沒有
+  # 改變行為（與 NAT 判定那條同一個形狀：倖存的突變要先懷疑突變本身）。
+  # 改成直接把 unknown 收斂成 `0`，那才是我要防的那個 fail-open。
+  "無條件需求：讀不到映像需求也當 0（無知變成「不需要」）|  if [[ \"\$(is_gb_number \"\$img_gb\")\" != \"yes\" ]]; then printf ''; return 0; fi|  if [[ \"\$(is_gb_number \"\$img_gb\")\" != \"yes\" ]]; then printf '0'; return 0; fi"
+
+  # ── 映像清單：這一組的失效方向全部是「重跑誤擋」 ──
+  # 缺映像卻回 0 = 全新 VPS 會在閘門說「足夠」的地方壞在半路。
+  "映像需求：缺映像也回 0（fail-open）|  if [[ -z \"\$missing\" ]]; then printf '0'; return 0; fi|  if true; then printf '0'; return 0; fi"
+  # 讀不到清單 ≠ 不在。讀成 no 就是對著一台映像檔都在本機的機器硬擋。
+  "映像：讀不到清單當成「不在」（對著好機器誤擋）|  if [[ -z \"\$list\" ]]; then printf 'unknown'; return 0; fi|  if [[ -z \"\$list\" ]]; then printf 'no'; return 0; fi"
+  "映像缺哪些：本機清單讀不到時不印 unknown|  if [[ -z \"\$local_list\" ]]; then printf 'unknown'; return 0; fi|  if false; then printf 'unknown'; return 0; fi"
+  # 子串比對：ollama/ollama-x 會命中 ollama/ollama —— 與 nvidia／
+  # nvidia-experimental 是同一個形狀（形狀正確、結論相反）。
+  "映像：改成子串比對（ollama/ollama-x 命中 ollama/ollama）|    if [[ \"\$line\" == \"\$want\" ]]; then printf 'yes'; return 0; fi|    if [[ \"\$line\" == *\"\$want\"* ]]; then printf 'yes'; return 0; fi"
+
+  # ── 模型大小：D-055 §3(2) 的紅線 ──
+  # **這是整組裡最貴的一條。** 表外的模型靜默回一個數字，就是把「我不知道
+  # 這個模型多大」變成一個看起來很確定的答案 —— 而 D-055 §3(2) 明文寫著
+  # 修這個缺陷的時候不可以把它改成靜默通過。
+  "模型大小：表外模型靜默回一個數字（D-055 §3(2) 明文禁止）|    qwen3-embedding:0.6b) printf '0.6'; return 0 ;;|    qwen3-embedding:0.6b) printf '0.6'; return 0 ;;"$'\n'"    *) printf '5.2'; return 0 ;;"
+  "模型大小解析：沒明講時猜一個數字（而不是 unknown）|  model_gb_estimate \"\$model\"|  printf '5.2'"
+  "模型大小解析：旗標被查表蓋掉（使用者明講的無效）|  if [[ -n \"\$override\" ]]; then printf '%s' \"\$override\"; return 0; fi|  if false; then printf '%s' \"\$override\"; return 0; fi"
+  # 嵌入模型由 deploy-vps.sh 無條件下載；查不到的話，每一次全新佈署都會在
+  # 下載前的閘門印「不知道」—— 一個永遠亮著的警告與沒有警告是一樣的。
+  "模型大小：嵌入模型查不到（每次全新佈署都印不知道）|    qwen3-embedding:0.6b) printf '0.6'; return 0 ;;|    qwen3-embedding:0.6b) printf 'unknown'; return 0 ;;"
+
+  # ── --model-gb 的驗證：參數錯誤要走 3 ──
+  # 0 會讓閘門算出「需要 0 GB」—— 比不填旗標更寬鬆。那是把 fail-open
+  # 做成一個選項。
+  "model-gb：0 也收（把 fail-open 做成選項）|  if ! awk -v v=\"\$raw\" 'BEGIN { exit !(v > 0) }'; then printf 'not_positive'; return 0; fi|  if false; then printf 'not_positive'; return 0; fi"
+  "model-gb：非數字也收|  if [[ \"\$(is_gb_number \"\$raw\")\" != \"yes\" ]]; then printf 'not_number'; return 0; fi|  if false; then printf 'not_number'; return 0; fi"
+  # 上限接的是**單位錯誤**（5200 是把 5,200 MB 當成 GB）。
+  "model-gb：上限不檢查（單位錯誤被放行）|  if ! awk -v v=\"\$raw\" -v m=\"\$MODEL_GB_MAX\" 'BEGIN { exit !(v <= m) }'; then|  if false; then"
+  "GB 字面：空字串也算數字|  if [[ \"\$v\" =~ ^[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi|  if true; then printf 'yes'; return 0; fi"
+  "GB 字面：負數也算數字|  if [[ \"\$v\" =~ ^[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi|  if [[ \"\$v\" =~ ^-?[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi"
 )
 
 caught=0
