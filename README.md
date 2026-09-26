@@ -1790,7 +1790,7 @@ Verified issues that are easy to lose hours to:
 |---|---|
 | **No GPU, ever** | The Codespaces GPU machine type was **deprecated 2025-08-29**. All inference is CPU-only. |
 | **Slow inference** | A 3B–4B Q4 model on shared vCPUs runs at roughly single-digit tokens/sec — measured on both the old 2-vCPU box and the current 4-vCPU one (D-014, D-031, D-033). Open WebUI's default 300-second HTTP timeout can be hit by long completions. |
-| **Pulls need extra disk — but how much is *not measured*** | Model downloads need room for the incoming data alongside what is already there, so a nearly-full volume fails a pull — sometimes silently. **The "~2×" this row used to state had no measurement behind it**, and it contradicted the row's own reasoning: Ollama resumes partial downloads, so nothing holds a compressed and an extracted copy at once. D-058 tracks measuring it for real. What *is* known: a re-run that reuses an already-downloaded model needs almost nothing extra, and the deploy gate now asks the machine instead of assuming a download is happening |
+| **Model pulls need almost no extra disk — now measured** | A download needs room for what is arriving, so a nearly-full volume can still fail a pull — sometimes silently. **Measured 2026-09-26:** pulling `qwen3:8b` (5,225,422,848 B) into an isolated volume, sampling once a second — 1184 samples over 1183 s — the peak *allocated* bytes never exceeded the model's final size (instantaneous excess **0 B**; multiplier **1.000** by two independent estimators). The reason: the blob **is** the artifact, and Ollama preallocates it sparsely, so there is never a compressed copy sitting beside an extracted one. The "~2×" this row used to state was not merely unsourced — it was **wrong**, and the constant is gone. A re-run whose model is already present needs nothing extra either, and the deploy gate asks the machine rather than assuming a download is happening. (D-058; `docs/evidence/2026-09-26-pull-peak-measurement.txt`) |
 | **Storage may run out first** | Sources disagree on whether storage counts disk *used* or the full 32GB volume allocation. If it is the allocation, one codespace alive for a month is 32 GB-month against a 15 GB-month allowance and runs out in ~2 weeks, before compute does. Watch the billing page. |
 | **`localhost` is not the host** | From inside a devcontainer, reach a host service via `host.docker.internal` (add `--add-host=host.docker.internal:host-gateway` on Linux), or — as this repo does — make Ollama a compose service reachable at `http://ollama:11434`. |
 | **No Ollama devcontainer feature exists** | There is no `ghcr.io/devcontainers/features/ollama`. Every approach installs it via `onCreateCommand`, uses it as a compose service, or points at a host instance. This repo uses the compose-service approach. |
@@ -1813,9 +1813,12 @@ fail with `Error decrypting tokens` after every container rebuild.
 bash scripts/pull-model.sh
 ```
 
-Ollama supports resuming partial downloads. That is also why a re-run whose model is
-already present needs almost no extra disk — the deploy gate tells those two cases
-apart instead of assuming a download is happening (D-058).
+Ollama supports resuming partial downloads — **this project has not measured that
+claim** (protocol D of D-058 was not run; see the no-test statement in that entry).
+What *is* measured is the disk side of it: a pull peaks at the model's final size and
+nothing more, and a re-run whose model is already present needs nothing extra at all.
+The deploy gate tells those two cases apart instead of assuming a download is
+happening (D-058).
 
 ### Responses are very slow
 

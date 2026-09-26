@@ -1,0 +1,15 @@
+# 診斷：ollama 下載期間，volume 內「表面大小」與「實際配置」的落差
+# 指令：docker run --rm -v pullpeak-volume:/data:ro --entrypoint python3 python:3.12-slim -c '<os.walk 統計 st_size 與 st_blocks*512>'
+# 時間：2026-09-26T11:24:21+10:00
+# 背景：D-058 提交 2 的量測儀器驗證。取樣器原本只記 st_size，這一跑證明那個數字
+#       在下載期間是**假的**（preallocation），實際佔用要讀 st_blocks。
+# 引用：DECISIONS.md D-058 §七
+
+檔案數 20
+apparent（st_size 總和）:  5,225,377,718 B = 4.867 GiB
+allocated（st_blocks*512）: 732,086,272 B = 0.682 GiB
+partial 檔數: 17
+最大的三個檔案（名稱 表面 實際）:
+  sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa  st_size=5,225,374,496  allocated=732,008,448
+  sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa  st_size=60  allocated=4,096
+  sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa  st_size=60  allocated=4,096

@@ -21,7 +21,14 @@
 |---|---|---|
 | `2026-09-23-throughput-qwen3-8b.txt` | 吞吐量探針 `--quick`（8b，`num_ctx` 8192／16384），exit 2、14m36s | `DECISIONS.md` D-049 §3／§5；`README.md`〈Hardware sizing → The baseline〉 |
 | `2026-09-23-throughput-qwen3-4b.txt` | 同上，**4b**（讓 4b／8b 變成同一把尺的那一輪），exit 2、3m46s | `DECISIONS.md` D-047 §1／§5、D-049 §4／§5；`README.md` 同節 |
+| `2026-09-26-pull-peak-measurement.txt` | 量測協定 A：在**獨立** volume 對 `qwen3:8b` 真拉一次（1184 筆樣本／1183 秒），量下載期間的磁碟峰值。倍數 **1.000**，兩個獨立估計法一致，exit 0 | `DECISIONS.md` D-058 §六／§七；`scripts/deploy-vps-decisions.sh` 的常數區 |
+| `2026-09-26-pull-preallocation-diagnostic.txt` | 上面那一跑的**儀器驗證**：同一時刻 `st_size` 5,225,377,718 B 對上 `st_blocks*512` 732,086,272 B | `DECISIONS.md` D-058 §六；`scripts/measure-pull-peak.sh` 檔頭 |
 
-兩份是**同一次比較的兩半**：同一支探針、同一組條件，只有模型名不同。合起來的結論
+上面兩份是**同一次比較的兩半**：同一支探針、同一組條件，只有模型名不同。合起來的結論
 （搶 CPU 約 20%、等效頻寬跨模型大小 13.1–19.7 GB/s）寫在 `DECISIONS.md` D-047 第一節
 的補記之二。
+
+下面兩份則是**同一支儀器的兩半**，而且**順序不能顛倒**：診斷先證明了「用 `st_size`
+量佔用量會得到一個假的答案」（ollama 把 blob 稀疏地預先配置到完整大小，所以表觀值
+在下載的下一秒就等於成品），取樣器才據此改成讀 `st_blocks * 512`，量測才成立。少了
+前者，後者那份「峰值等於最終」會被讀成一個好消息，而不是一個被修正過的假象。

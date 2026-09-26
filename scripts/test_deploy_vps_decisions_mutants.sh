@@ -407,11 +407,15 @@ MUTANTS=(
   "磁碟需求：基準空字串當成 0（fail-open）|  if [[ ! \"\$base_gb\" =~ ^[0-9]+\$ ]]; then printf ''; return 0; fi|  base_gb=0"
   # 模型大小未知時唯一正確的答案就是空字串（呼叫端據此走 unknown 並印出來）。
   "磁碟需求：模型大小未知也照算（把不知道講成一個數字）|  if [[ \"\$(is_gb_number \"\$gb\")\" != \"yes\" ]]; then printf ''; return 0; fi|  if false; then printf ''; return 0; fi"
-  # 舊版的 2 倍沒有引註。把它拿掉會讓下載期間的峰值不被算進去 —— 這是
-  # 這條突變在舊世界裡的位置（原本瞄準 `2 * g + 4` 那一行，公式拆開之後
-  # 目標移到常數上）。
-  "磁碟需求：忘了 pull 要兩倍空間|DISK_PULL_PEAK_MULTIPLIER=2|DISK_PULL_PEAK_MULTIPLIER=1"
+  # **提交 2 把那個倍數刪掉了**（真的拉一次量到 1.000），所以原本瞄準常數的
+  # 突變失去了目標。它換成守著**這個結論本身**的兩條 —— 因為現在最大的風險
+  # 已經不是「倍數設錯」，而是「有人覺得 2 倍比較保險，就把它加回來」。
+  "磁碟需求：倍數被加回來（1.0 倍變 2 倍）|'BEGIN { printf \"%d\", g + b }'|'BEGIN { printf \"%d\", 2 * g + b }'"
+  "磁碟需求：模型那一項整個被吃掉（只算基準）|'BEGIN { printf \"%d\", g + b }'|'BEGIN { printf \"%d\", b }'"
   "無條件需求：忘了加系統餘裕|  printf '%d' \"\$(( img_gb + DISK_SYSTEM_MARGIN_GB ))\"|  printf '%d' \"\$img_gb\""
+  # 這是 D-058 裡最錯的那個數字（舊版 4 GB 給三個 image，實測 16.35 GB）。
+  # 把它改回一個小數字，就是**把 fail-open 重新種回去**，而所有輸出都正常。
+  "無條件需求：映像大小改回低估的舊值|DISK_IMAGE_GB=17|DISK_IMAGE_GB=2"
   # **這條第一版寫成 `if false`，結果是個 no-op**：往下掉會進到算術展開，
   # 而 `set -u` 讓 `$(( unknown + 2 ))` 當場失敗、輸出**也是空的** —— 與正確
   # 答案一模一樣，所以它「存活」了。症狀是「測試有洞」，其實是突變自己沒有
