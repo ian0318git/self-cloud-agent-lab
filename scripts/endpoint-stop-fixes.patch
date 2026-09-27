@@ -1,0 +1,130 @@
+--- a/endpoint/core.py
++++ b/endpoint/core.py
+@@ -1029,10 +1029,17 @@
+ 
+ 
+ def get_kernel_status(config: Config) -> str:
++    """Return the kernel's state, or "unknown" when it cannot be determined.
++
++    "unknown" is not "offline". Every path that reaches it is a *failure to
++    ask*: no credentials, a non-200, a network error, or a status word we do
++    not recognise. Reading it as "nothing is running" is what made
++    `endpoint stop` a silent no-op while the GPU kept burning quota (D-060).
++    """
+     try:
+         token = get_kaggle_token()
+         if not token:
+-            return "offline"
++            return "unknown"
+         owner, slug = config.kernel_id.split("/", 1)
+         resp = requests.post(
+             "https://api.kaggle.com/v1/kernels.KernelsApiService/GetKernelSessionStatus",
+@@ -1050,7 +1057,7 @@
+                     return status_word
+     except Exception as e:
+         print(f"Warning: kernel status check failed: {e}", file=sys.stderr)
+-    return "offline"
++    return "unknown"
+ 
+ 
+ def get_kernel_errors(kernel_id: str) -> list[dict[str, str]]:
+--- a/endpoint/commands.py
++++ b/endpoint/commands.py
+@@ -1154,6 +1154,12 @@
+         if status in ("offline", "complete", "error"):
+             console.ok("Old kernel cleared.")
+             break
++        if status == "unknown":
++            # The same failure to ask. Retrying cannot help -- the cancel path
++            # needs the same credentials -- so keep boot's timing identical and
++            # only drop the false "cleared" claim (D-060).
++            console.warn("Could not confirm the old kernel is gone -- continuing.")
++            break
+         console.warn("Kernel still active. Stopping...")
+         _cancel_kernel_session(config.kernel_id)
+         time.sleep(min(1.5 * (i + 1), 5))
+@@ -1386,7 +1392,10 @@
+ 
+     if not success:
+         notebook_url = f"https://www.kaggle.com/code/{config.kernel_id}"
+-        console.warn(f"Kernel {kernel_status}. Boot failed.")
++        if kernel_status == "unknown":
++            console.warn("Kernel state unknown (could not query Kaggle). Boot failed.")
++        else:
++            console.warn(f"Kernel {kernel_status}. Boot failed.")
+         errors: list[dict[str, str]] | None = None
+         for _delay in (0, 2, 5):
+             if _delay:
+@@ -1474,6 +1483,23 @@
+         clear_cached_endpoint()
+         clear_cached_apikey()
+         return
++    # "unknown" is a failure to *ask*, not a fact about the kernel. Taking the
++    # early return above on it is what made this command a silent no-op while
++    # the GPU kept burning quota (D-060). The kill signal needs no Kaggle
++    # credentials, so send it anyway -- but never claim a success we cannot
++    # back up.
++    #
++    # 每一行都壓在 80 欄以內：rich 在非 TTY 下固定 80 欄換行，而且續行不縮排，
++    # 所以一句長訊息會斷出一個貼在第 0 欄的孤行。非互動 shell 正是這條路徑的
++    # 常態，不是例外。
++    unconfirmed = status == "unknown"
++    if unconfirmed:
++        console.warn(
++            "Could not read the kernel state -- sending the stop signal anyway."
++        )
++        console.warn(
++            "  Usually this shell has no Kaggle token; the kill signal needs none."
++        )
+     # Unregister from proxy using cached API key (tunnel may be down)
+     if config.proxy_enabled and config.unregister_url:
+         api_key = load_cached_apikey()
+@@ -1484,13 +1510,28 @@
+                 console.dim("Proxy unregister failed. TTL will auto-expire.")
+     console.info("Sending shutdown signal...")
+     send_kill_signal(config)
+-    ok, msg = _cancel_kernel_session(config.kernel_id)
+-    if not ok:
+-        console.warn(f"Stop signal sent, but Kaggle API reported: {msg}")
++    if unconfirmed:
++        # `_cancel_kernel_session` leads with `kaggle kernels delete -y`, which
++        # destroys the kernel and its version history. That is too much to
++        # spend on a state we could not read -- and it needs the same
++        # credentials that just failed, so it could not have worked anyway.
++        # The kill signal is sufficient on its own: the notebook exits on it.
++        console.dim("Skipped the Kaggle cancel -- it cannot authenticate either.")
+     else:
+-        console.ok("Instance terminated.")
++        ok, msg = _cancel_kernel_session(config.kernel_id)
++        if not ok:
++            console.warn(f"Stop signal sent, but Kaggle API reported: {msg}")
++        else:
++            console.ok("Instance terminated.")
+     clear_cached_endpoint()
+     clear_cached_apikey()
++    if unconfirmed:
++        console.warn(
++            "Could not confirm it stopped -- the kernel state was never readable."
++        )
++        console.warn("  Exiting 2 (cannot determine).")
++        console.warn("  To confirm, run `endpoint status` with the Kaggle token.")
++        sys.exit(2)
+ 
+ 
+ def run_status(args: dict[str, Any]) -> None:
+@@ -1506,6 +1547,7 @@
+         "complete": "completed",
+         "error": "stopped",
+         "offline": "offline",
++        "unknown": "unknown (could not check)",
+     }.get(raw, raw)
+     color = {
+         "running": "green",
+@@ -1514,6 +1556,7 @@
+         "complete": "dim",
+         "error": "yellow",
+         "offline": "red",
++        "unknown": "yellow",
+     }.get(raw, "red")
+     console.print(f"  [cyan]{config.kernel_id}[/]  [{color}]{label}[/]")
+     url = resolve_vps_url(config)

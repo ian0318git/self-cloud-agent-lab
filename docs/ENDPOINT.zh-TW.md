@@ -138,7 +138,7 @@ endpoint -g boot        # T4 x2
 | `endpoint doctor` | 系統診斷 —— 先確認設定真的被讀到了 |
 | `endpoint models` / `upload` / `settings` | 列出或上傳模型；看或改引擎參數 |
 | `endpoint logs` / `watch` | 引擎日誌（SSE），或狀態訊號串流 |
-| `endpoint stop` | 停掉這一台 |
+| `endpoint stop` | 停掉這一台。**它會告訴你是三種情況裡的哪一種** —— 見[讀不到 kernel 時的 `endpoint stop`](#讀不到-kernel-時的-endpoint-stop) |
 | `endpoint kill-all` | **終止帳號上所有在跑的 Kaggle kernel** |
 
 > `kill-all` 的範圍是**整個帳號**，不是這一台。這既是它有用的原因——例如
@@ -315,6 +315,63 @@ bash scripts/apply-endpoint-ntfy-fixes.sh --revert    # 還原
 **這動的是 package manager 目錄裡的檔案。** 重裝或升級 `endpoint-vps` 就會把
 修正蓋掉；升級後請重跑一次。
 
+## 讀不到 kernel 時的 `endpoint stop`
+
+2026-09-26，`endpoint stop` 在 GPU session **還活著、還在燒額度**的時候回報
+「No running kernel found.」並以 0 結束（[D-060](../DECISIONS.md)）。最後是直接
+呼叫 `endpoint.core.send_kill_signal` 才停掉的。
+
+成因不是「少了一個檢查」。`get_kernel_status()` 的**每一條**失敗路徑都回
+`"offline"` —— 沒憑證、非 200、網路例外、狀態字不認得 —— 而 `run_stop` 把
+`"offline"` 當成「沒有在跑」這個**事實**。也就是說，呼叫端唯一信任的那個值，
+全部由「問不到」生產。這與 [D-051](../DECISIONS.md) 是同一種病：把「讀不到」
+摺進「不在」，然後在摺進去的那一支上安靜地什麼都不做。
+
+**在非互動 shell 底下這是常態，不是邊緣情況。** Kaggle 權杖住在你的 shell rc
+檔裡，而非互動 shell 不會讀它。`get_kaggle_token()` 回 `None`，於是每一次都
+讀不到狀態。
+
+修補之後，結束碼會說出三種情況裡的哪一種：
+
+| 結束碼 | 意思 |
+|---|---|
+| `0` | 確認停好了，或確認本來就沒有在跑。 |
+| `2` | **kill 訊號送出去了，但狀態從頭到尾讀不到** —— 無法確認已終止。請在拿得到權杖的 shell 裡跑 `endpoint status`，或看 Kaggle 網頁。 |
+| `1` | 確定的失敗 —— 設定不存在（沒跑過 `endpoint init`）。 |
+
+用 `2` 而不是 `0` 或 `1`，沿用探針已有的約定（[D-018](../DECISIONS.md)）：
+1 是確定的失敗、2 是**無法判定**。`endpoint stop && echo "停好了"` 不會再騙人。
+
+狀態未知時，它刻意**不**做兩件事：
+
+- **不呼叫 Kaggle 的取消路徑。** 那條路徑開頭就是 `kaggle kernels delete -y`，
+  會連 kernel 的版本歷史一起刪掉。對一個你讀不到的狀態花掉一個不可逆的動作，
+  形狀就是錯的 —— 而且它需要同一批剛剛才失敗的憑證，本來也不可能成功。kill
+  訊號就夠了：notebook 收到就結束，而 2026-09-26 真的把 GPU 停下來的就是它。
+- **不安靜地往好的方向假設。** 讀不到的狀態，`endpoint status` 會印黃色的
+  `unknown (could not check)`，而不是把它塗成紅的、假裝確認過 `offline`。
+
+```bash
+bash scripts/apply-endpoint-stop-fixes.sh --dry-run   # 只檢查，不動任何檔案
+bash scripts/apply-endpoint-stop-fixes.sh             # 套用（兩個檔案）
+bash scripts/apply-endpoint-stop-fixes.sh --revert    # 還原
+```
+
+這個補丁橫跨**兩個**檔案（`endpoint/core.py` 與 `endpoint/commands.py`），所以
+腳本釘四個雜湊、兩個檔案備份在同一個時間章節下、一起還原。而兩個檔案狀態**不
+一致**時它會拒絕動作：一份橫跨兩檔的 diff 不可能只套上其中一半，那個狀態代表
+有一次套用被中斷、或有人手動編輯過，而猜測該補哪一半，比請你先還原更危險。
+
+**這動的是 package manager 目錄裡的檔案。** 重裝或升級 `endpoint-vps` 就會把
+修正蓋掉；升級後請重跑一次。
+
+> **這件事沒有被確立。** Kaggle 的 API 到底會不會回 `offline` 這個字，兩個方向
+> 都沒有查證過 —— 它不在 SDK 的 `KernelWorkerStatus` 列舉裡，所以這個補丁不依
+> 賴它。修正本身做過行為驗證（對原始檔與修補後各跑一次），也在非互動 shell 裡
+> 真的跑過 `endpoint stop`；但那一跑只可能走到**讀不到**那條路，因為那是非互動
+> shell 唯一有的路。要確認**活著的** kernel 真的停掉，仍然需要一次 boot，而那
+> 會花掉 GPU 額度。
+
 ## 疑難排解
 
 | 症狀 | 可能原因 |
@@ -328,6 +385,10 @@ bash scripts/apply-endpoint-ntfy-fixes.sh --revert    # 還原
 | kernel log 出現 `SHUTDOWN SIGNAL RECEIVED` 但沒人下 `stop` | 未修補的 kill 開關在重播它自己開機前約 20 秒發布的 `KILL`。套用補丁。 |
 | `boot` 成功但 tunnel 網址一直沒出現 | 未修補的限流把額度花在下載進度上。用 `scripts/apply-endpoint-ntfy-fixes.sh --verify` 確認。 |
 | `apply-endpoint-ntfy-fixes.sh` 說雜湊不符而拒絕 | `endpoint-vps` 升級了。先確認上游是否已修；否則針對新檔案重建補丁。 |
+| `endpoint stop` 說「No running kernel found.」但 runtime 還在答話 | 未修補的狀態讀取：`get_kernel_status()` 把每一條失敗都叫成 `offline`。套用 `scripts/apply-endpoint-stop-fixes.sh`。（修補後這會變成結束碼 2 與一句明講的「無法確認」。） |
+| `endpoint stop` 回傳 2 | 這是刻意設計，不是失敗。kill 訊號已送出；狀態讀不到，因為這個 shell 沒有 Kaggle 權杖。改在拿得到權杖的 shell 裡用 `endpoint status` 確認。 |
+| `apply-endpoint-stop-fixes.sh` 拒絕，說兩個檔案不一致 | 上一次套用被中斷，或有人手動改過其中一個。先用 `--revert` 還原再重跑。 |
+| `endpoint status` 印出 `unknown (could not check)` | 補丁正在作用：`endpoint status` 也需要權杖，而這個 shell 沒有。是黃色不是紅色 —— 讀不到的狀態不等於確認過的 `offline`。 |
 
 接上之後，`bash scripts/check-egress.sh` 會把你的 runtime 列在「啟用中」。
 那是正確且預期的。這支探針存在的目的，是讓那成為一個**決定**，而不是意外。

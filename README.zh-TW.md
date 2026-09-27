@@ -564,6 +564,9 @@ bash scripts/up.sh
 | `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | 檢查 endpoint 產生器裡的兩項 ntfy 修正是否需要、以及補丁還套不套得上。不做任何變更 |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh` | 對那個產生器套補丁（備份 → 雜湊關卡 → 套用 → 重驗）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
 | `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | 上面那支的行為驗證 —— 驅動產生器**實際吐出的字串**，跑在模擬的 ntfy token bucket 上。**對原始檔是預期要失敗的**，那個失敗就是缺陷的展示（D-050） |
+| `bash scripts/apply-endpoint-stop-fixes.sh --dry-run` | 檢查 `endpoint stop` 的靜默 no-op 還在不在、以及補丁還套不套得上。不做任何變更 |
+| `bash scripts/apply-endpoint-stop-fixes.sh` | 對 **CLI 本體**套補丁 —— **兩個檔案**（`core.py` ＋ `commands.py`），所以釘四個雜湊、共用一個備份章節。兩個檔案狀態不一致時會拒絕。`--revert` 一次還原兩個。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
+| `python3 scripts/test_endpoint_stop_fixes.py ROOT` | 上面那支的行為驗證 —— 用 AST 把 `get_kernel_status`／`run_stop`／`run_boot` 的清舊迴圈切出來，餵假物件驅動（不碰網路、不寫快取）。**對原始樹是預期要失敗的**（D-060） |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 
@@ -758,6 +761,13 @@ Open WebUI 對設定的端點是**延遲抓取** —— 只有在已登入的使
 ```bash
 endpoint stop
 ```
+
+**要看它的結束碼，不是只看它的輸出。** `0` 是停好了（或確認本來就沒有在跑）；
+**`2` 是 kill 訊號送出去了、但狀態從頭到尾讀不到** —— 而在非互動 shell 底下這
+是常態：Kaggle 權杖住在你的 shell rc 檔裡，非互動 shell 不會讀它。`stop` 以前
+會把這種情況叫做「No running kernel found.」並以 0 結束，而 GPU 繼續燒；現在不
+會了（[D-060](DECISIONS.md)，以及 `scripts/apply-endpoint-stop-fixes.sh`）。
+拿到 `2` 之後要確認，就在有權杖的 shell 裡跑 `endpoint status`，或看 Kaggle 網頁。
 
 `endpoint kill-all` 會終止**帳號上所有在跑的 Kaggle kernel** —— 當你有一台手動
 開的 notebook 正在默默吃額度時它很有用，而那也正是它是散彈槍而不是步槍的原因。

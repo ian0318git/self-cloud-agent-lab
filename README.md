@@ -617,6 +617,9 @@ Open <http://localhost:3000>.
 | `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | Check whether the two ntfy fixes in endpoint's notebook generator are needed, and whether they still apply. Changes nothing |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh` | Patch that generator (backup → hash gate → apply → re-verify). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
 | `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | The verifier behind the above — drives the code the generator *emits* against a simulated ntfy token bucket. **Fails against the pristine file on purpose**; that failure is the demonstration (D-050) |
+| `bash scripts/apply-endpoint-stop-fixes.sh --dry-run` | Check whether `endpoint stop` still has its silent no-op, and whether the patch still applies. Changes nothing |
+| `bash scripts/apply-endpoint-stop-fixes.sh` | Patch the CLI itself — **two files** (`core.py` + `commands.py`), so four pinned hashes and one shared backup stamp. Refuses when the two files disagree. `--revert` undoes both together. **A package-manager file: an `endpoint-vps` upgrade erases this** |
+| `python3 scripts/test_endpoint_stop_fixes.py ROOT` | The verifier behind the above — slices `get_kernel_status`/`run_stop`/`run_boot`'s clear loop out by AST and drives them against fakes (no network, no cache writes). **Fails against the pristine tree on purpose** (D-060) |
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 
@@ -819,6 +822,15 @@ Nothing there? `docker compose logs --tail=50 open-webui`.
 ```bash
 endpoint stop
 ```
+
+**Read its exit code, not just its output.** `0` means stopped (or confirmed there was
+nothing running); **`2` means the kill signal went out but the state could never be
+read**, which in a non-interactive shell is the normal case — the Kaggle token lives in
+your shell rc file and a non-interactive shell does not read it. `stop` used to call
+that case "No running kernel found." and exit 0 while the GPU kept burning; it no
+longer does ([D-060](DECISIONS.md), and `scripts/apply-endpoint-stop-fixes.sh`). To
+confirm after a `2`, run `endpoint status` in a shell that has the token, or look at the
+Kaggle web UI.
 
 `endpoint kill-all` terminates **every running Kaggle kernel on the account** — useful
 when a manually-opened notebook is quietly burning quota, and exactly why it is a

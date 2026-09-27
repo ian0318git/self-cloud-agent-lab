@@ -152,7 +152,7 @@ Useful afterwards:
 | `endpoint doctor` | System diagnostics — check the config was actually read |
 | `endpoint models` / `upload` / `settings` | List or upload models; view or change engine parameters |
 | `endpoint logs` / `watch` | Engine logs (SSE), or the status-signal stream |
-| `endpoint stop` | Stop this instance |
+| `endpoint stop` | Stop this instance. **It tells you which of the three things happened** — see [`endpoint stop` when it cannot see the kernel](#endpoint-stop-when-it-cannot-see-the-kernel) |
 | `endpoint kill-all` | **Terminate every running Kaggle kernel on the account** |
 
 > `kill-all` is account-wide, not per-instance. That is what makes it useful —
@@ -345,6 +345,73 @@ the demonstration of the bug.
 **This patches a file inside a package-manager directory.** Reinstalling or
 upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
 
+## `endpoint stop` when it cannot see the kernel
+
+On 2026-09-26 `endpoint stop` reported **"No running kernel found." and exited
+0 while the GPU session was alive and burning quota** ([D-060](../DECISIONS.md)).
+Stopping it took a direct call to `endpoint.core.send_kill_signal`.
+
+The cause was not a missing check. `get_kernel_status()` returned `"offline"`
+from *every one* of its failure paths — no credentials, a non-200, a network
+error, an unrecognised status word — and `run_stop` read `"offline"` as the fact
+*nothing is running*. So the single value the caller trusted was produced
+exclusively by "could not ask". Same shape as [D-051](../DECISIONS.md): collapse
+"could not read" into "not there", then do nothing on that branch.
+
+**In a non-interactive shell this is the normal path, not an edge case.** The
+Kaggle token lives in your shell rc file, which a non-interactive shell does not
+read. `get_kaggle_token()` returns `None`, and the state is unreadable every
+single time.
+
+After the patch, the exit code says which of three things happened:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Stopped, or confirmed there was nothing running. |
+| `2` | **The kill signal went out, but the state was never readable** — termination is unconfirmed. Check `endpoint status` in a shell that has the token, or the Kaggle web UI. |
+| `1` | A definite failure — the config is missing (`endpoint init` was never run). |
+
+`2` rather than `0` or `1` follows the convention the probes already use
+([D-018](../DECISIONS.md)): 1 is a definite failure, 2 is *cannot determine*.
+`endpoint stop && echo "stopped"` no longer lies.
+
+When the state is unknown it deliberately does **not**:
+
+- **Call the Kaggle cancel path.** That path leads with
+  `kaggle kernels delete -y`, which destroys the kernel and its version history.
+  Spending an irreversible action on a state you could not read is the wrong
+  shape — and it needs the same credentials that just failed, so it could not
+  have worked anyway. The kill signal suffices: the notebook exits on it, and
+  that is what actually stopped the GPU on 2026-09-26.
+- **Assume the best quietly.** `endpoint status` prints
+  `unknown (could not check)` in yellow for a state it could not read, instead of
+  painting it red as though `offline` had been confirmed.
+
+```bash
+bash scripts/apply-endpoint-stop-fixes.sh --dry-run   # check; change nothing
+bash scripts/apply-endpoint-stop-fixes.sh             # apply (two files)
+bash scripts/apply-endpoint-stop-fixes.sh --revert    # undo
+```
+
+The patch spans **two** files (`endpoint/core.py` and `endpoint/commands.py`),
+so the script pins four hashes, backs both up under one timestamp, and restores
+them together. It refuses to act when the two files are in *different* states:
+one diff across two files cannot half-apply, so that state means an interrupted
+run or a hand edit, and guessing which half to finish is worse than asking you
+to revert first.
+
+**This patches files inside a package-manager directory.** Reinstalling or
+upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
+
+> **What this does not establish.** Whether Kaggle's API can ever return the word
+> `offline` has not been checked either way — it is absent from the SDK's
+> `KernelWorkerStatus` enum, so the patch does not rely on it. The fix is
+> verified behaviourally against both the pristine and the patched files, and
+> end-to-end by running `endpoint stop` in a non-interactive shell — but that run
+> could only reach the *unreadable* path, because it is the only path such a
+> shell has. Confirming that a **live** kernel really stops still needs a boot,
+> which spends GPU quota.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -358,6 +425,10 @@ upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
 | Kernel log shows `SHUTDOWN SIGNAL RECEIVED` but nobody ran `stop` | The unpatched kill switch replaying the `KILL` its own boot published ~20s before it started. Apply the patch. |
 | `boot` succeeds but the tunnel URL never arrives | The unpatched rate limit spent the budget on download progress. Check with `scripts/apply-endpoint-ntfy-fixes.sh --verify`. |
 | `apply-endpoint-ntfy-fixes.sh` refuses with a hash mismatch | `endpoint-vps` was upgraded. Check whether upstream fixed it; otherwise rebuild the patch against the new file. |
+| `endpoint stop` says "No running kernel found." but the runtime still answers | The unpatched status read: `get_kernel_status()` called every failure `offline`. Apply `scripts/apply-endpoint-stop-fixes.sh`. (After the patch this becomes exit code 2 with an explicit "could not confirm".) |
+| `endpoint stop` exits 2 | Working as intended, not a failure. The kill signal was sent; the state could not be read because this shell has no Kaggle token. Confirm with `endpoint status` in a shell that has one. |
+| `apply-endpoint-stop-fixes.sh` refuses, saying the two files disagree | A previous run was interrupted, or one file was edited by hand. Run the script with `--revert` first. |
+| `endpoint status` prints `unknown (could not check)` | The patch working: `endpoint status` also needs the token, and this shell does not have it. Yellow, not red — an unreadable state is not a confirmed `offline`. |
 
 After connecting, `bash scripts/check-egress.sh` will list your runtime under
 "啟用中". That is correct and intended. The probe exists so that it is a

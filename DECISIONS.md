@@ -8506,3 +8506,217 @@ ssh host 'bash -s' < scripts/deploy-vps.sh | tee log   # ← 結束碼是 tee �
 
 若要為第四節 (1) 建測試，它會是一個**假的 `ssh`**（PATH shim，同 #82／#83／#85
 的手法）＋ 斷言結束碼原樣穿過。**那個測試現在還不存在。**
+
+---
+
+## D-060：`endpoint stop` 的靜默 no-op —— 一個狀態值的**所有**生產者都是錯誤路徑
+
+**日期**：2026-09-27
+**狀態**：已實作並套用到實際安裝（2026-09-27）
+**相關**：D-018（結束碼約定）、D-050（姊妹補丁，同一個 package manager 目錄）、
+D-051（同一種病的第二個實例）、D-055（「讀不到 ≠ 不在」的家族）
+
+**背景**：2026-09-26 要停 Kaggle 讓 GPU 不再燒額度時，`endpoint stop` 回報
+「No running kernel found.」**並以 0 結束**，而引擎還活著。最後是繞過 CLI、
+直接呼叫 `endpoint.core.send_kill_signal` 才真的停掉。
+
+### 一、根因：不是少了一個檢查，是一個狀態值的所有生產者都是錯誤路徑
+
+```
+core.py:1035   if not token: return "offline"     ← 沒憑證
+core.py:1053   （函式尾端）return "offline"        ← 非 200、網路例外、狀態字不認得
+```
+
+`"offline"` **從來就沒有**「Kaggle 說沒有在跑」這個意思 —— 那是「我問不到」。
+而呼叫端把它當事實用（`commands.py:1472`）：
+
+```python
+if status in ("offline", "complete", "error"):
+    console.dim("No running kernel found.")   # 暗字、走 stdout，不是錯誤
+    clear_cached_endpoint(); clear_cached_apikey()
+    return                                    # 不送 KILL、不取消 session，結束碼 0
+```
+
+**這是 D-051 的同一種病**：把「讀不到」摺進「不在」，然後在摺進去的那一支上
+安靜地什麼都不做。差別只在代價 —— 那邊是一台綁在 `0.0.0.0` 的服務，這邊是
+一個繼續燒週配額的 GPU。
+
+### 二、憑證可見性：這條路在非互動 shell 底下是**常態**
+
+本機的 Kaggle 權杖在 `~/.bashrc`，非互動 shell 讀不到：
+
+```
+$ endpoint stop                     # 非互動 shell
+  結束碼 0、「No running kernel found.」
+```
+
+`get_kaggle_token()`（`core.py:657-668`）讀 `KAGGLE_API_TOKEN` 或
+`~/.kaggle/kaggle.json`，兩者在這個 shell 都沒有 —— 所以 (1) 那條路**每次**
+都會走到。使用者拍板不改環境（見第三節），因此「已送出但無法確認」在非互動
+shell 下是**設計上的常態**，不是例外。
+
+### 三、使用者 2026-09-27 拍板
+
+1. **控制主題：只記錄，不改。** ntfy 控制主題可由公開的 Kaggle 使用者名稱推導。
+   換主題要 CLI 與 notebook 兩邊同步改，改不好會變成「stop 送出的 KILL 沒人
+   聽」—— **正是這次在修的同一種病**。ROI 低。（notebook metadata 是
+   `"is_private": True`，`master_build_notebook.py:1550`，所以主題**沒有被公開**，
+   只是可推導。本條不寫出推導方式。）
+2. **憑證位置：不改環境，只修 CLI。** 不另外寫 `~/.kaggle/kaggle.json`。
+3. **結束碼：`2`（無法判定）。** 照 D-018 既有的映射，這樣
+   `endpoint stop && echo 停好了` 不會騙人。
+
+### 四、設計：不知道 ≠ 不在，而且「不知道」要往**會做事**的那邊倒
+
+`send_kill_signal`（`core.py:1020-1028`）不需要任何 Kaggle 憑證 —— 它只把
+`KILL:<epoch>` POST 到控制主題。2026-09-26 真的把 GPU 停下來的就是它。所以問不到
+狀態時**照樣送**，只是**不准宣稱成功**。
+
+| 位置 | 改什麼 |
+|---|---|
+| `core.py` `get_kernel_status` | 四條**失敗**路徑改回 `"unknown"`，並加上 docstring 寫明它不是 `"offline"` |
+| `commands.py` `run_stop` | `"unknown"` **不進**提早 return；改成 warn（並講出原因）→ 照送 `send_kill_signal` → **跳過** `_cancel_kernel_session` → 誠實總結 → `sys.exit(2)`。`"offline"/"complete"/"error"` 維持原行為 |
+| `commands.py` `run_boot` 清舊 kernel 的迴圈（`:1152`） | 加 `"unknown"` 分支：warn ＋ `break`。**控制流與今天完全相同**，只是拿掉那句假的 `console.ok("Old kernel cleared.")` |
+| `commands.py` `run_boot` 的 boot 失敗訊息（`:1389`） | `Kernel {status}. Boot failed.` 會變成 `Kernel unknown. Boot failed.` —— **這是這次改動自己造成的語意退化**（原本讀得通），所以自己修 |
+| `commands.py` `run_status` | 兩個 dict 給 `"unknown"` 誠實的 label 與顏色（黃色，不是紅色） |
+
+**不用 `console.err`** —— 它 `sys.exit(1)`（`core.py:69-74`），而 1 是「確定的
+失敗」，與「已送出訊號、無法確認」不符。`main.py:693` 丟掉 handler 的回傳值，
+所以結束碼只能靠 `sys.exit`。
+
+### 五、壓測推翻了我的兩個設計 —— 兩個都是「我原本會寫錯」
+
+補丁寫出來之前先做了一輪對抗性壓測。兩條被推翻：
+
+**(1) 「在掃描清單裡加第六個字 `"offline"`」—— 那個案例不存在。**
+我原本的理由是「保住今天那個意外正確的案例」。查證：
+
+```
+$ sed -n '31,38p' .../kagglesdk/kernels/types/kernels_enums.py
+class KernelWorkerStatus(enum.Enum):
+  QUEUED = 0 / RUNNING = 1 / COMPLETE = 2 / ERROR = 3
+  CANCEL_REQUESTED = 4 / CANCEL_ACKNOWLEDGED = 5 / NEW_SCRIPT = 6
+
+$ grep -rn --include='*.py' -i 'offline' .../kagglesdk/ .../kaggle/
+（空 —— 0 筆）
+```
+
+**沒有 `OFFLINE`。** 所以那個「案例」沒有指涉物，加了是死碼；而且 `"offline"`
+正好坐在 `run_stop` 的提早 return 元組裡 —— 一個誰都驗證不了的比對會**重新打開
+正在修的那個洞**。**不加。** 少了它，不變式反而變得誠實且可測：
+**回傳值恆為 Kaggle 真的會說的字之一，或 `"unknown"`。**
+
+**(2) 「unknown 時照樣試 `_cancel_kernel_session`」—— 那是一個不可逆的動作。**
+那條路徑的第一條策略是 `kaggle kernels delete -y`（`commands.py:2436-2438`），
+會連 kernel 的版本歷史一起刪掉。而 `"unknown"` 現在包含
+`CANCEL_REQUESTED`／`CANCEL_ACKNOWLEDGED`（掃描清單裡沒有這兩個字），
+**也就是「剛按下停止之後再按一次」的狀態** —— 在那裡刪掉 kernel 顯然是錯的。
+**跳過。** KILL 訊號單獨就足夠：notebook 收到就 `os._exit(0)`，什麼都不刪。
+
+**(3) 兩個檔案的補丁讓「反向閘門」在混合狀態下給出錯誤判決。** 姊妹腳本的反向
+閘門（「原始版竟然通過了 → 停手」）是無條件執行的。兩檔案版本下，若 `core.py`
+已補、`commands.py` 未補，驗證器可能仍然通過 —— 於是腳本會對一個**還有事要做**
+的樹喊「補丁已無意義」。修法：讓混合狀態在更前面就停手（見第六節），反向閘門
+因此只會在所有檔案都是原始版時執行。
+
+**(4) `run_status` 那一項不是正確性修正。** 兩個 dict 本來就有 `.get(raw, raw)`，
+所以 `"unknown"` 早就會以字面 `unknown` 顯示，標籤沒有錯；錯的只有顏色
+（`.get(raw, "red")` 把不確定的狀態塗成確定的失敗）。留著，但**不讓反向閘門
+依賴它**，也**不稱它為正確性修正**。
+
+### 六、交付物與閘門（兩個檔案，所以是四個雜湊）
+
+| 檔案 | 內容 |
+|---|---|
+| `scripts/endpoint-stop-fixes.patch` | 純 unified diff，2 檔 8 個 hunk，`-p1 --fuzz=0` |
+| `scripts/apply-endpoint-stop-fixes.sh` | `(無)｜--dry-run｜--verify｜--revert｜--target D｜-h/--help` |
+| `scripts/test_endpoint_stop_fixes.py` | 手寫 harness，`main(argv)->int`，exit 2/1/0 |
+
+**`--target` 收的是目錄**（site-packages 根），與姊妹作的「收檔案」不同 ——
+補丁橫跨兩檔，收一個根比收兩個路徑更不容易接錯。
+
+**混合狀態直接停手**，不試著補完：一份橫跨兩檔的 diff 不可能只套上其中一半，
+那個狀態只會來自中斷的套用或手動編輯，而猜測該補哪一半比請人還原更危險。
+備份用同一個時間章節、一起還原（只還原一半會留下一個拼接過的樹）。
+
+### 七、驗證（實跑數字）
+
+**行為驗證器 22 條檢查，雙向：**
+
+```
+$ python3 scripts/test_endpoint_stop_fixes.py <pristine>   → 9 項未過，結束碼 1
+$ python3 scripts/test_endpoint_stop_fixes.py <patched>    → 全部通過，結束碼 0
+```
+
+驗證器**不 import 套件**：用 AST 把函式切出來 exec 在假物件上。這不是潔癖 ——
+一個真的 `send_kill_signal` 在命名空間裡就會**對活的控制主題發射**，而套用腳本
+一個循環會跑驗證器三次。同理 `run_boot()` 有 ~400 行不能整個 exec，只切出它的
+`for i in range(12):` 迴圈（全檔唯一）。
+
+**驗證器自己有過一個 bug，是雙向跑才抓到的。** 第一版把假 `requests.post` 寫成
+只收 `**kwargs`，但真的呼叫是把 URL **位置傳入**的 —— 於是 TypeError 被函式自己
+的 `except Exception` 吞成「讀不到」，**七條狀態檢查全部「通過」，卻一條也沒測到**。
+（三個「Kaggle 說 X」的案例在原始版與修補版上得到同一個錯答案，才露出來。）
+修好之後加了護欄：**假 API 若沒被呼叫就判死**。
+
+**端到端（本機、非互動 shell，2026-09-27）：**
+
+```
+$ endpoint stop
+  ⚠ Could not read the kernel state -- sending the stop signal anyway.
+  ⚠   Usually this shell has no Kaggle token; the kill signal needs none.
+  ◆ Sending shutdown signal...
+  Skipped the Kaggle cancel -- it cannot authenticate either.
+  ⚠ Could not confirm it stopped -- the kernel state was never readable.
+  ⚠   Exiting 2 (cannot determine).
+  ⚠   To confirm, run `endpoint status` with the Kaggle token.
+結束碼 2
+```
+
+**訊息寬度是這一輪唯一一次回頭改設計。** 第一版跑出來的續行掉到第 0 欄
+（`anyway.` 變成孤立一行）—— rich 在非 TTY 下固定 80 欄換行且續行不縮排。因為
+非互動 shell 正是這條路徑的**常態**，每次都會看到，所以把每一句壓進 80 欄
+（實測最寬 73 欄）並重跑整條鏈。**這一步往外送了第二次 KILL** —— 計畫裡寫的是
+「唯一一次會往外送的驗證動作」；多送一次的理由是格式是在看到第一次輸出之後才
+改的，不驗證等於沒憑據。Kaggle 已停、沒有 listener，且 `run_boot` 每次開機本來
+就會發一則。
+
+**其他兩支：**
+
+```
+$ bash scripts/test_usage_text.sh            → 103/103 全過（原本 97；新腳本自動進掃描，+6）
+$ bash scripts/apply-endpoint-ntfy-fixes.sh --verify  → 全部通過（姊妹補丁沒被弄壞）
+```
+
+`apply-endpoint-stop-fixes.sh` 的負面路徑也在 `/tmp` 的假安裝樹上實跑過：
+`--dry-run` 不動檔、`--revert` 兩個一起還原、混合狀態停手、未知雜湊停手、
+備份殘缺時拒絕只還原一半、多個章節時跳過殘缺的新的、挑完整的舊的。
+
+### 八、發現但不修（記下來，不在這次動）
+
+- **`run_kill_all` 的分類器（`:2600-2621`）是同一個病的第三個實例**，而且後果
+  更大：`except Exception: inactive.append(ref)` 把「API 打不到」當成「沒在跑」，
+  於是 `kill-all` 會**跳過**一台正在燒配額的 kernel。不修的三個理由：它是另一個
+  指令；它是**分類器的第二份實作**（不是 `get_kernel_status` 的呼叫者），這個
+  補丁到不了它；而且它的誤判方向是「不做」，不是「做錯」。
+- **`run_status` 的 tunnel 那一行**由 `resolve_vps_url()` 獨立決定，所以「kernel
+  那行說 unknown、tunnel 那行照樣綠」是可能的。相鄰問題。
+- **`_cancel_kernel_session` 的 docstring 宣稱有第三條 ntfy 策略，實際上沒有**
+  （策略 2／3 都是 REST）。真正的 ntfy 路徑是 `send_kill_signal`，`run_stop`
+  兩者都呼叫。
+- **`raw = resp.json().get("status", "")` 之後直接 `.lower()`**：若上游哪天改成
+  回數字列舉，這裡會 `AttributeError`，被 `except Exception` 吞掉。修補後這條
+  路徑的落點是 `"unknown"`（往會做事的那邊倒），所以**順帶變成 fail-safe**，
+  不需要另外改。
+
+### 九、無測試聲明
+
+- **Kaggle 的 API 到底會不會回 `offline`，兩個方向都沒有查證過。** 上面只查證了
+  SDK 的列舉裡沒有它。修補後不依賴這個字。
+- **憑證從非互動 shell 讀不到這件事維持不變**（使用者拍板不改環境），所以
+  「已送出但無法確認」在非互動 shell 下是**常態**，不是例外 —— 端到端那一跑
+  也就**只可能走到讀不到那條路**。
+- **確認「活著的 kernel 真的停掉」沒有做過。** 那需要一次真的 boot ＋ stop，
+  也就是一次真的 GPU 執行。`running` 分支（送 KILL ＋ 取消 ＋ "Instance
+  terminated."）只在驗證器的假物件上跑過，沒有在真的 Kaggle 上跑過。
+- **`run_kill_all` 的同型缺陷未修**（見第八節）。
