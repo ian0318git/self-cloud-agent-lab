@@ -95,7 +95,21 @@ case "$(tunnel_state_verdict "$TUNNEL_PROFILE" "$TUNNEL_RUNNING")" in
 
   off)
     echo "未啟用（僅在本機／Codespaces 埠轉送內可用）"
-    echo "   啟用方式見 .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落" ;;
+    # 這裡原本只有一句「見 .env.example 的 token 段落」—— 一個**指標**，
+    # 而不是那幾行。同一個缺口在 deploy-vps.sh 的完成訊息裡也有（#84／D-064）；
+    # 補指示時兩處要一起補，否則其中一處會繼續指著別的地方。
+    #
+    # 第 1 步刻意排在 .env 之前：Access 政策要在 tunnel 起來**之前**就存在。
+    # 第一個帳號的註冊窗口是開著的，而 tunnel 一通，那條路就是對整個
+    # Internet 開的 —— 這支腳本看不到 Cloudflare 那邊，沒辦法替你確認。
+    echo "   啟用方式："
+    echo "     1. 確認 Cloudflare Access 政策已存在（tunnel 一通，這條路就是對"
+    echo "        整個 Internet 開的；up.sh 只看得到 token，看不到 Access）"
+    echo "     2. .env：填 CLOUDFLARE_TUNNEL_TOKEN，並取消 COMPOSE_PROFILES=tunnel"
+    echo "        那一行的註解"
+    echo "     3. bash scripts/up.sh"
+    echo "   完整步驟（含在 Zero Trust 建 tunnel 與 Public hostname）見"
+    echo "   .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落" ;;
 esac
 
 echo

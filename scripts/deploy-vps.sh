@@ -1232,8 +1232,21 @@ fi
 
 cat <<EOF
   • 本機／SSH 通道：http://localhost:3000
-  • 對外：一律走 Cloudflare Tunnel + Access（見 .env.example 的
-    CLOUDFLARE_TUNNEL_TOKEN 段落）。**不要**為了方便把埠開出去。
+  • 對外：一律走 Cloudflare Tunnel + Access。**不要**為了方便把埠開出去。
+
+    要接上去（**這一步刻意沒有自動做**）：
+      1. Zero Trust → Networks → Tunnels 建 tunnel，
+         新增 Public hostname，Service 指向 http://open-webui:8080
+         （容器內的 8080，不是對外的 3000）
+      2. Access → Applications 建政策（例如只允許你自己的 email）
+      3. .env：填 CLOUDFLARE_TUNNEL_TOKEN，
+         並取消 \`# COMPOSE_PROFILES=tunnel\` 的註解
+      4. bash scripts/up.sh
+
+    **為什麼是分開的兩段**：Access 政策必須在 tunnel 起來**之前**就存在 ——
+    第一個帳號的註冊窗口是開著的，而 tunnel 一通，那條路就是對整個 Internet
+    開的。up.sh 會擋住「profile 開著但 token 是空的」，但它看不到 Access。
+    完整步驟見 .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落。
 
 首次使用：
   1. 建立第一個帳號 —— 它會自動成為管理員，所以務必確認那是你自己

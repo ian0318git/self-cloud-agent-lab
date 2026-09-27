@@ -9323,3 +9323,103 @@ mode 000 的 unix socket 連擁有者都連不上，於是 docker 自己吐出�
   下」，不證明「所有的改壞都會被擋下」。
 - **README 那兩段沒有測試守著。** `test_usage_text.sh` 守的是**檔頭 vs `--help`**，
   不是 README 的散文。
+
+---
+
+## D-064：#84 —— tunnel 的下一步指示：兩處只給指標，補成那幾行
+
+`#84` 的歷史要照實記，因為**它一半是我自己造成的**。我最初把它描述成
+「`CLOUDFLARE_TUNNEL_TOKEN` 從不被驗證」—— **那是錯的**，D-055 §四 已經更正：
+`up.sh` 有驗證（profile 含 tunnel 而 token 為空就 `fail` ＋ `exit 1`），
+`deploy-vps.sh` 的完成訊息也**已經**有交代，而 `.env.example` 出貨時本就是註解掉
+的 `# COMPOSE_PROFILES=tunnel`。**兩側都有守衛，是設計上的兩段分工，不是洞。**
+
+剩下的真實範圍只有一個：完成訊息**指向** `.env.example` 的 token 段落，卻沒有
+直接寫出那幾行。這是文件便利性，不該與 #82／#83 並列。
+
+### 一、拍板（2026-09-27）：維持兩段分工，只補指示
+
+另一個選項是加 `--with-tunnel`（一個旗標取消註解並把 tunnel 一起起起來）。
+**不採用的理由不是「麻煩」，是它的守衛結構上看不見那條路：**
+
+1. **`check-exposure.sh` 讀的是「埠」，而 tunnel 不發布任何埠** —— 那正是它之所以
+   是 tunnel。README 的 “What this check cannot answer” 那一段已經把這件事寫下來
+   了：「no open ports」不等於「unreachable」。所以 `--with-tunnel` 會是
+   **自動化一個對外暴露面的變更，而守它的儀器是盲的** —— strict 閘門會照樣通過。
+2. **Access 政策必須在 tunnel 起來**之前**就存在。** 第一個帳號的註冊窗口是開著
+   的（完成訊息自己就叫使用者去建第一個帳號），而 tunnel 一通，那條路就是對整個
+   Internet 開的。`up.sh` 只看得到 token 有沒有填，**看不到 Cloudflare 那邊有沒有
+   政策**。自動化這一步，等於把一個「先後順序決定安全」的動作變成一行程式。
+
+這與 #86 是同一個判斷：**能給處方的地方給處方，不替使用者決定需要 root 或需要
+他在別的地方先做對的事**（D-063）。
+
+### 二、補了哪兩處
+
+任務描述只寫了完成訊息。動手前掃了一次「還有誰在交代這個下一步」：
+
+```
+scripts/status.sh:98    echo "   啟用方式見 .env.example 的 CLOUDFLARE_TUNNEL_TOKEN 段落" ;;
+scripts/deploy-vps.sh   完整步驟見 …（舊版）
+```
+
+**`status.sh` 的 `off)` 那一支是同一個缺口。** 同一個任務不該只修一半 ——
+補指示時兩處要一起補，否則其中一處會繼續指著別的地方，而**「兩處講法不同」比
+原本的缺口更難察覺**。
+
+兩處的分工：`deploy-vps.sh` 是**部署後**的完整四步（含在 Zero Trust 建 tunnel
+與 Public hostname，因為剛佈署完的人可能一個都沒有）；`status.sh` 是**查狀態時**
+的精簡三步（第 1 步是「確認 Access 政策已存在」—— 會從 status 這邊去開 tunnel
+的人，正是最可能跳過 Access 的那個人）。兩處都保留指向 `.env.example` 的指標，
+完整步驟仍然只有一份。
+
+### 三、新訊息斷言了什麼，以及我怎麼驗的
+
+新文字裡有一句是**關於程式行為的斷言**：「`up.sh` 會擋住『profile 開著但 token
+是空的』，但它看不到 Access。」**假句子是這個 repo 最貴的錯**，所以它不能只是
+讀程式碼讀出來的：
+
+- **「看不到 Access」是結構性的** —— `up.sh` 對 Cloudflare 沒有任何 API 呼叫，
+  它只檢查 token 這個字串空不空。
+- **「會擋住」是實測的。** 受控環境：repo 的副本 ＋ 一個**會記錄每一次呼叫**的假
+  `docker` ＋ `.env` 裡 `COMPOSE_PROFILES=tunnel` 而 token 是空的：
+
+  ```
+  結束碼 1
+  ✗ COMPOSE_PROFILES 含 tunnel，但 CLOUDFLARE_TUNNEL_TOKEN 是空的。
+  ── 假 docker 被呼叫的每一件事 ──
+  info
+  compose version
+  ```
+
+  **`compose up` 從來沒有被呼叫** —— 它擋在啟動**之前**，不是起來之後才抱怨。
+- **對照組（證明它是有鑑別力的，不是無條件亂擋）：** 同一個 profile、token 非空
+  → 守衛訊息出現 **0** 次、`compose up -d --wait --remove-orphans` **被呼叫**、
+  結束碼 0。
+
+### 四、刻意不做
+
+- **不加 `--with-tunnel`**（理由見第一節）。
+- **不讓 `check-exposure.sh` 多印 tunnel 那一段。** 我原本把它列成一個選項，
+  查證後發現 **README 已經把那個盲點寫下來了**（「That is not the check being
+  wrong; it is the check answering a different question」），而「tunnel 現在開著
+  嗎」是 `status.sh` 四態判定的工作。再加一段是**重複**，不是補洞。
+- **不改 `.env.example`。** 它的五步本來就是完整的，而完成訊息現在指向它。
+- **不改 README。** 它的 “Cloudflare Tunnel + Access” 一節已有完整步驟與驗證指令。
+- **不改 `up.sh` 的守衛本身。** 它是對的，缺的是測試（見下）。
+
+### 無測試聲明
+
+- **兩處新訊息都是散文，沒有測試守著。** `test_usage_text.sh` 守的是「檔頭 vs
+  `--help`」，不是這些訊息；`deploy-vps.sh` 的完成訊息只有真的跑完一次佈署才會
+  印出來。
+- **`up.sh` 的 token 守衛沒有永久測試。** 第三節那兩次是**手動的受控實驗**，
+  不是套件的一部分 —— 我沒有替它建測試檔（那超出 #84 的範圍）。**但新訊息現在
+  依賴它**：那個守衛哪天改壞，訊息就會變成假句子，而**不會有東西叫**。要補的話
+  測試的位置在它旁邊（`up.sh` 自己的控制流），不是 `lib.sh`。
+- **受控實驗用的是假 `docker`。** 證明的是 `up.sh` 的**控制流**（擋在 `compose up`
+  之前），不是真的 compose 行為。實驗中也沒有動到任何容器。
+- **「Access 政策必須先存在」是 Cloudflare 那邊的性質**，我在這裡無法驗證 ——
+  它是敘述，不是斷言。
+- **`status.sh` 的新訊息只有一次實跑**（本機，tunnel 真的關著），`deploy-vps.sh`
+  的完成訊息**一次都沒有實跑過** —— 那需要一次完整的真佈署。
