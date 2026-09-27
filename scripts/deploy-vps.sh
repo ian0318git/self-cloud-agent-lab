@@ -398,7 +398,8 @@ DISK_BASE_GB="$DISK_NEED_GB"
 
 AVAIL_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)"
 RAM_NEED_MB="$(ram_warn_mb "$MODEL_GB" "$NUM_CTX")"
-case "$(ram_verdict "${AVAIL_MB:-}" "${RAM_NEED_MB:-}")" in
+RAM_VERDICT="$(memory_verdict "${AVAIL_MB:-}" "${RAM_NEED_MB:-}")"
+case "$RAM_VERDICT" in
   ok)
     ok "記憶體：${AVAIL_MB} MB 可用（估算需要約 ${RAM_NEED_MB} MB）" ;;
   tight)
@@ -407,8 +408,16 @@ case "$(ram_verdict "${AVAIL_MB:-}" "${RAM_NEED_MB:-}")" in
     warn "  註：這個估算裡的 KV cache 一項是 D-022 的**推測值**"
     warn "  （~${KV_KIB_PER_TOKEN_ESTIMATE} KiB/token，與模型的 KV head 數綁定），不是實測。"
     warn "  真的要省，把 --num-ctx 調小。" ;;
-  unknown)
-    warn "記憶體：讀不到 /proc/meminfo 或估不出需求，跳過檢查（不擋）。" ;;
+  unknown_avail)
+    warn "記憶體：讀不到 /proc/meminfo，跳過檢查 —— 這不是「足夠」，是「不知道」。" ;;
+  unknown_need)
+    warn "記憶體：模型大小不知道，所以估不出需求 —— 跳過檢查（不擋）。"
+    echo "      要用 --model-gb N 明講，這一項才會有數字。" ;;
+  *)
+    # 認不得的 arm 要**大聲**，不能靜默跳過 —— 靜默跳過正是 #93 的缺陷：
+    # 一個沒有被列出的值落到 else，於是閘門對著它算不出來的東西印了綠色 OK。
+    fail "記憶體：判準回了認不得的值「$RAM_VERDICT」—— 這是這支腳本自己壞掉，不是環境。"
+    BLOCKERS=$((BLOCKERS + 1)) ;;
 esac
 
 VCPU="$(nproc 2>/dev/null || true)"
@@ -567,15 +576,29 @@ case "$GPU_VERDICT" in
     ok "     NVIDIA container runtime 已註冊 —— 會自動掛上 docker-compose.gpu.yml"
     if [[ "$GPU_VRAM_MB" =~ ^[0-9]+$ ]]; then
       GPU_NEED_MB="$(ram_warn_mb "$MODEL_GB" "$NUM_CTX")"
-      if [[ "$GPU_NEED_MB" =~ ^[0-9]+$ ]] && (( GPU_VRAM_MB < GPU_NEED_MB )); then
-        warn "VRAM 偏緊：這張卡有 ${GPU_VRAM_MB} MB，估算需要約 ${GPU_NEED_MB} MB。"
-        warn "  裝不下時 ollama 會**部分卸載**（把放不下的層丟到系統記憶體），"
-        warn "  速度差 10–50×（README 的「When is this a fit?」）—— 那是慢，不是錯，"
-        warn "  所以不擋。要省請縮小模型或 --num-ctx。"
-        warn "  （KV cache 那一項是 D-022 的推測值，與模型的 KV head 數綁定。）"
-      else
-        ok "     VRAM：${GPU_VRAM_MB} MB（估算需要約 ${GPU_NEED_MB} MB）"
-      fi
+      VRAM_VERDICT="$(memory_verdict "$GPU_VRAM_MB" "$GPU_NEED_MB")"
+      case "$VRAM_VERDICT" in
+        ok)
+          ok "     VRAM：${GPU_VRAM_MB} MB（估算需要約 ${GPU_NEED_MB} MB）" ;;
+        tight)
+          warn "VRAM 偏緊：這張卡有 ${GPU_VRAM_MB} MB，估算需要約 ${GPU_NEED_MB} MB。"
+          warn "  裝不下時 ollama 會**部分卸載**（把放不下的層丟到系統記憶體），"
+          warn "  速度差 10–50×（README 的「When is this a fit?」）—— 那是慢，不是錯，"
+          warn "  所以不擋。要省請縮小模型或 --num-ctx。"
+          warn "  （KV cache 那一項是 D-022 的推測值，與模型的 KV head 數綁定。）" ;;
+        unknown_need)
+          # 這裡就是 #93：舊版是一個 `if … else`，需求量是空字串時條件不成立，
+          # 於是落到 else 印出「VRAM：24576 MB（估算需要約  MB）」—— 綠色 OK
+          # 配一個空白的需求數字。**else 不是「沒問題」，是「不是偏緊那個」**。
+          warn "     VRAM：模型大小不知道，所以估不出需求 —— 跳過檢查（不擋）。"
+          echo "       要用 --model-gb N 明講，這一項才會有數字。" ;;
+        *)
+          # `unknown_avail` 在外層守衛（`GPU_VRAM_MB` 已經證明是數字）之下
+          # **到不了**，所以會落到這裡的只可能是判定與守衛不一致 ——
+          # 那要停下來，不要猜。
+          fail "     VRAM：判準回了認不得的值「$VRAM_VERDICT」—— 外層守衛與它不一致。"
+          BLOCKERS=$((BLOCKERS + 1)) ;;
+      esac
     fi ;;
   cpu)
     if [[ "$GPU_MODE" == "off" ]]; then

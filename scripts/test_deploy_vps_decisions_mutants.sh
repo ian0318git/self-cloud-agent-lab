@@ -22,6 +22,8 @@
 #   · 綁定預設值回錯 → 整個堆疊在公網上，而所有輸出都正常（最貴的一條）
 #   · 閘門的 2 被讀成安全 → 把「我沒查到」講成「我查過了」
 #   · 資源門檻的邊界（含端點、unknown 不當 0）→ 假失敗／假通過
+#   · 記憶體狀態的兩個 unknown 併回去 → 「缺輸入」被講成「讀不到」，
+#     於是處方給錯：人去查環境，而該做的是補 --model-gb（#93）
 #   · context 門檻的 +1 → D-027 的結論本身，差一個 token 就是砍掉 1 個 token
 #   · .env 的每一條邊界 → 改的是使用者唯一的設定檔，且失敗後會被重跑
 #   · 架構三層 → 前六組全是「同一台已知機器上設定對不對」，這一組是第一個
@@ -46,6 +48,7 @@ PROBE="$SCRIPT_DIR/deploy_smoke_probe.py"
 PROBE_TEST="$SCRIPT_DIR/test_deploy_smoke_probe.py"
 LIFECYCLE="$SCRIPT_DIR/profile-lifecycle.sh"
 LIFECYCLE_TEST="$SCRIPT_DIR/test_profile_lifecycle.sh"
+DEPLOY="$SCRIPT_DIR/deploy-vps.sh"
 LIB="$SCRIPT_DIR/lib.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -62,9 +65,15 @@ export PYTHONDONTWRITEBYTECODE=1
 # 測試自己會去 source（bash）或 import（python）同目錄的受測檔案，所以
 # 每一份都要在 $WORK。lib.sh 不突變 —— 只放在那裡讓決定模組的測試找得到
 # （它的 PROJECT_ROOT 在那個測試裡用不到，沒有任何函式會讀它）。
+#
+# **`deploy-vps.sh` 也在這份清單裡，但它不是突變目標**：決定模組的測試有一
+# 條會去讀它的 `case` 接線（#93）。少了這一份，那兩條在 $WORK 裡會因為
+# 「找不到檔案」而失敗，而症狀是**對照組就掛掉** —— 看起來像測試本身壞了，
+# 不是像少複製一個檔案。
 cp "$LIB" "$WORK/lib.sh"
 cp "$MODULE" "$WORK/deploy-vps-decisions.sh"
 cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
+cp "$DEPLOY" "$WORK/deploy-vps.sh"
 cp "$PROBE" "$WORK/deploy_smoke_probe.py"
 cp "$PROBE_TEST" "$WORK/test_deploy_smoke_probe.py"
 cp "$LIFECYCLE" "$WORK/profile-lifecycle.sh"
@@ -184,6 +193,17 @@ MUTANTS=(
 
   # ── ram_verdict：只警告，但也不可以謊報 ──
   "記憶體：非數字當成 0（會變成假的 tight）|  if [[ ! \"\$avail_mb\" =~ ^[0-9]+\$ ]]; then printf 'unknown'; return 0; fi|  if false; then printf 'unknown'; return 0; fi"
+
+  # ── memory_verdict：兩個 unknown 不可以併回去，空需求更不可以變成 OK ──
+  # 第一條就是 #93 本身 —— 需求量是空字串時回 ok，也就是那個「綠色 OK 配
+  # 空白需求數字」。它必須被 unknown_need 那幾條抓到，否則那一組是空的：
+  # 一個測不到缺陷的迴歸測試，與沒有這個測試是一樣的。
+  #
+  # 第二條守的是**處方**：兩個 unknown 一旦併回去，「缺輸入」就會被講成
+  # 「讀不到 /proc/meminfo」，於是人去查環境，而該做的是補 --model-gb。
+  "記憶體狀態：估不出需求被講成 ok（#93 本體）|  printf 'unknown_need'|  printf 'ok'"
+  "記憶體狀態：兩個 unknown 併回一個（缺輸入被講成讀不到）|  if [[ ! \"\$avail_mb\" =~ ^[0-9]+\$ ]]; then printf 'unknown_avail'; return 0; fi|  if false; then printf 'unknown_avail'; return 0; fi"
+  "記憶體狀態：一律回 ok（連 tight 都不見了）|  if [[ \"\$verdict\" != \"unknown\" ]]; then printf '%s' \"\$verdict\"; return 0; fi|  if true; then printf 'ok'; return 0; fi"
 
   # ── 估算與需求 ──
   "模型大小：4b 查到錯的數字|    qwen3:4b)             printf '2.5'; return 0 ;;|    qwen3:4b)             printf '0.0'; return 0 ;;"
@@ -534,6 +554,7 @@ for entry in "${MUTANTS[@]}"; do
   # 先還原兩份目標檔，再依 label 的前綴決定要動哪一份、跑哪一份測試。
   cp "$MODULE" "$WORK/deploy-vps-decisions.sh"
   cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
+  cp "$DEPLOY" "$WORK/deploy-vps.sh"
   cp "$PROBE" "$WORK/deploy_smoke_probe.py"
   cp "$PROBE_TEST" "$WORK/test_deploy_smoke_probe.py"
   cp "$LIFECYCLE" "$WORK/profile-lifecycle.sh"
@@ -600,4 +621,4 @@ if [[ "${#missed[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、context 的 +1、GPU 的每一個靜默降級、架構三層（含「模擬執行整個靜默」與「讀不到就誤擋」兩個方向）、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"
+ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、記憶體狀態的兩個 unknown、context 的 +1、GPU 的每一個靜默降級、架構三層（含「模擬執行整個靜默」與「讀不到就誤擋」兩個方向）、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"

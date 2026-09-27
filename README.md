@@ -464,7 +464,9 @@ Things that are easy to miss when moving to a GPU instance:
 2. **VRAM is a hard wall.** If weights plus KV cache exceed it, ollama offloads
    layers to system RAM and throughput collapses — often 10–50× worse, not 20%
    worse. Size for the model **and the context**, not just the model. The deploy
-   script warns (does not block) when the estimate exceeds the detected VRAM.
+   script warns (does not block) when the estimate exceeds the detected VRAM —
+   and also warns when it **cannot estimate at all** (a model off its table, or
+   no `--model-gb`), rather than printing a green OK beside a blank number.
 3. **Disk speed shows up in the first answer.** Cold load was 71.8 s here for a
    2.5 GB model; the 70B tier is a 43 GB read.
 4. **Never publish 11434.** Ollama has no authentication at all — the "Securing

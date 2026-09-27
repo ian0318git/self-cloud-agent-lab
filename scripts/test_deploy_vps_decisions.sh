@@ -249,6 +249,28 @@ check "記憶體：讀不到 → unknown" "unknown" "$(ram_verdict '' 4900)"
 check "記憶體：非數字不會被當成 0（0 會變成 tight 這個假失敗）" "unknown" "$(ram_verdict 'lots' 4900)"
 
 # ═══════════════════════════════════════════════════════════
+# memory_verdict —— ram_verdict 的兩個 unknown 要分開（#93）
+# ═══════════════════════════════════════════════════════════
+# 這一組守的是**一個 arm 的名字**，不是一個數字。
+#
+# 缺陷本體：需求量是空字串時，deploy-vps.sh 的 VRAM 那一行用 `if … else` 接，
+# 條件不成立就落到 else —— 於是閘門對著它**算不出來**的需求印出綠色 OK，
+# 括號裡還是空的（實測：「VRAM：24576 MB（估算需要約  MB）」）。
+# 所以下面第三條最承重：空需求**永遠不可以**對到 ok。
+#
+# 兩個 unknown 分開的理由不只是訊息好看：它們的**處置不同** ——
+# 「讀不到 /proc/meminfo」要去看環境，「估不出需求」是去補 --model-gb。
+# 併成一句，讀的人就無從下手。
+check "記憶體狀態：充足 → ok" "ok" "$(memory_verdict 16000 4900)"
+check "記憶體狀態：剛好 → ok（邊界與 ram_verdict 一致）" "ok" "$(memory_verdict 4900 4900)"
+check "記憶體狀態：不足 → tight" "tight" "$(memory_verdict 3800 4900)"
+check "記憶體狀態：**估不出需求 → unknown_need**（#93 的缺陷本體）" "unknown_need" "$(memory_verdict 16000 '')"
+check "記憶體狀態：讀不到可用量 → unknown_avail，不是 unknown_need" "unknown_avail" "$(memory_verdict '' 4900)"
+check "記憶體狀態：非數字可用量不會被當成 0（0 會變成假的 tight）" "unknown_avail" "$(memory_verdict 'lots' 4900)"
+check "記憶體狀態：兩個都不知道 → unknown_avail（讀不到比缺輸入更根本）" "unknown_avail" "$(memory_verdict '' '')"
+check "記憶體狀態：VRAM 的形狀（表外模型 ＋ 讀得到的卡）→ unknown_need" "unknown_need" "$(memory_verdict 24576 '')"
+
+# ═══════════════════════════════════════════════════════════
 # model_gb_estimate / disk_need_gb / ram_warn_mb
 # ═══════════════════════════════════════════════════════════
 check "模型大小：qwen3:4b 查得到" "2.5" "$(model_gb_estimate qwen3:4b)"
@@ -787,9 +809,52 @@ check "執行：主機讀不到 → unknown" "unknown" "$(arch_match_verdict '' 
 check "執行：兩邊都讀不到 → unknown" "unknown" "$(arch_match_verdict '' '')"
 check "執行：armv7l 主機 → unknown" "unknown" "$(arch_match_verdict armv7l arm64)"
 
+# ═══════════════════════════════════════════════════════════
+# 接線：deploy-vps.sh 的兩個 case 要列出記憶體判準的每一個 arm（#93）
+# ═══════════════════════════════════════════════════════════
+# 上面那一組測**判定**，這一組測**接線**。缺陷不是判定錯 —— `ram_verdict`
+# 一向回得出 unknown —— 而是消費端用 `if/else` 接，於是「不是偏緊那個」
+# 被讀成「沒問題」。**判定有測試、接線沒有，就會這樣。**
+#
+# 這一條是**集合相等**：抽出來的 arm 清單必須恰好等於 memory_verdict 的
+# 值域加上 catch-all。所以「新增一個 arm 卻忘了接線」與「漏了 catch-all」
+# 都會叫。這是這份測試裡唯一會讀 deploy-vps.sh 的一條 —— 它守的東西
+# 是別的地方守不到的：突變台只動得了模組，動不了消費端。
+DEPLOY="$SCRIPT_DIR/deploy-vps.sh"
+# 先確認它找得到。「找不到」不可以退化成「抽出來是空集合，所以不等於期望」
+# —— 那個症狀看起來像接線錯了，而實際上是這份測試沒有被餵到檔案。
+check "接線：找得到 deploy-vps.sh（找不到就測不了，而測不了不可以當成過）" \
+  "yes" "$([[ -f "$DEPLOY" ]] && echo yes || echo no)"
+arms_of() {   # <case 的比對運算式，例如 $RAM_VERDICT>
+  # **要數巢狀深度**，不能只靠縮排比對：VRAM 那個 case 長在 GPU_VERDICT 的
+  # 一個 arm 裡面，所以掃外層時會把內層的 arm 一起收進來。一個會給出**安靜
+  # 錯誤答案**的測試輔助函式，比沒有這個測試更糟 —— 它會讓「集合相等」變成
+  # 假的（實測：掃 GPU_VERDICT 時漏出 `ok tight unknown_need`）。
+  awk -v pat="case \"$1\" in" '
+    index($0, pat) { inside = 1; depth = 0; next }
+    inside {
+      if ($0 ~ /^ *case .* in[[:space:]]*$/) { depth++; next }
+      if ($0 ~ /^ *esac/) {
+        if (depth > 0) { depth--; next }
+        exit
+      }
+      if (depth == 0 && $0 ~ /^ *[A-Za-z_*][A-Za-z_0-9]*\)[[:space:]]*$/) {
+        line = $0; sub(/\).*/, "", line); gsub(/^ +/, "", line); print line
+      }
+    }
+  ' "$DEPLOY" | LC_ALL=C sort | tr '\n' ' '
+}
+check "接線：記憶體那一行列出了每一個 arm（含 catch-all）" \
+  "* ok tight unknown_avail unknown_need " "$(arms_of '$RAM_VERDICT')"
+# VRAM 那一行的期望值**少了 unknown_avail**，刻意與上一條不同：
+# 外層守衛已經證明 `GPU_VRAM_MB` 是數字，所以那個 arm 到不了；真的出現就
+# 落到 catch-all，大聲停下來。這不是在打錯字。
+check "接線：VRAM 那一行列出了每一個 arm（不含到不了的 unknown_avail）" \
+  "* ok tight unknown_need " "$(arms_of '$VRAM_VERDICT')"
+
 echo
 if [[ "$FAILED" -gt 0 ]]; then
   fail "$FAILED 個案例沒過，$PASS 個過"
   exit 1
 fi
-ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻、GPU 三態、架構三層（宣告／裝置／執行），以及 .env 的每一條邊界都有測試守著"
+ok "$PASS/$PASS 全過 —— 綁定預設、閘門四態、資源門檻、記憶體四態與它的消費端接線、GPU 三態、架構三層（宣告／裝置／執行），以及 .env 的每一條邊界都有測試守著"

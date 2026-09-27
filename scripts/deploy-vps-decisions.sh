@@ -412,6 +412,32 @@ ram_verdict() {
   printf 'ok'
 }
 
+# 記憶體那一行要印什麼。**回 arm 的名字，不回數字。**
+#
+# 存在理由是把 `ram_verdict` 的 `unknown` **拆成兩個**，因為那兩個原因的處置
+# 完全不同：「讀不到 /proc/meminfo」是環境問題，「估不出需求」是缺輸入
+# （補 `--model-gb` 就有）。原本兩者共用一句「讀不到 /proc/meminfo 或估不出
+# 需求」，讀的人無從下手 —— 一句話裡有兩個不同的處方，等於沒有處方。
+#
+# **為什麼是一個函式，而不是在兩個呼叫點各判一次**：主機記憶體
+# （`RAM_VERDICT`）與 VRAM（`VRAM_VERDICT`）問的是**同一個問題**，
+# 而兩邊原本各寫各的判斷 —— 於是 VRAM 那一邊的 `else` 把「估不出需求」的
+# 空字串收成了綠色 OK，印出「VRAM：24576 MB（估算需要約  MB）」。
+# （這裡刻意**不寫行號**：行號會走 —— D-061 就抓到一個壞掉的引註。
+# 認這兩個變數名，它們是那個 case 的錨點。）
+# **判斷寫兩次，就會有一邊寫錯**；寫在這裡，它就有測試與突變守著（#93）。
+#
+# 兩個 unknown 的優先序是刻意的：avail 讀不到比 need 估不出來更根本 ——
+# 前者讓整個檢查失效，後者只是少了輸入。兩個都不知道時報前者。
+memory_verdict() {
+  local avail_mb="${1:-}" need_mb="${2:-}"
+  local verdict
+  verdict="$(ram_verdict "$avail_mb" "$need_mb")"
+  if [[ "$verdict" != "unknown" ]]; then printf '%s' "$verdict"; return 0; fi
+  if [[ ! "$avail_mb" =~ ^[0-9]+$ ]]; then printf 'unknown_avail'; return 0; fi
+  printf 'unknown_need'
+}
+
 # 一個「GB 的數字」長什麼樣。**這一條判斷只寫在這裡。**
 #
 # 三個地方需要它：`--model-gb` 的旗標驗證、`model_gb_estimate` 的查表輸出、
