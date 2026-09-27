@@ -165,6 +165,30 @@ endpoint base-url
 ENDPOINT_API_KEY=<貼在這裡>
 ```
 
+那把金鑰最後會住在**三個**地方，而只有其中一個會自我修復：
+
+| 位置 | 它是什麼 |
+|---|---|
+| `~/.config/endpoint/endpoint-config.yaml` → `identity.api_key` | **真本**。每次 boot 都把它的複本烘進推上 Kaggle 的 notebook —— **明文**。 |
+| `.env` → `ENDPOINT_API_KEY` | **硬拷貝**，給 `connect-endpoint.sh` 與探針讀。 |
+| Open WebUI 的資料庫 → `openai.api_keys` | **硬拷貝**，與 `openai.api_base_urls` 同索引對齊。 |
+
+只有 CLI 會從過期的值裡恢復 —— 它會重讀活著那台引擎的 `GET /v1/apikey`。
+另外兩份永遠不會。它們只會安靜地過期，然後很久以後以 401 的樣子出現，
+而那時沒有任何線索指回這裡。
+
+```bash
+bash scripts/rotate-endpoint-key.sh --check   # 三處還一致嗎？
+bash scripts/rotate-endpoint-key.sh           # 一次換掉三處
+```
+
+`--check` 只印**指紋，絕不印金鑰**、不改任何東西，三處不一致時回 `2` ——
+所以它能當閘門用。
+
+要在 boot **之前**輪替，不是之後。輪替是本機動作：它不碰 Kaggle。舊金鑰在已經
+推上去的那個 notebook 裡仍然是活的，直到下一次 boot 把它換掉 —— 而那個
+notebook 雖然是私有的，它仍然是別人伺服器上的明文。
+
 ## 步驟 4 —— 接線**之前**先驗證
 
 ```bash
@@ -196,6 +220,8 @@ bash scripts/connect-endpoint.sh --url https://xxxx.trycloudflare.com/v1
 ```bash
 bash scripts/connect-endpoint.sh --status       # 目前接的是什麼
 bash scripts/connect-endpoint.sh --disconnect   # 切回只有 Ollama
+bash scripts/rotate-endpoint-key.sh --check     # 三個金鑰持有點一致嗎？
+bash scripts/rotate-endpoint-key.sh             # 一次輪替三處
 ```
 
 ## 步驟 6 —— 只有你能做的那一步
@@ -232,6 +258,10 @@ bash scripts/connect-endpoint.sh --disconnect   # 切回只有 Ollama
 
 - **任何知道 tunnel 網址與金鑰的人都能用你的 GPU。** 網址是隨機的，
   那是隱蔽性，不是認證。
+- **金鑰以明文長存 Kaggle 伺服器。** 每次 boot 都會把它烘進推上去的
+  notebook。那個 notebook 是**私有**的，所以這不是公開外洩——但任何持有該
+  帳號的人都看得到，而 CLI 自己永遠不會輪替它。唯一會輪替的是
+  `scripts/rotate-endpoint-key.sh`，而且輪替要等到**下一次** boot 才生效。
 - **Quick Tunnel 的網址每次啟動都會變。** 不要在任何東西上寫死它。
 - **確認 `GET /v1/apikey` 是否能在沒有權杖的情況下存取。** endpoint 的文件
   提到這條路由。若它不需認證，那麼光是 tunnel 網址就足以取得金鑰——
@@ -411,6 +441,10 @@ bash scripts/apply-endpoint-stop-fixes.sh --revert    # 還原
 | `endpoint stop` 回傳 2 | 這是刻意設計，不是失敗。kill 訊號已送出；狀態讀不到，因為這個 shell 沒有 Kaggle 權杖。改在拿得到權杖的 shell 裡用 `endpoint status` 確認。 |
 | `apply-endpoint-stop-fixes.sh` 拒絕，說兩個檔案不一致 | 上一次套用被中斷，或有人手動改過其中一個。先用 `--revert` 還原再重跑。 |
 | `endpoint status` 印出 `unknown (could not check)` | 補丁正在作用：`endpoint status` 也需要權杖，而這個 shell 沒有。是黃色不是紅色 —— 讀不到的狀態不等於確認過的 `offline`。 |
+| endpoint 明明是活的，`connect-endpoint.sh` 或探針卻拿到 401 | `.env` 拿著**過期的硬拷貝**——它不會自己更新。跑 `scripts/rotate-endpoint-key.sh --check`。 |
+| `rotate-endpoint-key.sh --check` 回傳 2 | 這是刻意設計：三個持有點不一致，而不一致在出事之前都是無聲的。跑一次不帶 `--check` 的，讓它們一致。 |
+| `rotate-endpoint-key.sh` 回傳 2，說 open-webui 沒在跑 | 這是刻意設計。只輪替讀得到的兩個，會留下第三個拿著**死金鑰、且沒有任何症狀**。把堆疊開起來再跑一次。 |
+| `rotate-endpoint-key.sh` 回傳 3 | 那個值在該檔案裡不是恰好一筆 `myth-` 金鑰。腳本只印**數量、不印值**——自己看一眼那個檔案再重跑。 |
 
 接上之後，`bash scripts/check-egress.sh` 會把你的 runtime 列在「啟用中」。
 那是正確且預期的。這支探針存在的目的，是讓那成為一個**決定**，而不是意外。

@@ -625,6 +625,8 @@ Open <http://localhost:3000>.
 | `bash scripts/connect-endpoint.sh --url URL` | Attach an OpenAI-compatible runtime (verify → wire → read back) |
 | `bash scripts/connect-endpoint.sh --status` | Which runtime is wired right now |
 | `bash scripts/connect-endpoint.sh --disconnect` | Back to Ollama only |
+| `bash scripts/rotate-endpoint-key.sh --check` | Compare the **three** places the persistent endpoint key lives — the config yaml (the original, baked into the notebook at boot), `.env`, and Open WebUI's database — and print **fingerprints only, never the key**. Changes nothing; exits `2` when they disagree (so it works as a gate) |
+| `bash scripts/rotate-endpoint-key.sh` | Rotate that key across all three **at once**, after reading all three and generating one new value. Asks for `yes`; `--yes` skips. Rotating only two would leave a holder with a dead key and **no symptom**, so a holder it cannot reach stops the whole thing (exit `2`) |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | Check whether the two ntfy fixes in endpoint's notebook generator are needed, and whether they still apply. Changes nothing |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh` | Patch that generator (backup → hash gate → apply → re-verify). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
 | `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | The verifier behind the above — drives the code the generator *emits* against a simulated ntfy token bucket. **Fails against the pristine file on purpose**; that failure is the demonstration (D-050) |
@@ -792,6 +794,22 @@ gitignored**:
 ```bash
 ENDPOINT_API_KEY=<paste it here>
 ```
+
+That key ends up in **three** places, and only one of them heals itself. The
+config yaml (`~/.config/endpoint/endpoint-config.yaml`) is the original, and every
+`boot` bakes a copy of it — in plaintext — into the notebook pushed to Kaggle. The
+repo's `.env` and Open WebUI's database hold **hard copies** that nothing refreshes;
+they just go quietly stale and show up much later as a 401.
+
+```bash
+bash scripts/rotate-endpoint-key.sh --check   # do the three still agree?
+bash scripts/rotate-endpoint-key.sh           # replace all three at once
+```
+
+Rotate **before** a boot, not after. The rotation is local — it does not touch
+Kaggle. The old key stays alive in the already-pushed notebook until the next boot
+replaces it, and that notebook is private but is still plaintext on someone else's
+server.
 
 ### Step 7 — Verify **before** you wire it in
 

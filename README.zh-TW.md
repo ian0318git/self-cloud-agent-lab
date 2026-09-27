@@ -570,6 +570,8 @@ bash scripts/up.sh
 | `bash scripts/connect-endpoint.sh --url URL` | 接上一個 OpenAI-compatible runtime（先驗證、後接線、再回讀確認） |
 | `bash scripts/connect-endpoint.sh --status` | 目前接的是哪一個 runtime |
 | `bash scripts/connect-endpoint.sh --disconnect` | 切回只有 Ollama |
+| `bash scripts/rotate-endpoint-key.sh --check` | 比對那把持久 endpoint 金鑰住的**三個**地方 —— config yaml（真本，boot 時烘進 notebook）、`.env`、Open WebUI 的資料庫 —— **只印指紋，不印金鑰**。不改任何東西；不一致時回 `2`（所以能當閘門用） |
+| `bash scripts/rotate-endpoint-key.sh` | 把三個地方**一次**換成同一把新的（會先全部讀完才動手）。要打 `yes` 確認，`--yes` 可略過。只換兩個會留下一個拿著死金鑰、**且沒有任何症狀**的持有點，所以只要有讀不到的持有點，整支就停下來（回 `2`） |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh --dry-run` | 檢查 endpoint 產生器裡的兩項 ntfy 修正是否需要、以及補丁還套不套得上。不做任何變更 |
 | `bash scripts/apply-endpoint-ntfy-fixes.sh` | 對那個產生器套補丁（備份 → 雜湊關卡 → 套用 → 重驗）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
 | `python3 scripts/test_endpoint_ntfy_fixes.py FILE` | 上面那支的行為驗證 —— 驅動產生器**實際吐出的字串**，跑在模擬的 ntfy token bucket 上。**對原始檔是預期要失敗的**，那個失敗就是缺陷的展示（D-050） |
@@ -731,6 +733,21 @@ endpoint base-url
 ```bash
 ENDPOINT_API_KEY=<貼在這裡>
 ```
+
+那把金鑰最後會住在**三個**地方，而只有其中一個會自我修復。config yaml
+（`~/.config/endpoint/endpoint-config.yaml`）是真本，每次 `boot` 都會把它的複本
+——**明文**——烘進推上 Kaggle 的 notebook。repo 的 `.env` 與 Open WebUI 的資料庫
+拿的是**硬拷貝**，沒有任何東西會更新它們；它們只會安靜地過期，然後很久以後以
+401 的樣子出現。
+
+```bash
+bash scripts/rotate-endpoint-key.sh --check   # 三處還一致嗎？
+bash scripts/rotate-endpoint-key.sh           # 一次換掉三處
+```
+
+要在 boot **之前**輪替，不是之後。輪替是本機動作 —— 它不碰 Kaggle。舊金鑰在
+已經推上去的那個 notebook 裡仍然是活的，直到下一次 boot 把它換掉；而那個
+notebook 雖然是私有的，它仍然是別人伺服器上的明文。
 
 ### 第 7 步 —— 接線**之前**先驗證
 

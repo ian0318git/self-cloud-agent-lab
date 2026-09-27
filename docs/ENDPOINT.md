@@ -180,6 +180,31 @@ Put the key where the repo's scripts expect it — **`.env`, which is gitignored
 ENDPOINT_API_KEY=<paste here>
 ```
 
+That key ends up in **three** places, and only one of them heals itself:
+
+| Where | What it is |
+|---|---|
+| `~/.config/endpoint/endpoint-config.yaml` → `identity.api_key` | The **source of truth**. Every boot copies it into the notebook pushed to Kaggle — **in cleartext**. |
+| `.env` → `ENDPOINT_API_KEY` | A **hard copy**, read by `connect-endpoint.sh` and the probes. |
+| Open WebUI's database → `openai.api_keys` | A **hard copy**, index-aligned with `openai.api_base_urls`. |
+
+The CLI alone recovers from a stale value — it re-reads the live engine's
+`GET /v1/apikey`. The other two never do. They just go quietly stale and surface
+much later as a 401, with nothing pointing back here.
+
+```bash
+bash scripts/rotate-endpoint-key.sh --check   # do the three still agree?
+bash scripts/rotate-endpoint-key.sh           # replace all three at once
+```
+
+`--check` prints **fingerprints only, never the key**, changes nothing, and exits
+`2` when the three disagree — so it works as a gate.
+
+Rotate **before** a boot, not after. Rotation is a local action: it does not touch
+Kaggle. The old key stays live inside the notebook already pushed there until the
+next boot replaces it — and while that notebook is private, it is still cleartext
+on someone else's server.
+
 ## Step 4 — Verify **before** connecting
 
 ```bash
@@ -212,6 +237,8 @@ Companion commands:
 ```bash
 bash scripts/connect-endpoint.sh --status       # what is wired right now
 bash scripts/connect-endpoint.sh --disconnect   # back to Ollama only
+bash scripts/rotate-endpoint-key.sh --check     # do the three key holders agree?
+bash scripts/rotate-endpoint-key.sh             # rotate all three at once
 ```
 
 ## Step 6 — The step only you can do
@@ -252,6 +279,11 @@ Concretely, that means:
 
 - **Anyone with the tunnel URL and the key can use your GPU.** The URL is
   random, which is obscurity, not authentication.
+- **The key lives in cleartext on Kaggle's servers.** Every boot bakes it into
+  the pushed notebook. That notebook is *private*, so this is not a public leak —
+  but it is visible to anyone holding the account, and the CLI never rotates it
+  on its own. `scripts/rotate-endpoint-key.sh` is the only thing that does, and
+  rotation only takes effect at the **next** boot.
 - **Quick Tunnel URLs change on every boot.** Do not build anything on a fixed
   URL.
 - **Check whether `GET /v1/apikey` is reachable without a token.** The endpoint
@@ -456,6 +488,10 @@ upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
 | `endpoint stop` exits 2 | Working as intended, not a failure. The kill signal was sent; the state could not be read because this shell has no Kaggle token. Confirm with `endpoint status` in a shell that has one. |
 | `apply-endpoint-stop-fixes.sh` refuses, saying the two files disagree | A previous run was interrupted, or one file was edited by hand. Run the script with `--revert` first. |
 | `endpoint status` prints `unknown (could not check)` | The patch working: `endpoint status` also needs the token, and this shell does not have it. Yellow, not red — an unreadable state is not a confirmed `offline`. |
+| `connect-endpoint.sh` or a probe gets a 401 while the endpoint itself is up | `.env` is holding a **stale hard copy** of the key — it never refreshes. Run `scripts/rotate-endpoint-key.sh --check`. |
+| `rotate-endpoint-key.sh --check` exits 2 | Working as intended: the three holders disagree, and disagreeing is silent until something 401s. Run the script without `--check` to make them agree. |
+| `rotate-endpoint-key.sh` exits 2 saying open-webui is not running | Working as intended. Rotating only the two reachable holders would leave the third holding a **dead key with no symptom**. Start the stack and re-run. |
+| `rotate-endpoint-key.sh` exits 3 | The value is not exactly one `myth-` key in that file. The script prints the **count only**, never the value — look at the file yourself before re-running. |
 
 After connecting, `bash scripts/check-egress.sh` will list your runtime under
 "啟用中". That is correct and intended. The probe exists so that it is a
