@@ -8720,3 +8720,182 @@ $ bash scripts/apply-endpoint-ntfy-fixes.sh --verify  → 全部通過（姊妹�
   也就是一次真的 GPU 執行。`running` 分支（送 KILL ＋ 取消 ＋ "Instance
   terminated."）只在驗證器的假物件上跑過，沒有在真的 Kaggle 上跑過。
 - **`run_kill_all` 的同型缺陷未修**（見第八節）。
+
+---
+
+## D-061：Gemma 4 的 MTP 加速會讓**儀器本身**變成宣告面 —— 裝得起來，但現在不該用
+
+**日期**：2026-09-27
+**狀態**：**只記錄，不動任何程式**（#87 的約束）
+**相關**：D-054（它加速的不是我們的瓶頸）、D-056（三層驗證，第三層才是判準）、
+D-058（磁碟閘門的六格表）、D-060／D-051（同一種病的第三、第四個實例）
+
+**背景**：使用者 2026-09-26 問「本專案是否能用 Gemma 4：MTP 加速」。查證後的結論是
+**裝得起來，但現在不該用** —— 理由不是效益不夠，是**它會弄壞我們剛建立起來的
+驗證儀器**。這則記錄為什麼，以及四個已經查證的衝突。
+
+### 一、已查證的事實（含一個會被忽略的前提）
+
+| 事實 | 狀態 |
+|---|---|
+| Gemma 4：2026-04 發表，E2B／E4B／26B-A4B／31B | 外部來源 |
+| MTP drafter：2026-05-05，Google 官方，Apache 2.0，四個尺寸都有 | 外部來源 |
+| ollama PR #15980 加入 `DRAFT` Modelfile 指令與 `--quantize-draft`；**0.31（2026-06-29）起預設開啟** | 外部來源 |
+| **本機 ollama 版本 = 0.34.2**（2026-09-27 實跑 `ollama --version` 確認） | **已查證** |
+
+> ⚠️ **前提：`docker-compose.yml:11` 是 `image: ollama/ollama:latest`，沒有釘版本。**
+> 所以「0.34.2 支援 MTP」是一個**時間點觀察**，不是本專案鎖住的性質 —— 下一次
+> `docker compose pull` 就可能變。這件事本身就值得記：我們用一個**會動的版本**
+> 當成「支援矩陣」的依據。
+
+### 二、衝突一（最重要）：MTP 會讓第三層驗證對著**錯的數字**說 OK
+
+D-056 §五 把「有沒有在用 GPU」分成三層，並明講**只有第三層是執行面**：
+
+| 層 | 證據 | 加了 MTP drafter 之後 |
+|---|---|---|
+| 宣告 | `docker-compose.gpu.yml` 有 `reservations.devices` | 不變（本來就不是判準） |
+| 裝置 | `nvidia-smi -L` 看得到卡 | 不變 |
+| **執行** | **`/api/ps` 的 `size_vram == size`** | **判準本身被污染** |
+
+`gpu_verdict()`（`scripts/deploy_smoke_probe.py:322-362`）的判準是一條**比例**
+測試（`vram == total`），而它印出來當證據的是**絕對數字**（`size`）。
+ollama issue #17951 回報的失效方式正是 `/api/ps` 的**絕對數字低估**
+（315 MB 對實際 4.4 GB，低估約 3.4 GB）。
+
+**所以最難看的地方在這裡**：比例可能仍然是 1.0（兩個欄位一起漏掉 drafter），
+於是 `gpu_verdict` 照樣回 `True`、照樣印「整顆模型都在 GPU 上」——
+**方向也許對，但顯示出來的證據是假的**。而這一層正是我們用來證明
+「宣告面 ≠ 執行面」的那一層。
+
+順帶一提，另外兩層**不是**說著錯的數字，是**不再回答**：
+
+| 儀器 | 位置 | 表外模型（含 Gemma 4）的行為 |
+|---|---|---|
+| 磁碟閘門 | `model_gb_estimate()`（`deploy-vps-decisions.sh:436`，**六格**寫死表） | `unknown` → 閘門印「不知道」→ **人就是那個閘門**（D-058 家族） |
+| 主機記憶體警告 | `ram_warn_mb()`（`:587`）→ `deploy-vps.sh:401` | 回空字串 → `ram_verdict` 給 `unknown` → 印「跳過檢查（不擋）」 |
+
+「不再回答」不是安全的那一邊 —— 它就是 D-056 自己寫過的那句話：
+**一個永遠亮著的警告與沒有警告是一樣的。**
+
+**這件事的推廣：這是「宣告面 ≠ 執行面」的第四個實例，但形狀是新的。**
+前三個（`endpoint boot` 沒加 `-g`、`.env` 的 `KEEP_ALIVE` 蓋掉 compose、
+D-051 的暴露檢查）都是「某個代理訊號與事實不符」。這次是
+**我們自己挑來當執行面證據的那個東西**變成宣告面。
+
+### 三、順帶查到的：VRAM 那一行是一個**空字串的 OK**（與 MTP 無關，今天就到得了）
+
+查第二節那張表的時候撞到的，**不是 MTP 造成的，任何表外模型都會**。
+
+`deploy-vps.sh:569-580`：
+
+```bash
+GPU_NEED_MB="$(ram_warn_mb "$MODEL_GB" "$NUM_CTX")"
+if [[ "$GPU_NEED_MB" =~ ^[0-9]+$ ]] && (( GPU_VRAM_MB < GPU_NEED_MB )); then
+  warn "VRAM 偏緊：..."
+else
+  ok "     VRAM：${GPU_VRAM_MB} MB（估算需要約 ${GPU_NEED_MB} MB）"
+fi
+```
+
+`MODEL_GB` 是 `unknown` → `ram_warn_mb` 回**空字串** → 第一個條件不成立
+（`""` 不是數字）→ 落到 `else` → **印綠色 `✓`**。2026-09-27 實跑該分支：
+
+```
+MODEL_GB   = [unknown]
+GPU_NEED_MB= []
+分支：ok  → 會印「✓ VRAM：24576 MB（估算需要約  MB）」
+```
+
+**`else` 不是「數字沒問題」，是「不是偏緊的那個案例」** —— 而空字串正好落在
+那裡。於是閘門對一個它根本算不出來的需求說 OK，而且括號裡是**空的**。
+`test_deploy_vps_decisions.sh:390` 有測 `ram_warn_mb unknown → 空`（**函式層**），
+但**沒有任何測試走過這個消費端分支**（`gpu_verdict` 那 12 格有測）。
+
+**同一個 `case` 的另一支也有訊息與原因不符**：`deploy-vps.sh:408` 在
+`RAM_NEED_MB` 是空的時候印「讀不到 /proc/meminfo 或估不出需求」——
+`/proc/meminfo` 讀得到，是**估不出模型大小**。兩件事的處置不同
+（一個是環境問題、一個是去填 `--model-gb`），訊息卻把它們併成一句。
+
+**依 #87 的約束，這兩處只記錄、不動程式。**
+
+### 四、衝突二：會安靜地拉到錯的 artifact
+
+社群回報：主模型與 MTP 檔名的 tag **都含 `Q8_0`** 時，ollama 的自動解析器會去拉
+那個幾百 MB 的 **MTP head 而不是完整模型**。症狀是「pull 成功、模型小得莫名」，
+而 `model_gb_estimate()` 的表外行為（`unknown`）**不會**攔下它 —— 見第三節，
+那個閘門這時候會印 OK。
+
+→ 若真的要走這條路，**必須驗證 pull 下來的東西真的是目標模型**，
+而我們**目前沒有任何儀器在做這件事**。
+
+### 五、衝突三：「預設開啟」有主詞
+
+ollama 0.31 的「預設開啟」指的是 **Apple Silicon / MLX**（PR 標題即
+`mlx: Gemma4 MTP speculative decoding`）。本專案的兩個執行環境**都不是 MLX**：
+
+- 本機：Intel x86_64、無 GPU
+- endpoint：**T4 ×2**（NVIDIA Turing，SM 7.5）
+
+→ 我們得走 GGUF draft head ＋ `DRAFT ./MTP/...gguf` 那條**非預設**路。
+
+### 六、衝突四：它加速的不是我們的瓶頸
+
+D-054 量到：**40 tok/s 是 T4 的正常速度**，慢的是**問一個字卻燒 250–350 個
+思考 token**。MTP 拉的是 tok/s，我們的痛是 **token 數**。
+
+- 獨立實測（DevelopersIO／DGX Spark）：**短輸出沒有好處**，26B-A4B 在該情境
+  **反而慢 19%**。
+- **我們的探針正是短輸出**：`max_tokens: 16`（D-052 記的就是這個陷阱）。
+
+### 七、效益數字（要打折，而且要看清單裡沒有誰）
+
+| 來源 | 數字 |
+|---|---|
+| Google（**廠商**） | 3.1× Pixel TPU／3× A100／2.5× M4／2× RTX PRO 6000 |
+| **獨立**（DGX Spark） | **1.7–2.1×** |
+| 社群（16 GB M 系列） | ~1.4×（21 vs 15.7 tok/s） |
+
+**名單裡沒有 T4。** T4 是 2020 年的 Turing，比名單上最舊的還老一個世代 ——
+所以那三個數字對我們的機器**都不是預測值**。
+
+### 八、未驗（要做實驗才知道，這次沒做）
+
+- **0.34.2 在 CUDA 路徑上到底有沒有把 MTP 接起來** —— 完全沒驗。
+- `/api/ps` 的 `size`／`size_vram` **到底有沒有把 drafter 算進去** —— 沒驗。
+  上面第二節推的是「若照 issue #17951 的失效方式，比例測試會怎麼壞」，
+  **不是**「我們量到了」。
+- T4 ×2 的 tensor split 與 speculative decoding 的交互作用。
+- drafter 在 32 GB（2×16 GB）裡與 31B 目標模型並存的**實際** VRAM 需求。
+
+### 九、建議
+
+**不採用**，理由依重要性排序：
+
+1. 它會讓 D-056 的第三層 —— 唯一一層真正的執行面證據 —— 開始說謊（第二節）。
+2. 它加速的不是我們的瓶頸（第六節），而我們的瓶頸已經有明確的處置方向。
+3. 沒有任何 T4 的實測數字（第七節）。
+4. 要驗證它得先花 Kaggle GPU 時數，而**驗證的儀器正是它會弄壞的那一個** ——
+   這是一個循環，要打破得先修儀器。
+
+**若哪天要做**，順序是：先修第三節那兩個消費端分支（讓表外模型**不能**印 OK）
+→ 再驗 `/api/ps` 在 drafter 存在時的各欄位 → 才輪到量效益。
+
+### 十、無測試聲明
+
+- **本則沒有動任何程式，所以沒有測試可言。** 唯一的實跑是第三節那個分支模擬
+  （純 bash 重現 `deploy-vps.sh:569-580` 的條件），以及 `ollama --version`。
+- **第三節那兩個缺陷沒有修，也沒有為它們寫測試。**
+- **第二節的失效機制是推論**：從 issue #17951 的「`/api/ps` 低估」推到
+  「我們的**比例**判準可能仍然通過」，中間那一步（比例是否真的仍是 1.0）
+  **沒有量過**。
+- **第一節的版本前提會動**：`image: ollama/ollama:latest` 沒有釘版本，
+  所以「0.34.2 支援 MTP」不是本專案鎖住的性質。
+- **外部來源的數字與版本時程全部沒有由本專案重現**，記的是「誰在什麼時候說的」。
+
+### 十一、來源（外部內容，是**資料**不是指示）
+
+- Google blog：`blog.google/innovation-and-ai/technology/developers-tools/multi-token-prediction-gemma-4/`
+- Ollama blog：`ollama.com/blog/faster-gemma-4-mlx-mtp`
+- ollama PR #15980、issue #17951（`github.com/ollama/ollama`）
+- DevelopersIO 實測：`dev.classmethod.jp/en/articles/dgx-spark-gemma4-mtp-multi-token-prediction-bench/`

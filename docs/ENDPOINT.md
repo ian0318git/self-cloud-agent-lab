@@ -45,6 +45,7 @@ Being explicit about this, because the whole project depends on not confusing
 | Speed, VRAM headroom, which model sizes fit on 2×T4 | **Not measured** |
 | That the tunnel stays up for a whole session | **Not measured** |
 | That the patched generator survives a real `endpoint boot` | **Not verified** — the patch is verified against simulated ntfy, not against a live Kaggle run |
+| That the deployment instruments stay honest under speculative decoding (MTP) | **Known to conflict** — see "One known way to make these instruments lie" below, and D-061 |
 
 Interface conformance is not the same as capacity. The probe deliberately does
 not claim otherwise — its own output says so.
@@ -286,6 +287,32 @@ answer "is this fast enough / big enough". Measure those yourself:
 The model itself is a variable, not part of the architecture. Changing it is not a
 code change — `OLLAMA_MODEL` in `.env` names it for the scripts, and the model
 selector in Open WebUI picks it per conversation.
+
+### One known way to make these instruments lie
+
+Not everything in the table above is "we have not got to it yet". There is one
+change that is known to break the instruments themselves, so it is worth naming:
+
+**A draft head for speculative decoding** (Gemma 4's MTP drafters are the current
+example). Ollama's `DRAFT` directive loads a second, smaller model alongside the
+target one, and [`/api/ps` under-reports the memory when one is
+present](https://github.com/ollama/ollama/issues/17951) — 315 MB reported for a
+4.4 GB model.
+
+That lands on this project in a specific place. The GPU verdict in
+`scripts/deploy_smoke_probe.py` is a **ratio** test (`size_vram == size`) whose
+printed evidence is an **absolute** number. A ratio survives a number being
+wrong, so the layer D-056 calls the only execution-plane evidence would go on
+saying "the whole model is on the GPU" while displaying a figure that is not the
+model. The other two instruments do not answer wrongly — they stop answering: a
+model outside the six-row table in `model_gb_estimate()` makes the disk gate
+print `unknown` (a human becomes the gate), and the host-RAM warning falls
+through to "skipping the check".
+
+**This project does not use MTP.** It installs fine — ollama 0.34.2 supports it
+— but it raises tokens/second while our bottleneck is token *count* (D-054), and
+no T4 numbers exist for it. The full record, including what is still unverified,
+is DECISIONS.md **D-061**.
 
 ---
 
