@@ -14,7 +14,7 @@
 #     verify-langgraph-tools  2,30p  （檔頭 28 行）→ 多印 **1** 行（`source lib.sh`）
 #     rag-verify              2,24p  （檔頭 23 行）→ **正確**
 #   停在第一個空行 `sed -n '2,/^$/p'`
-#     deploy-vps                      （檔頭 110 行）→ **只印 18 行**（截斷 92 行）
+#     deploy-vps                      （當時檔頭 110 行）→ **只印 18 行**（截斷 92 行）
 #     verify-mem0-add-cost／verify-phase3-runtime／verify-throughput → **正確**
 #     （它們的檔頭裡沒有空行，所以「第一個空行」剛好就是檔頭與程式碼之間那一行）
 #   自寫的兩種
@@ -194,12 +194,18 @@ check "B3c 同一個輸入，舊形狀的輸出**沒有變**（它看不到新�
 check "B3d 而新的那一行確實只在正解裡" "yes" \
   "$(same "$(grep -c '後半段補的一行說明' "$WORK/new-b3b.txt" || true)|$(grep -c '後半段補的一行說明' "$WORK/old-b3b.txt" || true)" "1|0")"
 
-# B4：拿真檔案的不變性（deploy-vps.sh 的檔頭 110 行，是這個 repo 最長的）
+# B4：拿真檔案的不變性（deploy-vps.sh 的檔頭，是這個 repo 最長的）
+#
+# **那個行數是描述，不是斷言。** 它寫在這裡只是為了讓讀的人知道我拿多大的
+# 檔頭在試；真正的判準是**內容**（B1–B3），檔頭再長也不會讓 B4 失效。
+# 它漂過一次：這裡原本寫 110，而 2026-09-27 量出來是 145（先前幾則把它養大了），
+# 沒有任何一條斷言叫 —— 因為它不是斷言。所以修法是**更正 ＋ 說明它不是斷言**，
+# 不是把它也釘成一條（那會是本末倒置：判準是內容，行號會走 —— D-039 的結論）。
 cp "$REPO_ROOT/scripts/deploy-vps.sh" "$WORK/dv.sh"
 printf '\n# 後面補的\n' >> "$WORK/dv.sh"
 usage_to "$WORK/dv.sh" "$WORK/new-b4.txt"
 usage_to "$REPO_ROOT/scripts/deploy-vps.sh" "$WORK/new-b4-ref.txt"
-check "B4 真檔案（deploy-vps.sh，檔頭 110 行）＋尾端補行 → 逐字不變" "yes" \
+check "B4 真檔案（deploy-vps.sh，檔頭 $(usage_to "$REPO_ROOT/scripts/deploy-vps.sh" /dev/stdout | wc -l) 行）＋尾端補行 → 逐字不變" "yes" \
   "$(same_file "$WORK/new-b4.txt" "$WORK/new-b4-ref.txt")"
 
 # ════════════════════════════════════════════════════════════════════

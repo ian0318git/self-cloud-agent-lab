@@ -9100,3 +9100,226 @@ memory_verdict() {
 - **`ram_verdict` 的 `unknown` 現在只由 `memory_verdict` 消費**，但 `ram_verdict`
   本身仍是公開函式，其他呼叫端若直接用它，仍會拿到合併過的 `unknown`。
   本次沒有去改那些（目前沒有其他呼叫端）。
+
+---
+
+## D-063：#86 —— 「一鍵」的兩個前提，與 Docker 那一個的三份處方
+
+`#86` 問的是：`lib.sh` 的 `require_docker()` **只檢查，不安裝也不引導**，
+`detect_compose` 同樣是必要條件 —— 所以「一鍵佈署」其實有兩個**未言明的前提**：
+Docker 已安裝且執行中、repo 已經在機器上。它們只存在於程式碼裡，使用者要讀那支
+函式才會知道。決策點是：這是**刻意留給使用者的前提**（那就把話講明），還是要加
+安裝步驟。
+
+本則記的答案：**兩個前提都寫進檔頭與 README；前提一做成一「硬擋 ＋ 三個原因各給
+各的處方」，不自動安裝。前提二只是把話講明。**
+
+### 一、缺陷本體
+
+修補前（`lib.sh`，HEAD 版）：
+
+```bash
+require_docker() {
+  if ! docker info >/dev/null 2>&1; then
+    fail "無法連線 Docker daemon。"
+    fail "在 Codespaces 中請確認已啟用 docker-in-docker feature；本機請確認服務已啟動。"
+    exit 1
+  fi
+}
+```
+
+`docker info` 失敗至少有三個原因，而它們的處方**完全不同**：
+
+| 原因 | 真因 | 處方 |
+|---|---|---|
+| 沒有 `docker` 這個指令 | 這台機器沒裝 | 裝它（需要 root） |
+| 指令在、daemon 沒跑 | 服務沒起來／socket 位置不對 | 啟動服務 |
+| 連得上 socket、被拒 | 使用者不在 `docker` 群組 | 加群組並**重新登入** |
+
+舊版把三個收成一句，然後給了**第四件事**的處方（Codespaces 的 docker-in-docker
+feature）。它同時犯了 D-062 §二 那條：**一句訊息裡有兩個不同的處方，等於沒有
+處方** —— 「去檢查 feature」與「去啟動服務」是兩條互斥的路，一起講就等於兩條都
+沒講。
+
+**最糟的是第一個原因。** 在一台根本沒有 Docker 的機器上，訊息說的是「無法連線
+Docker daemon」—— 使用者會去查一個**不存在的服務**，而唯一該做的「裝 Docker」
+從頭到尾沒被提過。這是「把讀不到摺進不在」家族的**表親**：不是摺進「不在」，
+是把三個不同的「不在」摺進同一個處方。
+
+### 二、拍板（2026-09-27）：硬擋 ＋ 處方，不自動安裝
+
+**這個形狀不是新發明的 —— 同一個 repo 裡已經有先例。** GPU runtime 拿不到時
+（`deploy-vps.sh` 的 `blocked)` arm）也是硬擋 ＋ 印處方，而不是自動裝
+nvidia-container-toolkit。D-056 §四 把那條通則寫下來了：
+
+> **硬擋的訊息本身也是產出的一部分。** …**一個硬擋如果不附處方，它就只是把問題
+> 丟回給人。**
+
+**為什麼不自動安裝。** 在一台**別人的機器**上跑 `curl | sh` 裝 Docker 是需要 root
+的系統層變更，而這支腳本的位置是「從一個已經準備好的平台到一個安全設定好的
+堆疊」。多數 VPS 廠商本來就提供一鍵 Docker 映像，發行版套件庫與 rootless 也都是
+合理的路 —— 腳本不該替使用者決定這件事。處方裡仍給了官方安裝指令，但明講那只
+是其中一條路：
+
+```
+  （若你自己有既定的安裝方式 —— 套件庫、雲廠商的映像、rootless ——
+   就用那個。上面的官方腳本只是其中一條路。）
+```
+
+**為什麼是 fail-closed。** 沒有 Docker，暴露閘門、煙霧測試、「模型真的在 GPU 上」
+那一層就一層都跑不起來。在動到任何檔案**之前**停下來，比繼續往前安全。
+
+### 三、三個原因、三份處方 —— 而措辭會變
+
+判斷寫成一個**純函式**，回 arm 的名字而不回句子：
+
+```bash
+docker_verdict <有沒有 docker 這個指令> <docker info 成功嗎> <失敗訊息像不像權限問題>
+# → absent | ok | no_permission | not_running | unknown
+```
+
+順序是刻意的：`bin` 比 `info_ok` 更根本（沒有指令就沒得問）—— 先問「有沒有」，
+再問「跑不跑得動」。`require_docker` 只負責收集事實（`command -v`、`docker info`
+的成敗與訊息）與印處方。
+
+#### 測到的措辭漂移
+
+`bin` 不為 `yes` 時是結構性判定，但「失敗訊息像不像權限問題」只能靠**比對字串**。
+本次在真 docker 上量了兩代措辭：
+
+| | Docker 29.1.3（本機，2026-09-27） | 20.10 前後 |
+|---|---|---|
+| 沒權限 | `permission denied while trying to connect to the docker API at unix://…` | `permission denied while trying to connect to the Docker daemon socket at unix://…` |
+| 連不上 | `failed to connect to the docker API at unix://…; check if the path is correct and if the daemon is running: dial unix …: connect: no such file or directory` | `Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?` |
+
+**所以判準只能是子字串 `permission denied`，不能是整句。** 舊措辭裡有一串
+`Docker daemon socket`（大寫 D）—— 若有人把判準改成去認那串較長的字，**舊機器上
+完全正確、新機器上會把「沒權限」講成「沒在跑」**，也就是叫人去啟動一個已經在跑
+的 daemon。第六節記的就是這件事：修正前的假字串只有舊措辭，**抓不到那種改壞**。
+
+#### 怎麼在不取得 root 的情況下量到真的字串
+
+本機的使用者在 `docker` 群組裡（且 `sudo -n` 要密碼），所以「權限不足」不可能
+自然重現。做法是**讓連線真的被拒**：
+
+```python
+s = socket.socket(socket.AF_UNIX); s.bind("/tmp/perm-probe.sock"); s.listen(1)
+os.chmod("/tmp/perm-probe.sock", 0o000)   # 擁有者沒有 w 位 → connect() 得到 EACCES
+subprocess.run(["docker", "info"],
+               env={**os.environ, "DOCKER_HOST": "unix:///tmp/perm-probe.sock"})
+```
+
+mode 000 的 unix socket 連擁有者都連不上，於是 docker 自己吐出那句話。同一招把
+`DOCKER_HOST` 指向不存在的路徑，就得到「連不上」那一句。**這兩句是量出來的，
+不是抄的** —— 而量出來的結果就是措辭已經換了。
+
+### 四、放哪裡：`lib.sh`，不是 `deploy-vps-decisions.sh`
+
+在這個 repo 的慣例裡，「判斷」住在 `deploy-vps-decisions.sh`。這次**刻意不**放
+那裡，理由是依賴方向：**12 支腳本 source `lib.sh`，只有 3 支 source
+`deploy-vps-decisions.sh`。** 把前置檢查放進 decisions，就等於讓另外 9 支為了問
+一句「Docker 在不在」而多背一整個模組 —— 依賴方向會反過來。`lib.sh` 自己 source
+不了任何東西（它是根），所以前置檢查只能住在那裡。
+
+### 五、認不得的輸入 → `unknown` → 回 3
+
+`docker_verdict` 的三個參數只接受 `yes`／`no`，其他一律回 `unknown`；
+`require_docker` 收到不認得的 verdict 就 `exit 3`（**腳本自己壞掉**，D-018 的映射），
+不是 1 —— 「我認不得我自己收到的東西」不是環境問題。
+
+這一段的形狀是 `if [[ … ]] && [[ … ]]` 而不是 `case "$v" in yes|no)`，**因為突變台
+的條目格式是 `label|原始|替換`，含 `|` 的行不能當目標。** 這是為了可測性而選的
+寫法，記在這裡以免以後有人「順手」改回 `case` 而讓那條守衛變得不可突變。
+
+守衛本身有突變守著：拿掉它，`docker_verdict` 收到空字串的 `bin` 會落進 `absent`
+—— 也就是**對著一台可能裝了 Docker 的機器宣稱「沒有安裝」**。
+
+### 六、測試與突變 —— 含兩個自己踩到的坑
+
+假 docker 的 `info` 模式從 3 個變成 5 個（`ok`／`down`／`down_legacy`／`denied`／
+`denied_legacy`），K 段從 12 條變成 16 條。K13／K14 比的是**整份訊息相等**（同一
+個原因不論 Docker 用哪種措辭講，處方必須逐字一樣），K15／K16 是結束碼。
+
+- `test_lib_running.sh`：51/51 → **55/55**
+- 突變台：133 → **135**（兩條新突變都與措辭有關）
+- `test_deploy_vps_decisions.sh` 256/256、`test_usage_text.sh` 103/103 不變
+
+**坑一：第一個版本的突變活了下來。** 我寫的替換是 `*"docker daemon socket"*`
+（小寫 d），它**沒有被抓到**。原因不是測試有洞，是 `[[ == ]]` **分大小寫**，而舊
+措辭寫的是 `Docker daemon socket`（大寫 D）—— 那個排除條款根本沒觸發，突變沒有
+表達出我想表達的東西。改成大寫後立刻被抓到。**活下來的突變要先懷疑突變本身。**
+
+**坑二（這一個才是發現）：** 突變「判準改成舊措辭那串較長的字」**在修正前的測試
+下會活下來**。我用模擬驗證了 —— 把假 docker 的 `denied` 模式換回舊措辭（＝修正前
+的測資）＋ 注入該突變：
+
+```
+✓ 55/55 全過 —— …Docker 前置的三個原因各自有名字（#86）
+```
+
+也就是說**舊的假字串抓不到「只在舊措辭上正確」的改壞**，而那正是最可能發生的
+那一種（改的人手上是一台舊機器）。新的現代措辭字串就是為了關這個洞。
+
+**K13／K14 是不是裝飾？** 我另外驗了：突變「替舊措辭多開一條岔路（同一個原因長
+出兩種講法）」**只被 K14 殺死**（54 過、1 敗）—— K7／K8 對它完全無感。所以那兩條
+是承重的，不是把 K4–K9 換句話說。
+
+### 七、實跑證據 —— 四條分支，都走真的 `scripts/deploy-vps.sh`
+
+受控環境有一個**踩過的坑**要先講：**PATH 裡不能什麼都沒有。** 空 PATH 會先讓
+`source "$(dirname …)/lib.sh"` 失敗（`dirname: command not found`），根本走不到
+閘門。閘門之前**只用得到 `dirname` 一個外部指令**（`cd`／`pwd` 是 builtin），
+所以受控 PATH 只要放 `dirname`（外加一支假 `docker`）。`fail()`／`info()`／`ok()`／
+`warn()` 全是 `printf`，builtin，一個外部工具都不需要。
+
+| 假 docker 回報 | 結束碼 | 訊息第一行 |
+|---|---|---|
+| PATH 裡沒有 `docker` | 1 | `Docker：找不到 docker 這個指令 —— 這台機器沒有安裝 Docker。` |
+| 實測的「連不上」字串 | 1 | `Docker：docker 指令在，但連不上 daemon —— 「裝了」與「在跑」是兩件事。` |
+| 實測的「沒權限」字串 | 1 | `Docker：連得上 docker.sock 但權限不足 —— 你這個使用者不在 docker 群組裡。` |
+| 真 docker（本機 29.1.3） | 0 | （安靜）→ 走完 `--dry-run` 到「到這裡為止」 |
+
+四條都是 `--dry-run`，而且前三條都在閘門就結束（**在動到任何檔案之前**）。
+
+**前提一**寫進了 `deploy-vps.sh` 的檔頭（145 → **164** 行），README 兩份也各加了
+一段（快速開始 ＋ 指令表那一列）。**前提二**（repo 已經在機器上）只是把話講明 ——
+它是字面上的：沒有 repo 就沒有這支腳本。
+
+### 八、刻意不做
+
+- **`detect_compose` 的訊息。** 它與 `require_docker` 相鄰、形狀也像（compose v2
+  不在就是另一個「裝了沒」的問題），但它的失敗訊息目前**沒有**把「沒有 compose
+  外掛」與「compose 壞了」分開。同型，但不在 #86 的範圍。
+- **`down.sh`／`status.sh` 只呼叫 `detect_compose`，不呼叫 `require_docker`。**
+  這是對的（停機與看狀態**不該**被「daemon 在不在」擋住 —— 那兩支的工作正是告訴
+  你現在什麼狀態），但代價是**這次的三份處方在那兩支裡看不到**。
+- **`--dry-run` 仍然被這個閘門擋住。** 乾跑看起來「不需要 Docker」，但它會讀
+  docker 的真實狀態：`DockerRootDir`（磁碟閘門用）、`docker images`（本機映像）、
+  `docker manifest inspect`（架構）、`command -v docker`（GPU runtime 那一段）。
+  沒有 docker 的乾跑只會產生一連串「讀不到」。**維持原狀**，並在檔頭講明。
+- **12 支呼叫 `require_docker` 的腳本，沒有任何一支被測到接線。** K 段測的是函式
+  本身；「每一支都在動到東西之前呼叫它」沒有東西守著（見無測試聲明）。
+- **不改 GPU 的 `blocked)` arm。** 它是這次的模板，不是候選。
+
+### 無測試聲明
+
+- **三份處方各只有一次實跑，而且其中兩次是假的 docker。** `absent` 那次是真的
+  （PATH 裡真的沒有 docker）：「連不上」與「沒權限」是餵**量到的真字串**給假
+  docker。證明的是**分類與處方**是對的，**不是**「真 docker 在這台機器上會那樣
+  回」—— 本機的 docker 是好的，那兩條路不可能自然發生。
+- **新措辭只在這一台、這一個版本（29.1.3）上核對過。** VPS 上套件庫那種版本、
+  rootless、Podman 的 docker 相容層，措辭都可能不同；判準仍然只認
+  `permission denied` 這個子字串，換一種講法就會落進 `not_running`（處方也就
+  會給錯）。
+- **「連不上」那次的字串是用暫時路徑量的**（`DOCKER_HOST` 指向不存在的 socket），
+  測資裡換回預設路徑；措辭逐字相同，路徑是唯一被替換的部分。
+- **`unknown` 那條 arm 沒有實跑過。** 它需要一個回得出非 `yes`／`no` 的呼叫端，
+  而 `require_docker` 結構上只會傳 `yes`／`no`。它只被表測試與突變守著。
+- **`docker_verdict` 的驗證迴圈是為了可突變而選的寫法**（不含 `|`），不是為了
+  可讀性；改回 `case` 會讓它失去突變守衛。
+- **沒有驗證任何容器或佈署行為。** 四次實跑全用 `--dry-run`，而三條分支都在閘門
+  就結束了；`--dry-run` 不寫檔、不起容器。
+- **135 是「突變被抓到」的數字，不是覆蓋率。** 它只證明「這些特定的改壞會被擋
+  下」，不證明「所有的改壞都會被擋下」。
+- **README 那兩段沒有測試守著。** `test_usage_text.sh` 守的是**檔頭 vs `--help`**，
+  不是 README 的散文。

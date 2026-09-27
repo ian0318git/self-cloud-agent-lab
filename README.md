@@ -82,6 +82,15 @@ verifies the stack generates, and confirms the context size actually took effect
 The sections below are what it does and why — read them if you want to do it by
 hand, or if something in the script needs to change.
 
+**Two prerequisites, stated because the script does not supply either.** Docker
+installed and running (Compose v2 included), and this repo already on the machine
+— the `git clone` above is the second one, and it is deliberately not inside the
+script. `deploy-vps.sh` checks both and **stops**; it never runs an installer on
+your host. When Docker is missing or unreachable it names which of the three
+causes it found — not installed, installed but the daemon is not running, or
+running but you lack permission — and prints that cause's fix, because those
+three have three different fixes (D-063).
+
 **The ordering is the safety argument, not an implementation detail.** `up.sh`
 alone cannot be used as the deploy path: its defaults were tuned for Codespaces,
 where a published port is private, and on a VPS the same defaults are fail-open.
@@ -591,7 +600,7 @@ Open <http://localhost:3000>.
 
 | Command | Purpose |
 |---|---|
-| `bash scripts/deploy-vps.sh --model M --num-ctx N [--model-gb G]` | **One-click deploy onto a fresh VPS.** Writes `.env` safely *before* loading it, starts the stack, gates on real port bindings, pulls both models, then proves the stack generates and that `num_ctx` took effect. Fresh installs only — refuses if the database already has accounts or chats. **`--model-gb G`** supplies the on-disk size for a model its built-in table does not know; without it the disk gate says "unknown" rather than guessing, and it never guesses from the tag (D-058) |
+| `bash scripts/deploy-vps.sh --model M --num-ctx N [--model-gb G]` | **One-click deploy onto a fresh VPS.** **Requires Docker and Compose v2 already installed and running** — it checks, names which of the three causes it found, and stops; it never installs (D-063). Writes `.env` safely *before* loading it, starts the stack, gates on real port bindings, pulls both models, then proves the stack generates and that `num_ctx` took effect. Fresh installs only — refuses if the database already has accounts or chats. **`--model-gb G`** supplies the on-disk size for a model its built-in table does not know; without it the disk gate says "unknown" rather than guessing, and it never guesses from the tag (D-058) |
 | `bash scripts/deploy-vps.sh --dry-run` | Same preconditions and the `.env` diff, writing nothing. Its disk line covers the **unconditional** need only — the compose images this run would pull, plus a system margin. The model is deliberately *not* in that number: whether the model is already present cannot be answered until the containers are up, so that half is re-checked immediately before any download (D-058) |
 | `bash scripts/deploy-vps.sh --expose` | Deliberately publish Open WebUI on `0.0.0.0` and downgrade the gate to a warning. **This bypasses Cloudflare Access** — it exists for hosts with real edge filtering, not for convenience |
 | `bash scripts/up.sh` | Start the stack + ensure the model exists (idempotent) |

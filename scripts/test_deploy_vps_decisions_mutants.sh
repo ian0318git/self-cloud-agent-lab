@@ -30,6 +30,11 @@
 #     「這台機器根本不一樣」。它的失效方式是**安靜地跑出不同結果**：
 #     `arm64 → verified` 是把沒量過講成量過；`不等時回 native` 是讓 qemu
 #     模擬執行整個靜默；`讀不到欄位回 no` 則是對著一台好機器硬擋
+#   · Docker 前置的三個原因（`lib:`）→ 沒裝／裝了沒跑／沒權限的**處方完全
+#     不同**。舊版把三者收成一句「無法連線 Docker daemon」，而處方給的是
+#     第四件事（Codespaces 的 dinD feature）—— 在一台沒有 Docker 的機器上，
+#     它會叫你去看一個不存在的服務（#86）。`lib:` 是唯一一組目標不在
+#     deploy-vps-decisions.sh 的，所以它也是唯一一組會突變**共用底座**的
 #
 # 做法：把模組與測試複製到暫存目錄、用字串取代植入突變，從那份副本跑測試。
 # 原始檔從頭到尾不被修改。
@@ -50,6 +55,7 @@ LIFECYCLE="$SCRIPT_DIR/profile-lifecycle.sh"
 LIFECYCLE_TEST="$SCRIPT_DIR/test_profile_lifecycle.sh"
 DEPLOY="$SCRIPT_DIR/deploy-vps.sh"
 LIB="$SCRIPT_DIR/lib.sh"
+LIB_TEST="$SCRIPT_DIR/test_lib_running.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -63,14 +69,17 @@ trap 'rm -rf "$WORK"' EXIT
 export PYTHONDONTWRITEBYTECODE=1
 
 # 測試自己會去 source（bash）或 import（python）同目錄的受測檔案，所以
-# 每一份都要在 $WORK。lib.sh 不突變 —— 只放在那裡讓決定模組的測試找得到
-# （它的 PROJECT_ROOT 在那個測試裡用不到，沒有任何函式會讀它）。
+# 每一份都要在 $WORK。
+#
+# **`lib.sh` 從 #86 起也是突變目標**（前綴 `lib:`，跑 test_lib_running.sh）。
+# 在那之前它只是被放在那裡讓決定模組的測試找得到。
 #
 # **`deploy-vps.sh` 也在這份清單裡，但它不是突變目標**：決定模組的測試有一
 # 條會去讀它的 `case` 接線（#93）。少了這一份，那兩條在 $WORK 裡會因為
 # 「找不到檔案」而失敗，而症狀是**對照組就掛掉** —— 看起來像測試本身壞了，
 # 不是像少複製一個檔案。
 cp "$LIB" "$WORK/lib.sh"
+cp "$LIB_TEST" "$WORK/test_lib_running.sh"
 cp "$MODULE" "$WORK/deploy-vps-decisions.sh"
 cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
 cp "$DEPLOY" "$WORK/deploy-vps.sh"
@@ -94,16 +103,21 @@ if ! bash "$WORK/test_profile_lifecycle.sh" >/dev/null 2>&1; then
   fail "對照組就失敗了 —— test_profile_lifecycle.sh 本身有問題，先修它"
   exit 1
 fi
-ok "對照組通過（三份測試都不是永遠失敗）"
+if ! bash "$WORK/test_lib_running.sh" >/dev/null 2>&1; then
+  fail "對照組就失敗了 —— test_lib_running.sh 本身有問題，先修它"
+  exit 1
+fi
+ok "對照組通過（四份測試都不是永遠失敗）"
 echo
 
 # 突變清單：label|原字串|取代字串
 # 原字串必須在該目標檔案裡**唯一**出現一次，而且**不含 `|`**（見開頭的說明）。
 #
 # label 的前綴決定突變哪一份、跑哪一份測試：
-#   `py:` → deploy_smoke_probe.py ／ test_deploy_smoke_probe.py
-#   `pl:` → profile-lifecycle.sh ／ test_profile_lifecycle.sh
-#   其餘 → deploy-vps-decisions.sh ／ test_deploy_vps_decisions.sh
+#   `py:`  → deploy_smoke_probe.py ／ test_deploy_smoke_probe.py
+#   `pl:`  → profile-lifecycle.sh ／ test_profile_lifecycle.sh
+#   `lib:` → lib.sh ／ test_lib_running.sh（#86 起）
+#   其餘   → deploy-vps-decisions.sh ／ test_deploy_vps_decisions.sh
 # 前綴在比對時會被去掉，輸出裡看不到。
 MUTANTS=(
   # ── default_bind_addr：整個部署最重要的一個字 ──
@@ -473,6 +487,23 @@ MUTANTS=(
   "model-gb：上限不檢查（單位錯誤被放行）|  if ! awk -v v=\"\$raw\" -v m=\"\$MODEL_GB_MAX\" 'BEGIN { exit !(v <= m) }'; then|  if false; then"
   "GB 字面：空字串也算數字|  if [[ \"\$v\" =~ ^[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi|  if true; then printf 'yes'; return 0; fi"
   "GB 字面：負數也算數字|  if [[ \"\$v\" =~ ^[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi|  if [[ \"\$v\" =~ ^-?[0-9]+([.][0-9]+)?\$ ]]; then printf 'yes'; return 0; fi"
+
+  # ── Docker 前置（lib.sh，跑 test_lib_running.sh，#86）──
+  # 舊版把「沒裝」「裝了但 daemon 沒跑」「daemon 在跑但沒權限」收成同一句
+  # 「無法連線 Docker daemon」，而它給的處方是**第四件事**（Codespaces 的
+  # docker-in-docker feature）。這一組逐條把那個分辨力弄壞 —— 每一條都必須
+  # 讓 K 段叫起來（K 段判的是三份訊息兩兩不同，以及各自有沒有講對原因）。
+  "lib:Docker 前置：沒裝被講成沒在跑（三個原因併回一個）|  if [[ \"\$bin\" != \"yes\" ]]; then printf 'absent'; return 0; fi|  if false; then printf 'absent'; return 0; fi"
+  "lib:Docker 前置：權限不足被講成沒在跑（叫人去啟動一個已經在跑的 daemon）|  if [[ \"\$denied\" == \"yes\" ]]; then printf 'no_permission'; return 0; fi|  if false; then printf 'no_permission'; return 0; fi"
+  "lib:Docker 前置：daemon 正常也被講成連不上|  if [[ \"\$info_ok\" == \"yes\" ]]; then printf 'ok'; return 0; fi|  if false; then printf 'ok'; return 0; fi"
+  # 空的 `bin` 若落進 `absent`，這一支就會對著一台**可能裝了** Docker 的
+  # 機器宣稱「沒有安裝」—— 把讀不到摺進不在，正是這個家族的病。
+  "lib:Docker 前置：認不得的輸入被當成沒裝（空的 bin 宣稱「沒有安裝」）|    if [[ \"\$v\" != \"yes\" ]] && [[ \"\$v\" != \"no\" ]]; then printf 'unknown'; return 0; fi|    if false; then printf 'unknown'; return 0; fi"
+  "lib:Docker 前置：閘門被短路（無論如何都回 ok）|  verdict=\"\$(docker_verdict \"\$bin\" \"\$info_ok\" \"\$denied\")\"|  verdict=\"ok\""
+  "lib:Docker 前置：沒裝講回舊版那一句（併回「無法連線 Docker daemon」）|      fail \"Docker：找不到 docker 這個指令 —— 這台機器沒有安裝 Docker。\"|      fail \"Docker：無法連線 Docker daemon。\""
+  "lib:Docker 前置：二進位檔在不在不檢查（一律當成有裝）|  if command -v docker >/dev/null 2>&1; then|  if true; then"
+  "lib:Docker 前置：判準改成舊措辭那串較長的字（舊機過、新機錯）|    elif [[ \"\$msg\" == *\"permission denied\"* ]]; then|    elif [[ \"\$msg\" == *\"Docker daemon socket\"* ]]; then"
+  "lib:Docker 前置：替舊措辭多開一條岔路（同一個原因長出兩種講法）|    elif [[ \"\$msg\" == *\"permission denied\"* ]]; then|    elif [[ \"\$msg\" == *\"permission denied\"* ]] && [[ \"\$msg\" != *\"Docker daemon socket\"* ]]; then"
 )
 
 caught=0
@@ -552,6 +583,11 @@ for entry in "${MUTANTS[@]}"; do
   new="${rest#*|}"
 
   # 先還原兩份目標檔，再依 label 的前綴決定要動哪一份、跑哪一份測試。
+  #
+  # **`lib.sh` 一定要在還原清單裡。** 它現在是突變目標之一，而 `lib:` 以外的
+  # 突變跑的測試全都會 source 它 —— 少了這一行，一條 `lib:` 突變留下的壞
+  # lib.sh 會跟著汙染後面每一條突變，症狀是「忽然全部都被抓到」或「全部都沒
+  # 被抓到」，而兩者都與那條突變無關。
   cp "$MODULE" "$WORK/deploy-vps-decisions.sh"
   cp "$TEST" "$WORK/test_deploy_vps_decisions.sh"
   cp "$DEPLOY" "$WORK/deploy-vps.sh"
@@ -559,6 +595,7 @@ for entry in "${MUTANTS[@]}"; do
   cp "$PROBE_TEST" "$WORK/test_deploy_smoke_probe.py"
   cp "$LIFECYCLE" "$WORK/profile-lifecycle.sh"
   cp "$LIFECYCLE_TEST" "$WORK/test_profile_lifecycle.sh"
+  cp "$LIB" "$WORK/lib.sh"
 
   case "$label" in
     py:*)
@@ -569,6 +606,10 @@ for entry in "${MUTANTS[@]}"; do
       label="${label#pl:}"
       TARGET="$WORK/profile-lifecycle.sh"
       SRCFILE="$LIFECYCLE" ;;
+    lib:*)
+      label="${label#lib:}"
+      TARGET="$WORK/lib.sh"
+      SRCFILE="$LIB" ;;
     *)
       TARGET="$WORK/deploy-vps-decisions.sh"
       SRCFILE="$MODULE" ;;
@@ -600,6 +641,7 @@ for entry in "${MUTANTS[@]}"; do
   case "$TARGET" in
     *.py)                 TESTCMD=(python3 "$WORK/test_deploy_smoke_probe.py") ;;
     *profile-lifecycle.sh) TESTCMD=(bash "$WORK/test_profile_lifecycle.sh") ;;
+    *lib.sh)              TESTCMD=(bash "$WORK/test_lib_running.sh") ;;
     *)                    TESTCMD=(bash "$WORK/test_deploy_vps_decisions.sh") ;;
   esac
   if "${TESTCMD[@]}" >/dev/null 2>&1; then mut_rc=0; else mut_rc=1; fi
@@ -621,4 +663,4 @@ if [[ "${#missed[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-ok "$caught/$total 個突變全數被抓到，且三份對照組都通過 —— 綁定預設、閘門四態、資源門檻、記憶體狀態的兩個 unknown、context 的 +1、GPU 的每一個靜默降級、架構三層（含「模擬執行整個靜默」與「讀不到就誤擋」兩個方向）、.env 的每條邊界、煙霧測試的四條斷言，以及殘留容器差集的兩個方向都有測試守著"
+ok "$caught/$total 個突變全數被抓到，且四份對照組都通過 —— 綁定預設、閘門四態、資源門檻、記憶體狀態的兩個 unknown、context 的 +1、GPU 的每一個靜默降級、架構三層（含「模擬執行整個靜默」與「讀不到就誤擋」兩個方向）、.env 的每條邊界、煙霧測試的四條斷言、殘留容器差集的兩個方向，以及 Docker 前置的三個原因（含「認不得的輸入不可以被當成沒裝」）都有測試守著"

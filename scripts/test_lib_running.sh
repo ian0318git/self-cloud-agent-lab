@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# 離線測試：lib.sh 的「清單裡有沒有這一行」那組函式（line_in_list／
-# container_running／service_running／model_in_ollama／first_line）。
+# 離線測試：lib.sh 的兩組函式。
 #
-# ── 為什麼這幾個函式需要自己的測試 ──────────────────────────────
+#   A–I  「清單裡有沒有這一行」（line_in_list／container_running／
+#        service_running／model_in_ollama／first_line）
+#   J–K  Docker 前置檢查（docker_verdict／require_docker，#86）
+#
+# ── 為什麼 A–I 這幾個函式需要自己的測試 ──────────────────────
 #
 # 它們存在的唯一理由是**取代** `docker … | grep -qx NAME` 那個會誤判的形狀。
 # 所以這支測試要證兩件事，缺一不可：
@@ -14,11 +17,29 @@
 #      新函式照樣答對。這一條同時是**鑑別力**的證明（在腳本層級的同型案例
 #      隨 #67 進 test_verify_mem0_add_cost_guard.sh）。
 #
+# ── 為什麼 J–K 也需要（#86）────────────────────────────────
+#
+# `require_docker` 原本把「沒裝 Docker」「裝了但 daemon 沒跑」「daemon 在跑
+# 但沒有權限」收成同一句話，而它給的處方是**第四件事**（Codespaces 的
+# docker-in-docker feature）。所以 K 段要證的不是「有印訊息」，而是
+# **三份訊息兩兩不同**（K11）—— 那一條就是缺陷本身，它擋得住「併回一句」。
+# 三個原因各自的處方見 `lib.sh` 與 D-063。
+#
 # ── 它**不**涵蓋什麼 ────────────────────────────────────────
 #
 #   · 真的 docker／compose（全部由假 docker 接掉；真 docker 的冒煙檢查是
 #     跑一次 `bash scripts/status.sh`，不是這支）
 #   · 呼叫端腳本的接線（那是各自的測試，這幾支目前**沒有** —— 見 commit）
+#   · **12 支呼叫 `require_docker` 的腳本沒有任何一支被測到。** K 段測的是
+#     這個函式本身；「每一支都在動到東西**之前**呼叫它」沒有東西守著。
+#     這是已知的缺口，記在 D-063 的無測試聲明裡，不是被忘了。
+#   · 假的訊息字串**在 2026-09-27 對真 docker 核對過了**（本機 29.1.3）。
+#     核對的結果是措辭換了：Docker 29 講「docker API」，舊版講「docker daemon
+#     socket」。判準 `permission denied` 在新舊兩種裡都在，所以分類本來就是
+#     對的；但當時的假字串只有舊的，抓不到「把判準改成那串較長的舊片語」這種
+#     編輯。現在兩種措辭都餵進去（K13–K16）＋一條對應的突變。
+#   · 但**新措辭只在這一台、這一個版本上核對過**：別台機器／別的 Docker
+#     （尤其是 VPS 上套件庫那種版本）若換一種講法，判準仍然只認那個子字串。
 #
 # ── 一個踩過的坑（留著當警訊）──────────────────────────────
 #
@@ -44,6 +65,27 @@ cat > "$WORK/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  # require_docker 用的。三個模式對應三個**原因**，而它們的處方完全不同
+  # （#86）：沒裝、裝了沒跑、跑了但沒權限。
+  #
+  # `down` 與 `denied` 是 2026-09-27 在 **docker 29.1.3 上實測**回來的字串
+  # —— 措辭已經換了：現在講「docker **API**」，舊版講「docker daemon socket」。
+  # （實測時 DOCKER_HOST 指向暫時路徑，這裡換回預設路徑；措辭逐字相同。）
+  # `*_legacy` 是 20.10 前後的舊措辭。
+  #
+  # **兩種措辭必須歸成同一個原因。** 判準是子字串 `permission denied`，不是
+  # 整句。舊措辭裡有一串 `Docker daemon socket`（大寫 D）—— 若有人把判準改成
+  # 去認那串較長的字，**舊機器上完全正確、新機器上把「沒權限」講成「沒在跑」**
+  # （＝叫人去啟動一個已經在跑的 daemon）。那種錯只有餵新措辭才抓得到：
+  # 突變台那一條在舊假字串下會活下來。K13–K16 ＋ 那兩條突變就是釘這件事。
+  info)
+    case "${STUB_INFO:-ok}" in
+      ok)            echo "Server Version: 29.1.3"; exit 0 ;;
+      down)          echo "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory" >&2; exit 1 ;;
+      down_legacy)   echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1 ;;
+      denied)        echo "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock" >&2; exit 1 ;;
+      denied_legacy) echo "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.24/info\": dial unix /var/run/docker.sock: connect: permission denied" >&2; exit 1 ;;
+    esac ;;
   ps)
     case "${STUB_PS:-split}" in
       split)  printf 'ollama\n'; sleep 0.05; printf 'open-webui\nmcp-test-server\n'; exit 0 ;;
@@ -71,6 +113,11 @@ exit 1
 STUB
 chmod +x "$WORK/bin/docker"
 
+# 一個**沒有 docker** 的 PATH。K 段測「根本沒裝」時要用它 —— 假 docker 只
+# 模擬得了「裝了」，模擬不了「不存在」，而「沒裝」正是 #86 從頭到尾沒有被
+# 區分出來的那一個原因。
+mkdir -p "$WORK/nobin"
+
 # 讓 $COMPOSE 指向假 docker（service_running／model_in_ollama 要它）
 COMPOSE="docker compose"
 export PATH="$WORK/bin:$PATH"
@@ -92,6 +139,8 @@ check() {
 yesno() { if "$@" >/dev/null 2>&1; then printf 'yes'; else printf 'no'; fi; }
 # 把兩個字串相不相等翻成 yes／no（用 if，不用 `&&`——後者在 set -e 下容易踩到）
 same() { if [[ "$1" == "$2" ]]; then printf 'yes'; else printf 'no'; fi; }
+# 子字串在不在 → yes／no（`same` 是全等；訊息比對要的是包含）
+contains() { if [[ "$1" == *"$2"* ]]; then printf 'yes'; else printf 'no'; fi; }
 
 echo "A：整行相等 —— 子字串不算（＝ grep -x 的意義）"
 LIST=$'open-webui\nollama\nmcp-test-server'
@@ -169,8 +218,89 @@ check "I3 空字串"                             yes "$(same "$(first_line '')" 
 check "I4 開頭就是換行 → 回空字串"             yes "$(same "$(first_line $'\nolama')" "")"
 
 echo
+echo "J：docker_verdict —— 三個原因不可以收成一個（#86）"
+# 舊版的 require_docker 把這三個收成同一句話，而它給的處方還是**第四件事**
+# （Codespaces 的 docker-in-docker feature）。這一組逐格釘住分辨力。
+check "J1 沒裝 → absent"                     absent        "$(docker_verdict no no no)"
+check "J2 裝了、info 失敗 → not_running"      not_running   "$(docker_verdict yes no no)"
+check "J3 裝了、權限不足 → no_permission"     no_permission "$(docker_verdict yes no yes)"
+check "J4 info 成功 → ok"                    ok            "$(docker_verdict yes yes no)"
+check "J5 info 成功時，殘留的 denied 不算（成功就是成功）" ok "$(docker_verdict yes yes yes)"
+check "J6 沒裝勝過一切 —— 沒有指令就沒得問（即使別的旗標說 ok）" absent "$(docker_verdict no yes yes)"
+echo "   （下面三條同一個家族：認不得的輸入不可以落到任何**正常**的 arm）"
+check "J7 空的 bin **不是** absent（那會對一台可能裝了的機器宣稱沒裝）" unknown "$(docker_verdict "" no no)"
+check "J8 空的 info_ok → unknown"            unknown       "$(docker_verdict yes "" no)"
+check "J9 認不得的 denied → unknown"          unknown       "$(docker_verdict yes no maybe)"
+
+echo
+echo "K：require_docker 端到端 —— 三個原因的**訊息必須不一樣**"
+# 這一組是 #86 的缺陷本體。只斷言「有印訊息」是不夠的：把三句併回一句也會過。
+# 所以 K11 是最承重的一條 —— 它要求三份輸出兩兩不同。
+kabsent=0
+kabsent_out="$( ( PATH="$WORK/nobin"; require_docker ) 2>&1 )" || kabsent=$?
+
+STUB_INFO=down
+export STUB_INFO
+kdown=0
+kdown_out="$( require_docker 2>&1 )" || kdown=$?
+
+STUB_INFO=denied
+export STUB_INFO
+kdenied=0
+kdenied_out="$( require_docker 2>&1 )" || kdenied=$?
+
+STUB_INFO=ok
+export STUB_INFO
+kok=0
+kok_out="$( require_docker 2>&1 )" || kok=$?
+unset STUB_INFO
+
+# 舊措辭（Docker 20.10 以前，講「docker daemon socket」）。**同一個原因、
+# 同一份處方** —— 這兩條走的是完全不同的字串，卻必須落在同一個 arm 上。
+STUB_INFO=down_legacy
+export STUB_INFO
+kdownleg=0
+kdownleg_out="$( require_docker 2>&1 )" || kdownleg=$?
+
+STUB_INFO=denied_legacy
+export STUB_INFO
+kdeniedleg=0
+kdeniedleg_out="$( require_docker 2>&1 )" || kdeniedleg=$?
+unset STUB_INFO
+
+check "K1 沒裝 → 結束碼 1（這是確定的失敗，不是無法判定）" yes "$(same "$kabsent" 1)"
+check "K2 沒裝的訊息講的是「沒有安裝」"        yes "$(contains "$kabsent_out" '沒有安裝 Docker')"
+check "K3 沒裝的訊息**不**講 daemon 連不上（那是另一個原因）" no "$(contains "$kabsent_out" '連不上 daemon')"
+check "K4 daemon 沒跑 → 結束碼 1"             yes "$(same "$kdown" 1)"
+check "K5 沒跑的訊息講的是 daemon 連不上"      yes "$(contains "$kdown_out" '連不上 daemon')"
+check "K6 沒跑的訊息**不**宣稱「沒有安裝」（那會叫人去裝一個已經裝好的東西）" no "$(contains "$kdown_out" '沒有安裝 Docker')"
+check "K7 權限不足 → 結束碼 1"                yes "$(same "$kdenied" 1)"
+check "K8 權限的訊息講的是權限／群組"          yes "$(contains "$kdenied_out" '權限不足')"
+check "K9 權限的訊息**不**宣稱「沒有安裝」"     no  "$(contains "$kdenied_out" '沒有安裝 Docker')"
+check "K10 daemon 正常 → 結束碼 0"            yes "$(same "$kok" 0)"
+# **最承重的一條。** 舊版三種原因共用一句，而它連「裝了沒」都沒區分 ——
+# 這一條就是那個缺陷本身，而且它擋得住「把三句合併成一句」這種改法。
+#
+# 比對的是**整份訊息**，不是行：每句訊息有好幾行，用 `sort -u | wc -l` 數的
+# 話會數到「不重複的行數」（實測 20），那個數字與「有幾種不同的訊息」無關。
+# 第一版就是那樣寫的，而它連三句完全一樣都會回一個大於 3 的數字。
+kdistinct=3
+if [[ "$kabsent_out" == "$kdown_out" ]]; then kdistinct=$((kdistinct - 1)); fi
+if [[ "$kabsent_out" == "$kdenied_out" ]]; then kdistinct=$((kdistinct - 1)); fi
+if [[ "$kdown_out" == "$kdenied_out" ]]; then kdistinct=$((kdistinct - 1)); fi
+check "K11 三個原因的訊息兩兩不同（併回一句就會失敗）" "3" "$kdistinct"
+check "K12 daemon 正常時**不**印任何東西 —— 安靜才是成功" "" "$kok_out"
+# K13／K14 比的是**整份訊息相等**：同一個原因不論 Docker 用哪種措辭講，處方
+# 都必須一模一樣。這比「有印東西」強 —— 它同時擋住「多開一個 arm 給舊措辭」
+# 這種會讓兩邊慢慢分岔的改法。
+check "K13 舊措辭的「連不上」歸成同一個原因（同一份處方）" yes "$(same "$kdownleg_out" "$kdown_out")"
+check "K14 舊措辭的「沒權限」歸成同一個原因（同一份處方）" yes "$(same "$kdeniedleg_out" "$kdenied_out")"
+check "K15 舊措辭的「連不上」也是結束碼 1"                yes "$(same "$kdownleg" 1)"
+check "K16 舊措辭的「沒權限」也是結束碼 1"                yes "$(same "$kdeniedleg" 1)"
+
+echo
 if [[ "$FAILED" -gt 0 ]]; then
   fail "$FAILED 個案例沒過，$PASS 個過"
   exit 1
 fi
-ok "$PASS/$PASS 全過 —— 與被取代的形狀同意義，且在被取代的形狀必錯的輸入上是對的"
+ok "$PASS/$PASS 全過 —— 與被取代的形狀同意義，且在被取代的形狀必錯的輸入上是對的；Docker 前置的三個原因各自有名字（#86）"

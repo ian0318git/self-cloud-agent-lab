@@ -162,13 +162,95 @@ usage_text() {   # <檔案路徑>
        }' "$1"
 }
 
-# ── Docker daemon 檢查 ──────────────────────────────────
+# ── Docker 前置檢查 ─────────────────────────────────────
+#
+# `docker info` 失敗有**三個**原因，而三個的處方完全不同。這條判斷只寫在
+# 這裡（不是每個呼叫端各判一次）—— 寫兩次就會有一邊寫錯（#93／D-062 §三）。
+#
+# 舊版把它們收成一句「無法連線 Docker daemon」，然後給了一個**第四件事**的
+# 處方（Codespaces 的 docker-in-docker feature）。**一句訊息裡有兩個不同的
+# 處方，等於沒有處方**（#93／D-062 §二），而這裡更糟：它連「裝了沒」都沒有
+# 區分 —— 在一台根本沒有 Docker 的機器上，它會說你「連不上 daemon」，
+# 於是使用者去查一個不存在的服務。
+#
+# 回 arm 的名字，不回句子。**刻意不寫行號**：行號會走（D-062 §八）。
+# 參數：<有沒有 docker 這個指令> <docker info 成功嗎> <失敗訊息像不像權限問題>
+docker_verdict() {
+  local bin="${1:-}" info_ok="${2:-}" denied="${3:-}" v
+  # 認不得的輸入要**大聲**，不可以落到任何一個正常 arm。空的 `bin` 若落進
+  # `absent`，這一支就會對著一台可能裝了 Docker 的機器宣稱「沒有安裝」——
+  # 那正是這個家族的病（把讀不到摺進不在）。
+  for v in "$bin" "$info_ok" "$denied"; do
+    if [[ "$v" != "yes" ]] && [[ "$v" != "no" ]]; then printf 'unknown'; return 0; fi
+  done
+  # 順序是刻意的：`bin` 比 `info_ok` 更根本（沒有指令就沒得問）。
+  if [[ "$bin" != "yes" ]]; then printf 'absent'; return 0; fi
+  if [[ "$info_ok" == "yes" ]]; then printf 'ok'; return 0; fi
+  if [[ "$denied" == "yes" ]]; then printf 'no_permission'; return 0; fi
+  printf 'not_running'
+}
+
+# 前置檢查：Docker 要在，而且連得上。
+#
+# **刻意只檢查、不安裝。** 在一台別人的機器上跑 `curl | sh` 裝 Docker 是這支
+# 腳本不該自己決定的事（雲廠商多半提供一鍵 Docker 映像），而 repo 裡已經有
+# 同一個形狀的先例：GPU runtime 拿不到時也是**硬擋 ＋ 印出處方**，不是自動裝
+# （`deploy-vps.sh` 的 `blocked`，D-056 §四：「一個硬擋如果不附處方，它就只是
+# 把問題丟回給人。」）。完整理由見 D-063。
 require_docker() {
-  if ! docker info >/dev/null 2>&1; then
-    fail "無法連線 Docker daemon。"
-    fail "在 Codespaces 中請確認已啟用 docker-in-docker feature；本機請確認服務已啟動。"
-    exit 1
+  local bin="no" info_ok="no" denied="no" msg="" verdict
+  if command -v docker >/dev/null 2>&1; then
+    bin="yes"
+    if msg="$(docker info 2>&1)"; then
+      info_ok="yes"
+    elif [[ "$msg" == *"permission denied"* ]]; then
+      denied="yes"
+    fi
   fi
+
+  verdict="$(docker_verdict "$bin" "$info_ok" "$denied")"
+  case "$verdict" in
+    ok) : ;;
+    absent)
+      fail "Docker：找不到 docker 這個指令 —— 這台機器沒有安裝 Docker。"
+      echo "  這些腳本的前提是 Docker 已經裝好而且執行中；它們刻意不替你安裝。"
+      echo
+      echo "  裝好它（Debian/Ubuntu，需要 root）："
+      echo "    curl -fsSL https://get.docker.com | sh"
+      echo "    sudo usermod -aG docker \$USER   # 之後要重新登入"
+      echo
+      echo "  驗證：docker info 要看得到 Server Version，然後重跑。"
+      echo
+      echo "  （若你自己有既定的安裝方式 —— 套件庫、雲廠商的映像、rootless ——"
+      echo "   就用那個。上面的官方腳本只是其中一條路。）"
+      exit 1 ;;
+    not_running)
+      fail "Docker：docker 指令在，但連不上 daemon —— 「裝了」與「在跑」是兩件事。"
+      echo "  這裡卡住的是後者（或 socket 的位置不對）。"
+      echo
+      echo "  啟動它："
+      echo "    sudo systemctl start docker"
+      echo
+      echo "  Codespaces：確認 docker-in-docker feature 已啟用。"
+      echo "  驗證：docker info 要看得到 Server Version，然後重跑。"
+      exit 1 ;;
+    no_permission)
+      fail "Docker：連得上 docker.sock 但權限不足 —— 你這個使用者不在 docker 群組裡。"
+      echo "  把自己加進去，然後**重新登入**（群組成員資格在登入時就決定了）："
+      echo "    sudo usermod -aG docker \$USER"
+      echo
+      echo "  驗證：docker info 要看得到 Server Version，然後重跑。"
+      echo
+      echo "  （只想讓目前這個 shell 生效：newgrp docker。若加了群組仍然被拒，"
+      echo "   那是別的原因 —— rootless Docker 的 socket 擁有者、或 SELinux／"
+      echo "   AppArmor，這兩種要看發行版的文件，上面的指令解不了。）"
+      exit 1 ;;
+    *)
+      # 認不得的 arm 不可以靜默放行 —— 那正是 #93 的缺陷本體（D-062 §四）。
+      # 3 ＝「這支腳本自己壞掉」，不是環境（D-018 的結束碼映射）。
+      fail "Docker：前置檢查回了一個認不得的值「$verdict」—— 這是 lib.sh 自己壞掉，不是環境。"
+      exit 3 ;;
+  esac
 }
 
 # ── 載入 .env 並確保必要變數存在 ────────────────────────
