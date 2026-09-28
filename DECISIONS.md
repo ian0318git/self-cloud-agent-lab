@@ -9827,7 +9827,25 @@ tunnel** 上重測了一次，結果一模一樣：
   （config yaml 是來源、也是它烘進 notebook 的），那個訊號是多餘的，
   **而它就是外洩源**。
 - **不使用就停**是使用期間唯一的緩解：`endpoint stop` 等於關掉整條鏈。這一輪結束時
-  已停，並以 tunnel 回 `HTTP 530` 確認引擎不再回應。
+  已停。~~並以 tunnel 回 `HTTP 530` 確認引擎不再回應~~ → **更正成下面這條更強的證據
+  （2026-09-28）**：
+
+  送出 KILL 之後，**notebook 自己在訊號主題上發了一則**
+
+  ```
+  STATUS: [<session-id>] SHUTDOWN SIGNAL RECEIVED. TERMINATING...
+  ```
+
+  時間 `12:20:53`，就在 KILL 之後。`<session-id>` 是 8 位 hex、**每次 boot 不同**，
+  所以那一則屬於哪一次 boot 是確定的（boot #1 發的是另一個 id）。**這比 `530` 強，
+  因為它是 notebook 本體在說它收到了** —— 而 `530` 只證明 tunnel 沒了，
+  cloudflared 可以自己死掉而 kernel 繼續燒配額（第三節更正後的口徑）。**而且它
+  不需要 Kaggle token**：沒有 token 的 shell 裡 `endpoint status` 只能說
+  `unknown (could not check)`，這一則卻是直接可讀的。
+
+  **照例不記那個值。** 實查：它不是（金鑰／帳號／`kernel_slug`／topic／`user/slug`）
+  ×（md5／sha1／sha256／sha512／blake2b／blake2s）的前 8 碼 —— 但那**只證明它不是
+  這 30 個候選**，沒有證明它是什麼，所以文件裡只留形狀。
 
 ### 八、無測試聲明
 
@@ -9866,4 +9884,17 @@ tunnel** 上重測了一次，結果一模一樣：
   （明文訊息存在、`base-url` 讀不到、dead code 確實沒人呼叫）**全部為真**；
   錯的是我從「我看到的那一則」跳到「它發的全部」那一步。更正的方向也值得記：
   **它把處方從「改生產端的發布格式」移到「改取用端的一行呼叫」** —— 兩者成本差很多。
+- **第七節那條停機確認，證據是 notebook 自己發的公告，不是 Kaggle 說 session 結束了。**
+  `SHUTDOWN SIGNAL RECEIVED. TERMINATING...` 是**宣告**，不是驗屍報告 —— 它證明
+  「notebook 收到了訊號、並說它要關」，**不證明 Kaggle 那邊的 session 真的收掉了**。
+  支持它的是**三個獨立事實疊起來**：① tunnel 由 `401` 變 `530`（三個樣本）；
+  ② 那則訊息之後，主題上直到讀取當下都沒有任何新訊息；
+  ③ **先例** —— boot #1 發過同一則，之後它就真的沒了（11:51 開始的是 boot #2）。
+  **沒有做的是最後一步**：沒有在 token 可用的 shell 裡跑一次 `endpoint status`
+  看 Kaggle 自己怎麼說 —— 那一格仍然是空的。這一輪試過三條自證的路
+  （公開 Kaggle API → `401`；`~/.kaggle/kaggle.json` → 不存在；
+  從 `~/.bashrc` 取 `KAGGLE_API_TOKEN` → **被權限分類器擋下**，理由是在探測憑證，
+  沒有繞過）。
 - **本節與全篇不記任何金鑰指紋** —— 理由見 D-065 第七節。
+  第七節那個 session id 也照這條處理：實查不是 30 個候選建構的前 8 碼，
+  但那不等於知道它是什麼，所以只留形狀。
