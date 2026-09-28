@@ -581,6 +581,10 @@ bash scripts/up.sh
 | `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run` | 檢查引擎是否還把 API 金鑰廣播到那條公開的 ntfy 主題、以及補丁還套不套得上。不做任何變更 |
 | `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh` | 停掉那則廣播 —— 一個檔案 `engine/engine.py`，它是 notebook 產生器 **base64 嵌入的生產者**（`master_build_notebook.py:331`）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
 | `python3 scripts/test_endpoint_apikey_broadcast_fixes.py ROOT` | 上面那支的行為驗證 —— 對捕獲的傳輸層**真的執行** `_startup()`，斷言送出的 POST 內容不含金鑰，外加「刪掉廣播不會卡住 boot」的 AST 守衛。**對原始檔是預期要失敗的**（D-067） |
+| `bash scripts/apply-endpoint-tunnel-url-privacy.sh --dry-run` | 檢查 tunnel 網址是否還發布到那條公開的 ntfy 主題上、以及補丁還套不套得上。不做任何變更 |
+| `bash scripts/apply-endpoint-tunnel-url-privacy.sh` | 把那個網址從主題上拿下來 —— 這次是**三個檔案**（`scripts/master_build_notebook.py`、`endpoint/core.py`、`endpoint/commands.py`），所以釘六個雜湊、共用一個備份章節。網址不再被發布，改成從**Kaggle kernel log** 讀回來，而讀它需要 Kaggle 憑證。⚠ **順序有關係：ntfy 修正 → stop 修正 → 這一支**，而對前兩支任一執行 `--revert` 會**無聲地**把這一支拆掉。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
+| `python3 scripts/test_endpoint_tunnel_url_privacy.py ROOT` | 上面那支的行為驗證 —— 用假物件驅動新的日誌讀取器，把 `found`／`absent`／`unknown` 釘成彼此互異（後兩者塌在一起正是 D-060 的缺陷），斷言 `get_tunnel_url` 已經沒有呼叫點，並讀產生器吐出的字串。它還會**重算切 A 驗證器的雜湊**：這一刀如果碰過它，那一項就會紅。**對原始樹是預期要失敗的**（D-068） |
+| `python3 scripts/probe_kernel_log_url.py` | 對真的 Kaggle API 問：日誌裡到底有沒有一個讀得出來的 tunnel 網址 —— 這是切 B 賴以成立的前提。**永不印日誌內容、網址、權杖或主題**：只印狀態碼、布林、計數，以及網址的**單向指紋**（供兩次執行比對而不揭露任何一次）。結束碼 `0` 找到了、`1` 讀到了但還沒有網址、`2` 根本讀不到、`3` 用法錯誤 |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 

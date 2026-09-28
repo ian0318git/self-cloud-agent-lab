@@ -10045,13 +10045,20 @@ apply 腳本因此空跑時印出 nlink 與同 inode 的其他路徑當預警。
 
 | | 內容 | 狀態 |
 |---|---|---|
-| **B** | tunnel 網址改走 Kaggle kernel log（`stream_logs` 已存在） | 未動 —— **這才是關鏈的那一刀** |
+| **B** | tunnel 網址改走 Kaggle kernel log（~~`stream_logs` 已存在~~ → **更正：套件裡沒有這個東西**。唯一的 `stream_logs` 是 `VPSClient.stream_logs`（`core.py:1244`），它 HTTP 去 tail 引擎的 `llama_server.log`，**與 Kaggle 日誌無關**；讀取器是新建的。D-068 §二） | **已落地**（D-068，**未 push**）—— 原本記的「未動」已不成立 |
 | **C** | 主題的推導輸入不能是公開識別碼（`core.py:554-556`） | 未動 |
 | **第四刀** | 把 `/v1/apikey` 移出免認證清單（`engine.py:1624`） | **未拍板。** 代價是結構性的：`core.py:1161-1163` 的 session 標頭帶的是**快取**金鑰，所以「帶錯金鑰」必然 401 —— 而自癒路徑存在的唯一理由正是「帶錯金鑰」，自癒因此在構造上失效 |
 
 **B 被一個未定案的問題約束**：WebUI 的落點會決定「新網址怎麼送到它那裡」——
 而那正是 B 要拆掉的公開主題正在擔任的角色。使用者已裁示 WebUI **先不動，
 等三刀做完**。
+
+~~**上面這段的前提是錯的（2026-09-29 更正，D-068 §二）。**~~ 實際去讀
+`scripts/connect-endpoint.sh` 就會看到網址是**人手打的 `--url`**（`:54-55`），
+**repo 裡沒有任何東西讀那條主題去接 WebUI**。主題從來不是 WebUI 的傳遞路徑，
+**人是**。所以那個未定案**不構成 B 的前置**，而「先不動 WebUI」與 B 無關 ——
+B 因此可以在 WebUI 落點未定的情況下單獨做完。這段話留著，因為它是一個
+「把不相干的未定案當成前置」的實例。
 
 ⚠️ **D-066 第七節有一句話是陷阱，這裡留個路標。** 那句「不改 `endpoint-vps`
 這個套件」**不是**「不准用補丁」—— D-050／D-060 就是改了它，而**這一刀改的
@@ -10075,3 +10082,300 @@ apply 腳本因此空跑時印出 nlink 與同 inode 的其他路徑當預警。
 **指紋與雜湊**：`PRISTINE_SHA=871b4cab…`、`PATCHED_SHA=68dfa5a2…`（完整值釘在
 apply 腳本裡）。依 D-065 第七節，本節不記任何**金鑰**指紋 —— 這兩個是**檔案**
 雜湊，不是憑證。
+
+## D-068：切 B —— tunnel 網址離開那條可推導的公開主題
+
+**2026-09-29。** D-067（切 A）與本節（切 B）都是 D-066 第七節拍板的三刀。A 移除的是
+「**不必先知道網址**、只要知道那個公開帳號就能取得金鑰」那一段；B 移除的是
+「**網址本身出現在一條由公開帳號推導出來的主題上**」。D-067 第二節自己寫著
+「**真正關鏈的是 B**」—— 這一節就是那一刀。實作已完成、**未 push**。
+
+**驗證重心與 D-067 相反。** D-067 問的是「產物裡有沒有那一則」，一個可以完全離線
+回答的問題。B 多了一樣 A 沒有的東西：**它引入一條新的讀取路徑，而那條路徑的正確性
+只有真的打過才算數** —— 包括一個靠讀程式碼猜不出來的標頭名稱。所以本節第四節有
+一大半是**對著真 API 量出來的**，不是對著假物件。
+
+### 一、這一刀砍的是鏈上的哪一段
+
+D-066 那條五段鏈，重列一次並標出這一刀：
+
+| # | 段 | 這一刀 |
+|---|---|---|
+| 1 | Kaggle 使用者名稱是公開的 | 不動（動不了） |
+| 2 | 主題名由該名稱推導（`endpoint/core.py` 的主題推導處） | 不動（**切 C**） |
+| 3 | 那條公開主題上有明文的網址（A 之前還有明文的金鑰） | ← **砍掉了** |
+| 4 | `GET <網址>/v1/apikey` 不帶權杖回 200（免認證清單） | 不動（**未拍板的第四刀**） |
+| 5 | 完整的 GPU 使用權 | —— |
+
+**第 3 段上原本有兩則訊息，A 砍前一則、B 砍後一則的值**：`APIKEY:<金鑰>` 與
+`TUNNEL ACQUIRED: <網址>`。兩刀的差別不在同一段上做兩次，而在**取得成本**：
+第 3 段的取得成本是「知道公開帳號」（零），第 4 段的是「先拿到網址」。
+B 讓第 4 段的門檻變成**需要 Kaggle 憑證**。
+
+### 二、先更正三個前提（其中兩個是 D-067 寫錯的）
+
+**（1）`stream_logs` 不存在。** D-067 第七節寫「tunnel 網址改走 Kaggle kernel log
+（`stream_logs` 已存在）」—— 那是錯的。套件裡唯一的 `stream_logs` 是
+`VPSClient.stream_logs`（`core.py:1244`），它用 HTTP 去 tail **引擎的
+`llama_server.log`**，**與 Kaggle 日誌無關**。Kaggle 日誌的讀取器**不存在，是新建的**。
+D-067 那一列已就地畫線更正。
+
+**（2）網址今天已經在 kernel log 上了 —— 所以 B 不是「搬」，是「停止送上主題」。**
+notebook 產生器的 `signal()` 在 POST 到主題**之前**先 `print(m, flush=True)`。
+所以 B 是「**不再把它送上主題，改從日誌（它本來就在那裡）讀回來**」。
+這個差別不是修辭：如果網址不在日誌上，B 就要多一次寫入，而寫入點會是另一個
+可能失敗的地方。
+
+**（3）「WebUI 落點未定」不是 B 的前置。** D-067 第七節說 B 被那個未定案約束。
+實際去讀 `scripts/connect-endpoint.sh` 就會看到網址是**人手打的 `--url`**（`:54-55`），
+**repo 裡沒有任何東西讀那條主題去接 WebUI**。主題從來不是 WebUI 的傳遞路徑，
+**人是**。已在 D-067 就地更正。
+
+#### 一個關鍵的不對稱（B 之所以只要動一個檔案的理由）
+
+| 發布者 | 會 print 到 kernel log 嗎？ | 會 POST 到主題嗎？ |
+|---|---|---|
+| notebook 的 `signal()` | **會** | 會 |
+| **引擎的 `_broadcast()`**（`engine/engine.py:298`） | **不會** —— 只有 `requests.post` | 會 |
+
+**所以 `APIKEY:` 從來沒進過 kernel log，而 `TUNNEL ACQUIRED:` 有。** 這正是 B 只動
+notebook 產生器、**引擎端一行都不用碰**的結構性理由。
+
+### 三、設計
+
+**發佈端（`scripts/master_build_notebook.py`，3 處）**
+
+| 現在 | 改成 |
+|---|---|
+| `broadcast(tunnel_url)`（base64 `WS:` 那則） | **刪除** |
+| `def broadcast(url):` | **刪除**（唯一呼叫點就是上面那行） |
+| `signal(f'TUNNEL ACQUIRED: {tunnel_url}')` | 拆成兩行（見下） |
+
+```python
+print(f'TUNNEL ACQUIRED: {tunnel_url}', flush=True)   # 網址 → 只進 kernel log
+signal('TUNNEL ACQUIRED:', topic_only=True)           # 值為空的訊號 → 只進主題
+```
+
+`signal()` 新增 `topic_only=False` 參數，**只影響要不要 `print`，不動 POST**。
+
+⚠️ **為什麼一定要走 `signal()` 而不是自己送一次請求**：`signal()` 身上有 D-050 的
+**限流保護**（`SIG_MIN_GAP`）。`TUNNEL ACQUIRED` 是一次性訊號，而 boot **靠它**才
+知道成功 —— 繞過 `signal()` 等於把 D-050 修好的東西拆掉。值雖然空了，
+**它的不可遺失性沒有變**。
+
+**讀取端（`endpoint/core.py`，新函式）**
+
+`get_kernel_log_url(config) -> tuple[str, str | None]`，`state ∈ {"found", "absent", "unknown"}`。
+
+**三態是刻意的**：D-060 的教訓是「把讀不到摺進壞掉」。`absent`（問到了、日誌裡
+還沒有網址）與 `unknown`（根本問不到）**必須分開** —— 前者是「再等一下」，
+後者是「你沒給我憑證」。順手把 `extract_tunnel_url_from_log`（零呼叫點的 dead code）
+那段抽成 `_last_cf_url(text)`，讓新舊共用同一個定義。
+
+**接線（3 處）**
+
+| 位置 | 現在的來源 | 改成 |
+|---|---|---|
+| `core.py get_tunnel_url` | 讀 ntfy 主題 | **整個移除**（留著就是留著洞） |
+| `commands.py` boot 等待迴圈 | 從訊號 `partition("https://")` | 呼叫新函式；**保留 `TUNNEL ACQUIRED:` 字面值與 `break`** |
+| `commands.py` 逾時分支 | `get_tunnel_url(poll=True)` | 呼叫新函式（容易漏掉的第二條取得路徑） |
+| `core.py resolve_tunnel_url` | `get_tunnel_url` | 呼叫新函式；`display_endpoint` 跟著自動改到 |
+
+`resolve_tunnel_url` 把三態**收斂成「網址或 None」**，因為它的呼叫者**只拿來顯示**；
+需要**據以行動**的呼叫者必須直接呼叫 `get_kernel_log_url()` 並保留三態。這個分工
+寫在它的 docstring 裡，因為收斂本身是安全的、被誤用才是危險的。
+
+**三態在 boot 的行為**（依裁示「算成功，但要講清楚」）：`found` 照舊印出並快取；
+`absent` 與 `unknown` 都**讓 boot 成功**，但各印各的訊息（不混成一句），
+並指向 `endpoint base-url`。
+
+**引擎端：不動（兩個刻意的決定）**
+
+- **`_broadcast_tunnel` 留著。** 它在 `start_tunnel()` 裡被呼叫，而 `start_tunnel()`
+  **沒有可達的呼叫點**，所以發不出東西。**改它會動到切 A 釘死的雜湊，讓 D-067 的
+  補丁失效** —— 改用驗證器把它釘住。
+- **`GET /tunnel` 維持免認證。** 要拿到網址才打得中，**不是獨立的洩漏**。記錄，不改。
+
+### 四、驗證
+
+**（a）對著真 API 量（2026-09-28，對一個**已結束**的 kernel；本輪未重跑 —— 見第六節）**
+
+| 檢查 | 結果 |
+|---|---|
+| token 存在且 `get_kaggle_token()` 讀得到 | ✅ 37 字元、`KGAT_` 開頭 |
+| `ListKernelSessionOutput` ＋ `Authorization: Bearer` | ✅ **HTTP 200** |
+| 回傳 JSON 的鍵 | ✅ **`['files', 'log']`** —— `log` 如設計假設存在 |
+| `ListKernelSessionOutput` ＋ `X-Kaggle-Authorization` | ❌ **HTTP 403** ← **必須用 `Authorization`** |
+| 正向對照：日誌裡有 `ENGINE LAUNCHED` | ✅ 是（證明讀到的是真引擎日誌，不是空殼） |
+| `_CF_URL_PATTERN` 命中數 | ✅ **1 個** —— **這就是 B 的核心主張** |
+| **負向對照**：不存在的 slug | ✅ **HTTP 403** → 讀取器回 `unknown`，**不是 `absent`** |
+| **負向對照**：不帶 token | ✅ **HTTP 403** → `unknown` |
+| 日誌長度 | 89,155 字元（89,329 bytes，**不是整數上限**） |
+| 日誌是否被砍頭 | ✅ **沒有** —— 開頭在行邊界 |
+| 網址在日誌中的位置 | 76.5%（近尾端） |
+| 日誌時間範圍 | 2026-09-28 01:54:02 → 02:19:38 |
+
+**兩組負向對照當場證實三態設計是免費的**：Kaggle 對「slug 不存在」與「沒帶權杖」
+**都回 403**，所以照上面寫，`unknown` 是自然結果，不需要特判。
+
+**（b）假物件驅動的讀取器行為（可離線重跑）** —— 15 個案例，含三態互異的斷言：
+
+| 案例 | 期望 |
+|---|---|
+| 沒有憑證 / HTTP 403 / HTTP 500 / 網路錯誤 | `unknown` |
+| 200 ＋ 日誌有網址 | `found` |
+| 200 ＋ 日誌沒網址 / 回應少了 `log` 鍵 | `absent` |
+| 200 ＋ 日誌裡**兩個**網址 | 取**最後**一個 |
+
+外加兩個結構斷言：標頭必須是 `Authorization`、端點必須以 `ListKernelSessionOutput` 結尾。
+
+**（c）靜態斷言 ＋ 切 A 的獨立性**
+
+`scripts/test_endpoint_tunnel_url_privacy.py` 的第一個檢查是**切 A 驗證器的雜湊**：
+它必須逐位元未變，而且對這棵樹仍然通過。**這是「不碰它」的實證** —— 不是說「我沒改」，
+而是「它的 bytes 與它對這棵樹的結論都還是原來那個」。
+
+| | 已修補 | 原始樹 |
+|---|---|---|
+| 驗證器結束碼 | **0** | **1** |
+| 通過的檢查 | 22 | 4（都是守衛） |
+| 失敗的檢查 | 0 | **8** |
+
+兩條**守衛**（在兩個方向上都要綠）：`get_tunnel_url` 不再有任何定義或呼叫點；
+`_broadcast_tunnel` 仍然沒有 `start_tunnel` 以外的呼叫者、而 `start_tunnel`
+仍然沒有呼叫者。**第二條是那道「上了膛的槍」的守衛**：上游哪天把 `start_tunnel()`
+接回去，網址就會回到公開主題上，這條會在那一天變紅。
+
+**（d）烘驗 —— 真的跑產生器，兩個方向**
+
+| | 未修補 | 已修補 |
+|---|---|---|
+| `broadcast(` 出現在產生的 cell 裡 | True | **False** |
+| base64 `WS:` 那則的痕跡 | True | **False** |
+| `topic_only` 出現在產生的 cell 裡 | False | **True** |
+| **正向對照** `TUNNEL ACQUIRED` 仍在 | True | **True** |
+| **正向對照** canary 金鑰被烘進 notebook | True | True |
+| **守衛** `APIKEY:` 不在產生的 cell 裡（切 A） | False | False |
+| 所有 code cell 都能編譯 | ✓ | ✓ |
+| cell source 總長 | 260,406 字元 | 260,580 字元 |
+
+canary 那一列是**必要的正向對照**：少了它，一個「產生器根本沒收到金鑰」的空跑
+會與成功的烘製長得一模一樣。金鑰用的是**假 canary**，不是真金鑰 ——
+整個流程從頭到尾沒有任何真實機密落地。
+
+**（e）突變台 16/16**（14 個必須變紅、2 個必須維持綠燈）。突變台的**編輯一律
+以 AST 界定在一個頂層函式內**，並斷言錨點在該範圍內唯一 —— 這一條紀律是被
+一個逃掉的突變逼出來的：`"Authorization": f"Bearer {token}",` 在 `core.py` 裡
+出現**兩次**（`resolve_kaggle_username` 也用同一行），未限定範圍的取代**改錯了函式**，
+然後回報「驗證器瞎了」。**驗證器是對的，壞掉的是突變台。**
+
+兩個**非突變**（必須維持綠燈）各是一個判斷：
+`signal()` 恢復無條件 `print` 只會多一行雜訊（唯一那個 `topic_only=True` 的呼叫帶
+空值），而 `start_tunnel` 不再呼叫 `_broadcast_tunnel` 是**更安全**的樹 ——
+一個在這裡變紅的驗證器是在懲罰更安全的版本。
+
+**（f）`test_usage_text.sh` 115/115 → 121/121.** 新腳本有 `-h|--help)`，會被自動收編，
+所以 `--help` 分支必須逐字等於推導出來的檔頭（D-050 立的規矩）。新增的 6 項全部來自
+這支腳本。
+
+### 五、坑
+
+**（1）補丁疊放的順序，而且 revert 會安靜地拆掉這一刀。**
+`apply-endpoint-ntfy-fixes.sh` 打的正是 `master_build_notebook.py`；
+`apply-endpoint-stop-fixes.sh` 打的是 `endpoint/core.py` ＋ `endpoint/commands.py`
+—— **與 B 完全同一組檔案**。所以 **B 的補丁是對「已套 ntfy ＋ stop」的內容建的**，
+順序必須是 **ntfy → stop → B**，而且 `apply-endpoint-stop-fixes.sh --revert`
+會**無聲地**把 B 拆掉（B 的雜湊閘門會在**下一次**跑 B 時才發現）。
+B 的 apply 腳本檔頭明講這件事，並且拒絕在雜湊對不上時動手。
+
+**（2）`topic_only` 這個名字是個陷阱，而它對這一刀**不是**承重的。**
+`topic_only=True` **仍然會把完整訊息 POST 到主題**（它只是不 `print`）。讓網址離開
+主題的是**空的值**，不是這個參數。我保留了裁示的名字（「保留原名但值留空」），
+但把名字的誤導性記在這裡。守衛那一格由檢查 E2 看著：**那個危險的形式**
+（`signal(f'TUNNEL ACQUIRED: {tunnel_url}')`）一出現，驗證器就紅。
+
+**（3）一個被推翻的結論（誠實紀錄）。** 我一開始看到 `'APIKEY:' in log == False`，
+**以為這是切 A 在生產上生效的證據。不是。** 兩個理由都成立：那份日誌比切 A 早；
+而且**引擎的 `_broadcast()` 根本不 print**，所以就算在切 A 之前，`APIKEY:` 也從來
+不會出現在 kernel log 裡。**教訓：`APIKEY:` 的洩漏面只有 ntfy 主題，用 kernel log
+觀測不到它的死活。** D-067 的效果只能用主題或驗證器確認。
+
+**（4）硬連結。** 與 D-067 同一個坑（`uv` 快取硬連結，`patch` 會打斷它，
+重裝會從舊內容還原、補丁靜默消失）。B 的三個檔案都在這個結構底下，apply 腳本
+沿用同樣的 nlink 預警。
+
+### 六、無測試聲明（CLAUDE.md）
+
+- **「kernel 還在跑時讀不讀得到日誌」沒有量過** —— 零 GPU 路線下最主要的空白。
+  `ListKernelSessionOutput` 是持久化 blob（SDK 的 `kernels_logs_stream` 會依
+  `Content-Type` 分岔成 SSE 或 blob），**跑動中可能讀不到**。這一格直接決定
+  **boot 之後能不能自己拿到網址**。
+- **第四節（a）那一整張表是 2026-09-28 那一輪量的，這一輪沒有重跑。** 原因是
+  **憑證不在非互動 shell 裡**：`KAGGLE_API_TOKEN` 住在 `~/.bashrc:142`，而
+  `~/.bashrc:6-9` 是標準的「非互動就 return」守衛。所以 `scripts/probe_kernel_log_url.py`
+  的**活路徑**（真的打 API）本輪沒有被執行過，只有它的純函式與無憑證路徑被測過。
+  **這正是那個搬家之所以是前置的原因。**
+- **長時跑的尾窗風險**：日誌**沒有**被砍頭（已量），但日後**很晚才呼叫
+  `endpoint base-url`** 時，若 Kaggle 哪天改成只回尾部 N KB，網址（本次樣本中
+  位於 76.5%）可能被推出窗外。**今天不是這樣，但這是有時效的觀測** ——
+  探針的 docstring 因此**刻意不做「有沒有被砍頭」的判斷**：那需要日誌真正的行格式，
+  而一個用猜格式的布林值會在**它最該抓到的那個情況上**回 False
+  （被切斷的行往往就是以數字開頭）。
+- **`resolve_kaggle_username(token)` 在權杖有效的情況下回 `None`**（既有缺陷，
+  `core.py:761`）。它先後試兩種標頭、環境變數、`kaggle.json`、最後叫 SDK
+  `authenticate()`，**五條路全失敗**。權杖本身沒問題（同一輪 200 了）。
+  **成因未查，不阻擋 B**（B 的讀取器用 `config.kernel_id`，不經過它）。
+- **探針與烘驗都不證明真 boot 的行為。** 後者要一次真 boot，會燒 GPU 配額 ——
+  本次沒有做。
+- **`test_usage_text.sh` 只涵蓋「`--help` 逐字等於檔頭」，不涵蓋訊息內容為真。**
+- **憑證前置（使用者動作，不是我的）**：搬完 `~/.kaggle/kaggle.json`（`chmod 600`，
+  需要 `username` ＋ `key` 兩個欄位，`get_kaggle_token()` 讀 `key`）之後，
+  非互動 shell 與 cron 才讀得到，B 的讀取器才在各種情境下都可靠。
+  **值我從頭到尾沒有碰過、也沒有印過。**
+
+### 七、還沒做的
+
+| | 內容 | 狀態 |
+|---|---|---|
+| **C** | 主題的推導輸入不能是公開識別碼 | 未動 |
+| **第四刀** | 把 `/v1/apikey` 移出免認證清單 | **未拍板**（代價是結構性的，見 D-067 §七） |
+| **`resolve_kaggle_username`** | 有效權杖卻回 `None` | 既有缺陷，成因未查 |
+| **真 boot 觀測** | 「跑動中讀得到日誌嗎」 | 需一次真 boot，會燒配額 |
+
+**B 落地之後，鏈上剩下的兩個環節都還在**：主題名仍由公開帳號推導（C），
+而 `GET /v1/apikey` 仍免認證（第四刀）。**但第 3 段上的網址與金鑰都不在了** ——
+也就是說，**要走到第 4 段，現在得先弄到 Kaggle 憑證**。這是 B 的全部價值，
+不多也不少。
+
+**一個 B 沒有解決、而 C 也不會解決的東西**：`GET /tunnel` 維持免認證。
+它需要網址才打得中，所以它不是獨立的洩漏 —— 但它是**第 4 段後面的另一扇門**。
+
+### 八、座標
+
+| 位置 | 內容 |
+|---|---|
+| `endpoint/core.py:1131` | `_CF_URL_PATTERN` —— **既有**，補丁沒動它；新舊兩個讀取器共用同一個定義 |
+| `endpoint/core.py:1134` | `_last_cf_url()`（由 dead code 抽出） |
+| `endpoint/core.py:1140` | `get_kernel_log_url()` —— 本刀的讀取器 |
+| `endpoint/core.py:1101` | `resolve_tunnel_url()` —— 三態收斂成顯示用 |
+| `endpoint/commands.py:1284` | boot 等待迴圈的第一條取得路徑 |
+| `endpoint/commands.py:1403` | 逾時分支（容易漏掉的第二條） |
+| `scripts/master_build_notebook.py:1145-1146` | 拆成兩行的發佈點 |
+| `scripts/master_build_notebook.py:423` | `signal(..., topic_only=False)` 的定義 |
+| `engine/engine.py:310` | `_broadcast_tunnel`（**刻意不動**，由驗證器釘住） |
+| `engine/engine.py:1313` | `start_tunnel`（沒有可達呼叫點，否則那道槍就上膛了） |
+| `scripts/probe_kernel_log_url.py` | 產品化的探針 —— **永不印日誌、網址、權杖或主題** |
+| `scripts/apply-endpoint-tunnel-url-privacy.sh` | 三部曲之套用腳本（6 個雜湊、3 個檔案） |
+| `scripts/test_endpoint_tunnel_url_privacy.py` | 三部曲之驗證器 |
+
+**四個位置的座標是「已修補樹」的行號**，與 D-067 第八節同一慣例。
+
+**雜湊**（完整值釘在 apply 腳本裡）：
+
+| 檔案 | 原始 | 已修補 |
+|---|---|---|
+| `scripts/master_build_notebook.py` | `b416bd47…` | `a0449014…` |
+| `endpoint/core.py` | `2e8692b1…` | `8c8afbb9…` |
+| `endpoint/commands.py` | `d8b7cd81…` | `8d6f2ade…` |
+
+依 D-065 第七節，本節不記任何**金鑰**指紋 —— 這六個是**檔案**雜湊，不是憑證。

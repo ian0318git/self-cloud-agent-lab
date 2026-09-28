@@ -41,6 +41,7 @@ $ bash scripts/probe-openai.sh
 | 速度、可用 VRAM、2×T4 裝得下多大的模型 | **未量測** |
 | tunnel 能否撐過一整個 session | **未量測** |
 | 修補後的產生器撐得過一次真的 `endpoint boot` | **未驗證** —— 補丁是對模擬的 ntfy 驗證的，不是對真的 Kaggle 跑 |
+| kernel **還在跑的時候**讀不讀得到日誌 —— 新的網址讀取器實際上賴以為生的前提 | **未量測** —— 唯一一次讀取是對**已結束**的 kernel 做的（D-068） |
 | 佈署的儀器在推測解碼（MTP）之下仍然誠實 | **已知衝突** —— 見下面「一個已知會讓儀器說謊的方法」，以及 D-061 |
 
 介面相容不等於承載能力。探針刻意不宣稱後者——它自己的輸出就寫明了這件事。
@@ -458,11 +459,74 @@ bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
 > 這一刀移除的是一個環節，不是整條鏈。`GET /v1/apikey` 仍在免認證清單裡，所以
 > 任何人只要拿到 tunnel 網址，仍能用**一次不帶權杖的請求**把金鑰讀回去。這一刀
 > 移除的是**唯一一個完全不需要先知道網址的環節**。要關掉整條鏈，得把網址從公開
-> 主題上拿下來 —— 那是另一件事，還沒做。
+> 主題上拿下來 —— **那件事已經做完了**（`scripts/apply-endpoint-tunnel-url-privacy.sh`，
+> [D-068](../DECISIONS.md)，見下一節）。剩下的是主題的**名字**（仍由公開帳號推導）
+> 以及 `GET /v1/apikey` 本身。現在要拿到網址得先有 Kaggle 憑證 —— 那就是這一刀
+> 全部的意義。
 >
 > 而且它只有離線驗證。烘驗把引擎原始碼從產生出來的 notebook 裡**解碼回來**，
 > 在修補版上找到 0 則 `APIKEY:` 廣播、在原始版上找到 1 則；但**沒有真的 boot
 > 過**，那會花掉 GPU 額度。這次新確立的只是：**產物裡不再含有那則廣播**。
+
+## 網址現在從哪裡來
+
+步驟 3 寫的是 `endpoint base-url`。這一節說那個網址現在從哪裡來，以及為什麼換了。
+
+**它原本走的那條通道是公開的。** 開機訊號發到一條 ntfy 主題，而主題的**名字**是由
+Kaggle 使用者名稱推導出來的（`endpoint/core.py`）—— 那是公開帳號。所以 tunnel 網址
+以明文躺在一條**任何知道帳號名稱的人都能重算出來**的通道上；而拿到那個網址，就足以
+用**一次不帶權杖的請求**從 `GET /v1/apikey` 把金鑰讀回去（[D-067](../DECISIONS.md)）。
+這一刀把網址從那條主題上拿下來，改由 **kernel log** 提供，而讀日誌需要 **Kaggle 權杖**。
+
+它比聽起來的改動小，因為**網址本來就已經在 kernel log 裡了**：產生器的 `signal()`
+是**先 print、後 POST**。補丁改的是「發布」，不是「寫入」。
+
+```python
+print(f'TUNNEL ACQUIRED: {tunnel_url}', flush=True)   # 網址 → 只進 kernel log
+signal('TUNNEL ACQUIRED:', topic_only=True)           # 值為空 → 只進主題
+```
+
+主題照樣會收到一則 `TUNNEL ACQUIRED:` —— 只是冒號後面什麼都沒有。`boot` 等的就是
+這個訊號、沒有別的，所以**它照樣代表成功**；差別只在內容沒了。
+
+```bash
+bash scripts/apply-endpoint-tunnel-url-privacy.sh --dry-run   # 只檢查，不動任何檔案
+bash scripts/apply-endpoint-tunnel-url-privacy.sh             # 套用
+bash scripts/apply-endpoint-tunnel-url-privacy.sh --revert    # 還原
+```
+
+⚠️ **順序不是可選的。** 這個補丁是對「已經套了 ntfy 修正**與** stop 修正」的樹建的
+—— `apply-endpoint-ntfy-fixes.sh` 打的是**同一個** notebook 產生器，
+`apply-endpoint-stop-fixes.sh` 打的是**同一組** `core.py` 與 `commands.py`。
+順序是 **ntfy 修正 → stop 修正 → 本補丁**；而且對前兩支任一執行 `--revert` 會
+**無聲地**把本補丁拆掉 —— 本補丁的雜湊閘門要等到**下一次**跑它才會發現。
+
+**三個狀態，而其中兩個不是同一件事。** 讀取器回 `found`、`absent`（讀到了、日誌裡
+**還沒有**網址）或 `unknown`（根本讀不到）。把 `absent` 塌進 `unknown` —— 或更糟，
+塌進「沒有東西在跑」—— 正是 `endpoint stop` 有過的那個缺陷（D-060），也正是這裡
+把它們分成兩個值的原因。**三種情況下 `boot` 都算成功**；`absent` 與 `unknown`
+各印各的句子，而且都指向 `endpoint base-url`。
+
+想不 boot 就對著真 API 確認任何一項：
+
+```bash
+python3 scripts/probe_kernel_log_url.py            # 0 找到了 / 1 還沒有 / 2 讀不到 / 3 用法錯誤
+```
+
+它只印狀態碼、布林與計數 —— **永不印日誌內容、網址、權杖或主題**。網址只以
+**單向指紋**的形式出現，所以兩次執行可以比對而不揭露任何一次。**請把 tunnel 網址
+當成憑證**：它活著的時候，任何拿著它的人都能碰到那台引擎。
+
+> **這件事沒有被確立。** 讀取器只被指向過**已結束**的 kernel。
+> `ListKernelSessionOutput` 供應的是一份持久化的 blob，對**跑動中**的 kernel 可能
+> 行為不同 —— 而那正好是一次剛開完機的 kernel 所處的狀態。所以「boot 之後能自己
+> 拿到網址」是**沒有量過的**；退路與以前一樣，就是幾分鐘後再 `endpoint base-url`。
+> 第二個缺口：唯一那份樣本的日誌**沒有**被砍頭，但若 Kaggle 哪天改成只回尾部，
+> 網址（在那份樣本中位於 76.5%）可能會掉出窗外 —— 探針**刻意拒絕用猜的**，因為
+> 一個用猜格式的「有沒有被截斷」判斷，會在**它最該抓到的那個情況上**回「沒有」。
+> 第三：讀日誌需要一個**非互動 shell 也找得到**的權杖，所以它該住在
+> `~/.kaggle/kaggle.json`（權限 `600`，含 `username` 與 `key`），而不是 shell 的
+> rc 檔。最後，這個補丁只有離線驗證 —— **沒有真的 boot 過**，那會花掉 GPU 額度。
 
 ## 疑難排解
 
@@ -487,6 +551,11 @@ bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
 | `rotate-endpoint-key.sh --check` 回傳 2 | 這是刻意設計：三個持有點不一致，而不一致在出事之前都是無聲的。跑一次不帶 `--check` 的，讓它們一致。 |
 | `rotate-endpoint-key.sh` 回傳 2，說 open-webui 沒在跑 | 這是刻意設計。只輪替讀得到的兩個，會留下第三個拿著**死金鑰、且沒有任何症狀**。把堆疊開起來再跑一次。 |
 | `rotate-endpoint-key.sh` 回傳 3 | 那個值在該檔案裡不是恰好一筆 `myth-` 金鑰。腳本只印**數量、不印值**——自己看一眼那個檔案再重跑。 |
+| `boot` 成功，但說網址還沒出現在 kernel log 裡 | 這是預期行為，不是故障。tunnel 起來了，日誌還沒跟上。過一分鐘用 `endpoint base-url` 取。 |
+| ntfy 主題上再也沒有帶著 tunnel 網址的訊息 | 套過 `scripts/apply-endpoint-tunnel-url-privacy.sh` 之後的正常現象 —— 網址現在在 kernel log 裡，而主題上那則 `TUNNEL ACQUIRED:` 是**刻意留空值**的。用 `endpoint base-url`。 |
+| `endpoint base-url` 說讀不到 kernel log | 兩句不同的訊息、兩個不同的原因：**沒有憑證**（這個 shell 看不到 Kaggle 權杖）或 **Kaggle 拒絕**。看清楚印的是哪一句。前者的解法是 `~/.kaggle/kaggle.json` —— **非互動 shell 不會讀 shell 的 rc 檔**，而 cron 與大多數腳本都跑在非互動 shell 裡。 |
+| 對 ntfy 或 stop 補丁執行 `--revert` 之後，網址就不來了 | 這是預期行為 —— 那兩支補丁打的正是本補丁的三個檔案。照順序重套：ntfy 修正 → stop 修正 → `apply-endpoint-tunnel-url-privacy.sh`。雜湊閘門要等到下一次跑才會發現，所以出事當下不會有任何警告。 |
+| `apply-endpoint-tunnel-url-privacy.sh` 說雜湊不符而拒絕 | 不是 `endpoint-vps` 升級了，就是 ntfy／stop 修正沒套（它們是本補丁的建構基準）。先對那兩支跑 `--verify`。 |
 
 接上之後，`bash scripts/check-egress.sh` 會把你的 runtime 列在「啟用中」。
 那是正確且預期的。這支探針存在的目的，是讓那成為一個**決定**，而不是意外。

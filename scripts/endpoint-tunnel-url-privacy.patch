@@ -1,0 +1,300 @@
+--- a/endpoint/commands.py	2026-09-29 08:00:42.197724359 +1000
++++ b/endpoint/commands.py	2026-09-29 08:04:35.617857997 +1000
+@@ -45,10 +45,9 @@
+     display_endpoint,
+     get_kaggle_token,
+     get_kernel_errors,
++    get_kernel_log_url,
+     get_kernel_status,
+-    get_tunnel_url,
+     load_cached_apikey,
+-    load_cached_endpoint,
+     register_tunnel_with_proxy,
+     require_kaggle_cli,
+     resolve_kaggle_username,
+@@ -1250,7 +1249,7 @@
+     _seen_signals: set[str] = set()
+     _last_was_progress = False
+     _kaggle_done = False
+-    tunnel_url: str = ""
++    tunnel_url: str | None = None
+     _hf_download_phase = False
+ 
+     try:
+@@ -1278,11 +1277,28 @@
+                 if signal.startswith("TUNNEL:") or signal.startswith(
+                     "TUNNEL ACQUIRED:"
+                 ):
+-                    _, _, url_part = signal.partition("https://")
+-                    tunnel_url = "https://" + url_part.strip()
+-                    save_cached_endpoint(tunnel_url)
+-                    console.print(f"  [dim]\u2192 Tunnel:[/] {tunnel_url}")
++                    # The topic carries no URL any more (D-068): it only says a
++                    # tunnel exists. Read the URL from the Kaggle kernel log,
++                    # which needs credentials. Receiving this signal is what
++                    # makes boot succeed -- not the URL lookup below.
++                    _state, tunnel_url = get_kernel_log_url(config)
+                     success = True
++                    if tunnel_url:
++                        save_cached_endpoint(tunnel_url)
++                        console.print(f"  [dim]\u2192 Tunnel:[/] {tunnel_url}")
++                    elif _state == "absent":
++                        console.warn(
++                            "  Tunnel is up, but its URL is not in the kernel log yet."
++                        )
++                        console.dim("  Read it in a moment with: endpoint base-url")
++                    else:
++                        console.warn(
++                            "  Tunnel is up, but the kernel log could not be read."
++                        )
++                        console.dim(
++                            "  No Kaggle credentials, or Kaggle refused the request."
++                        )
++                        console.dim("  Read it later with: endpoint base-url")
+                     break
+                 if signal.startswith("Endpoint IS ONLINE"):
+                     console.print(f"  [green]\u2192[/] {signal}")
+@@ -1368,11 +1384,15 @@
+     # The tunnel was just established (notebook polls cloudflared up to 180s).
+     # Edge connection is ready; registration should succeed immediately.
+     if success:
+-        _wait_for_model_ready(tunnel_url)
+-
+-        if config.proxy_enabled:
+-            _register_with_proxy(config, tunnel_url)
+-        display_endpoint(config, tunnel_url)
++        # tunnel_url is None when the tunnel came up but its URL could not be
++        # read from the kernel log (D-068). Boot still counts as success --
++        # the kernel really is running -- but there is nothing to wire up.
++        if tunnel_url:
++            _wait_for_model_ready(tunnel_url)
++
++            if config.proxy_enabled:
++                _register_with_proxy(config, tunnel_url)
++            display_endpoint(config, tunnel_url)
+         # Continue monitoring Kaggle upload if still in progress
+         if not _kaggle_done and config._get(["model_source"], "") != "kaggle":
+             _monitor_kaggle_upload(config, since)
+@@ -1380,7 +1400,7 @@
+         with console.spinner() as p:
+             p.add_task("Waiting for tunnel URL...")
+             for _attempt in range(5):
+-                url = get_tunnel_url(config, poll=True)
++                _state, url = get_kernel_log_url(config)
+                 if url is not None:
+                     save_cached_endpoint(url)
+                     if config.proxy_enabled:
+@@ -1388,6 +1408,10 @@
+                     display_endpoint(config, url)
+                     success = True
+                     break
++                if _state == "unknown":
++                    # Retrying cannot help: we cannot ask at all. Do not burn
++                    # the remaining attempts on a credentials problem.
++                    break
+                 time.sleep(5)
+ 
+     if not success:
+@@ -1619,7 +1643,7 @@
+     display_url = config.display_url
+     console.ok(f"API Endpoint: [green]{display_url}[/]")
+     if config.proxy_enabled:
+-        tunnel = load_cached_endpoint() or get_tunnel_url(config)
++        tunnel = resolve_tunnel_url(config)
+         if tunnel:
+             console.dim(f"  Proxied via: [dim]{tunnel}[/]")
+             console.print()
+--- a/endpoint/core.py	2026-09-29 08:00:42.194724319 +1000
++++ b/endpoint/core.py	2026-09-29 08:02:27.955147283 +1000
+@@ -923,29 +923,11 @@
+ 
+ 
+ # ─── Signals (ntfy.sh) ───────────────────────────────────────────
+-
+-
+-def get_tunnel_url(config: Config, poll: bool = False) -> str | None:
+-    url = f"https://ntfy.sh/{config.signal_topic}/raw"
+-    params = {"since": "1h"}
+-    if poll:
+-        params["poll"] = "1"
+-    try:
+-        r = requests.get(url, params=params, timeout=30)
+-        r.raise_for_status()
+-        for line in reversed(r.text.strip().split("\n")):
+-            if not line or line.startswith("STATUS:"):
+-                continue
+-            if len(line) < 8:
+-                continue
+-            try:
+-                if (decoded := base64.b64decode(line).decode()).startswith("WS:"):
+-                    return decoded[3:]
+-            except Exception:
+-                continue
+-    except Exception as e:
+-        console.dim(f"Tunnel URL fallback (ntfy.sh): {e}")
+-    return None
++#
++# After D-068 the control topic no longer carries a tunnel URL: the publisher
++# posts a value-free "TUNNEL ACQUIRED:" and writes the URL to the kernel log
++# instead. Nothing here decodes a URL out of the topic any more; the reader
++# that replaced it is get_kernel_log_url() below.
+ 
+ 
+ def stream_signals(
+@@ -1117,11 +1099,30 @@
+ 
+ 
+ def resolve_tunnel_url(config: Config) -> str | None:
+-    return load_cached_endpoint() or get_tunnel_url(config)
++    """Best known URL: the cache first, then the Kaggle kernel log.
++
++    Collapses get_kernel_log_url()'s three states into URL-or-None, because
++    every caller of *this* function only displays the result. Callers that
++    act on the answer must call get_kernel_log_url() directly and keep
++    "absent" (the log has no URL yet) apart from "unknown" (we could not
++    ask at all) -- D-060, and D-068 for the reader itself.
++    """
++    cached = load_cached_endpoint()
++    if cached:
++        return cached
++    state, url = get_kernel_log_url(config)
++    if state == "found":
++        return url
++    if state == "unknown":
++        console.dim(
++            "Tunnel URL: could not read the kernel log "
++            "(no Kaggle credentials, or Kaggle refused the request)."
++        )
++    return None
+ 
+ 
+ def resolve_vps_url(config: Config) -> str | None:
+-    """Best URL to reach the VPS: proxy first, then tunnel (cache or ntfy.sh)."""
++    """Best URL to reach the VPS: proxy first, then tunnel (cache or log)."""
+     if config.proxy_enabled and config.proxy_url:
+         return config.proxy_url
+     return resolve_tunnel_url(config)
+@@ -1130,6 +1131,57 @@
+ _CF_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+ 
+ 
++def _last_cf_url(text: str) -> str | None:
++    """Last Cloudflare quick-tunnel URL in *text*, or None."""
++    urls: list[str] = _CF_URL_PATTERN.findall(text)
++    return urls[-1] if urls else None
++
++
++def get_kernel_log_url(config: Config) -> tuple[str, str | None]:
++    """Read the tunnel URL out of the Kaggle kernel log.
++
++    Returns ``(state, url)`` where *state* is one of:
++
++    ``"found"``
++        The log was read and contains a tunnel URL.
++    ``"absent"``
++        The log was read and contains no tunnel URL *yet*.
++    ``"unknown"``
++        The log could not be read at all: no credentials, a non-200, or a
++        network error.
++
++    "absent" is not "unknown". Collapsing the two is what let `endpoint stop`
++    read a failure-to-ask as "nothing is running" while the GPU kept burning
++    quota (D-060). Callers that *act* on the answer must keep them apart.
++
++    This replaces reading the URL off the public ntfy topic (D-068). The topic
++    name is derived from the public Kaggle username, so a URL sitting on it is
++    a URL anyone can have; the kernel log needs Kaggle credentials instead.
++    """
++    try:
++        token = get_kaggle_token()
++        if not token:
++            return ("unknown", None)
++        owner, slug = config.kernel_id.split("/", 1)
++        resp = requests.post(
++            "https://api.kaggle.com/v1/kernels.KernelsApiService/ListKernelSessionOutput",
++            json={"userName": owner, "kernelSlug": slug},
++            headers={
++                # "Authorization: Bearer" -- NOT "X-Kaggle-Authorization",
++                # which returns 403 against this endpoint.
++                "Authorization": f"Bearer {token}",
++                "Content-Type": "application/json",
++            },
++            timeout=10,
++        )
++        if resp.status_code == 200:
++            url = _last_cf_url(resp.json().get("log") or "")
++            return ("found", url) if url else ("absent", None)
++    except Exception as e:
++        console.dim(f"Kernel log read failed: {e}")
++    return ("unknown", None)
++
++
+ def extract_tunnel_url_from_log(log_path: str) -> str | None:
+     try:
+         # Only read the last 128KB — cloudflared logs are append-only,
+@@ -1142,9 +1194,7 @@
+                 # skip first partial line
+                 f.readline()
+             content = f.read().decode("utf-8", errors="replace")
+-        urls: list[str] = _CF_URL_PATTERN.findall(content)
+-        if urls:
+-            return urls[-1]
++        return _last_cf_url(content)
+     except Exception as e:
+         console.dim(f"Tunnel URL from log: {e}")
+     return None
+--- a/scripts/master_build_notebook.py	2026-09-29 08:00:42.190724265 +1000
++++ b/scripts/master_build_notebook.py	2026-09-29 08:01:26.446320423 +1000
+@@ -420,13 +420,17 @@
+                     "_sig_last = [0.0]\n",
+                     "SIG_MIN_GAP = 10.0\n",
+                     "\n",
+-                    "def signal(m, progress=False):\n",
++                    "def signal(m, progress=False, topic_only=False):\n",
+                     "    # ntfy.sh gives each visitor a 60-request burst refilling 1 per 5s, and\n",
+                     "    # this IP also spends that budget polling the control topic. The HF\n",
+                     "    # download loop called this every second, which drained the bucket --\n",
+                     "    # silently dropping the one-shot TUNNEL ACQUIRED. progress=True calls\n",
+                     "    # are abandoned when the budget is tight; everything else waits.\n",
+-                    "    print(m, flush=True)\n",
++                    "    # topic_only=True posts to the topic but does NOT print, for signals\n",
++                    "    # whose value must stay out of the kernel log. The rate limit below\n",
++                    "    # still applies, so such a signal still cannot be dropped.\n",
++                    "    if not topic_only:\n",
++                    "        print(m, flush=True)\n",
+                     "    try:\n",
+                     "        with _sig_lock:\n",
+                     "            _gap = time.time() - _sig_last[0]\n",
+@@ -439,13 +443,6 @@
+                     "    except Exception:\n",
+                     "        pass\n",
+                     "\n",
+-                    "def broadcast(url):\n",
+-                    "    try:\n",
+-                    "        b64 = base64.b64encode(f'WS:{url}'.encode()).decode()\n",
+-                    "        _sp.Popen(['curl', '-s', '-d', b64, f'https://ntfy.sh/{SIGNAL_TOPIC}'], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)\n",
+-                    "    except Exception:\n",
+-                    "        pass\n",
+-                    "\n",
+                     "os.system('pkill -x cloudflared 2>/dev/null; pkill -x cloudflared-linux-amd64 2>/dev/null; true')\n",
+                     "os.system('pkill -x llama-server 2>/dev/null; pkill -x sd-server 2>/dev/null; true')\n",
+                     "os.system('mkdir -p logs')\n",
+@@ -1137,14 +1134,16 @@
+                     "                _urls = _CF_URL_RE.findall(_chunk.decode(errors='replace'))\n",
+                     "                if _urls:\n",
+                     "                    tunnel_url = _urls[-1]\n",
+-                    "                    broadcast(tunnel_url)\n",
+                     "                    break\n",
+                     "            except Exception:\n",
+                     "                pass\n",
+                     "            if _iter > 0 and _iter % 10 == 0:\n",
+                     "                signal(f'TUNNEL ESTABLISHMENT PROGRESS: {_iter}/60 ({int(_iter*100/60)}%)...', progress=True)\n",
+                     "        if tunnel_url:\n",
+-                    "            signal(f'TUNNEL ACQUIRED: {tunnel_url}')\n",
++                    "            # The URL goes to the kernel log only. The topic gets a\n",
++                    "            # value-free signal so the boot wait loop still fires (D-068).\n",
++                    "            print(f'TUNNEL ACQUIRED: {tunnel_url}', flush=True)\n",
++                    "            signal('TUNNEL ACQUIRED:', topic_only=True)\n",
+                     "        else:\n",
+                     "            # Diagnostic: dump the last 30 lines of the cloudflared log\n",
+                     "            try:\n",

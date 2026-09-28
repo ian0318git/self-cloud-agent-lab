@@ -45,6 +45,7 @@ Being explicit about this, because the whole project depends on not confusing
 | Speed, VRAM headroom, which model sizes fit on 2×T4 | **Not measured** |
 | That the tunnel stays up for a whole session | **Not measured** |
 | That the patched generator survives a real `endpoint boot` | **Not verified** — the patch is verified against simulated ntfy, not against a live Kaggle run |
+| That the kernel log can be read **while the kernel is still running** — the premise the new URL reader rests on in practice | **Not measured** — the one reading that was taken was against a *finished* kernel (D-068) |
 | That the deployment instruments stay honest under speculative decoding (MTP) | **Known to conflict** — see "One known way to make these instruments lie" below, and D-061 |
 
 Interface conformance is not the same as capacity. The probe deliberately does
@@ -508,13 +509,88 @@ stops being true, because then the deletion would cost a full timeout.
 > middleware's bypass set, so anyone who obtains the tunnel URL still reads the
 > key back with a single unauthenticated request. What this cut removes is the
 > only link that needed *no* prior knowledge of the tunnel at all. Closing the
-> chain means taking the URL off the public topic — that is a separate change,
-> not yet made.
+> chain means taking the URL off the public topic — **that is now done**
+> (`scripts/apply-endpoint-tunnel-url-privacy.sh`, [D-068](../DECISIONS.md), see
+> the next section). What remains is the topic *name* (still derived from the
+> public username) and `GET /v1/apikey` itself. Obtaining the URL now takes
+> Kaggle credentials, which is the whole point of the change.
 >
 > It is also verified offline only. The bake test decodes the engine source back
 > out of a generated notebook and finds zero `APIKEY:` broadcasts where the
 > pristine engine produces one, but a real boot was not run — that spends GPU
 > quota. The new proof is that the artifact no longer *contains* the broadcast.
+
+## Where the tunnel URL comes from now
+
+Step 3 says `endpoint base-url`. This is where that URL now comes from, and why
+it changed.
+
+**The channel it used to come from was public.** The boot signal went to an ntfy
+topic whose *name* is derived from the Kaggle username (`endpoint/core.py`) — a
+public account. So the tunnel URL sat in cleartext on a channel anyone who knows
+the account name can reconstruct — and holding that URL was enough to read the
+API key back out of `GET /v1/apikey` with no credentials at all ([D-067](../DECISIONS.md)).
+This cut takes the URL off that topic. The **kernel log** replaces it, and
+reading the log takes a **Kaggle token**.
+
+It is a smaller change than it sounds, because the URL was **already** in the
+kernel log: the generator's `signal()` prints every message *before* it POSTs it.
+What the patch changes is the publishing, not the writing.
+
+```python
+print(f'TUNNEL ACQUIRED: {tunnel_url}', flush=True)   # URL  -> kernel log only
+signal('TUNNEL ACQUIRED:', topic_only=True)           # empty -> topic only
+```
+
+The topic still receives a `TUNNEL ACQUIRED:` — with nothing after the colon.
+`boot` waits on that signal and nothing else, so its arrival still means exactly
+what it meant before; only the payload is gone.
+
+```bash
+bash scripts/apply-endpoint-tunnel-url-privacy.sh --dry-run   # check; change nothing
+bash scripts/apply-endpoint-tunnel-url-privacy.sh             # apply
+bash scripts/apply-endpoint-tunnel-url-privacy.sh --revert    # undo
+```
+
+⚠️ **The order is not optional.** This patch is built against a tree that already
+has the ntfy fixes *and* the stop fixes applied — `apply-endpoint-ntfy-fixes.sh`
+patches the *same* notebook generator, and `apply-endpoint-stop-fixes.sh` patches
+the *same* `core.py` and `commands.py`. Apply **ntfy fixes → stop fixes → this
+one**, and note that `--revert` on either of the first two **silently undoes this
+one**; this patch's hash gate only notices the next time you run it.
+
+**Three states, and two of them are not the same thing.** The reader answers
+`found`, `absent` (the log was read and holds no URL *yet*) or `unknown` (the log
+could not be read at all). Collapsing `absent` into `unknown` — or into "nothing
+is running" — is the defect `endpoint stop` had (D-060), and it is the reason the
+two are separate values here. `boot` **succeeds** in all three cases; `absent` and
+`unknown` print different sentences, and both point you at `endpoint base-url`.
+
+To check any of it against the real API without a boot:
+
+```bash
+python3 scripts/probe_kernel_log_url.py            # exit 0 found / 1 absent / 2 unknown / 3 usage
+```
+
+It prints status codes, booleans and counts — **never the log body, the URL, the
+token or the topic**. The URL appears only as a one-way fingerprint, so two runs
+can be compared without either revealing it. Treat the tunnel URL as a
+credential: while it is live, anyone holding it can reach the engine.
+
+> **What this does not establish.** The reader has only ever been pointed at a
+> **finished** kernel. `ListKernelSessionOutput` serves a persisted blob and may
+> behave differently against a *running* one — and that is exactly the case a
+> fresh boot is in. So "`boot` can fetch its own URL afterwards" is **not
+> measured**; the fallback is the same as before, `endpoint base-url` a few
+> minutes later. Second gap: the log was **not** truncated at the head in the one
+> sample read, but if Kaggle ever starts returning only the tail, the URL — at
+> 76.5% of that sample — could fall outside the window; the probe deliberately
+> refuses to guess, because a format-guessing "is it truncated?" verdict reads
+> *false* on exactly the case it is meant to catch. Third: reading the log needs
+> a token that non-interactive shells can find, which is why it belongs in
+> `~/.kaggle/kaggle.json` (mode `600`, with `username` and `key`) rather than a
+> shell rc file. Finally, the patch is verified offline — no real boot was run,
+> because that spends GPU quota.
 
 ## Troubleshooting
 
@@ -539,6 +615,11 @@ stops being true, because then the deletion would cost a full timeout.
 | `rotate-endpoint-key.sh --check` exits 2 | Working as intended: the three holders disagree, and disagreeing is silent until something 401s. Run the script without `--check` to make them agree. |
 | `rotate-endpoint-key.sh` exits 2 saying open-webui is not running | Working as intended. Rotating only the two reachable holders would leave the third holding a **dead key with no symptom**. Start the stack and re-run. |
 | `rotate-endpoint-key.sh` exits 3 | The value is not exactly one `myth-` key in that file. The script prints the **count only**, never the value — look at the file yourself before re-running. |
+| `boot` succeeds but says the URL is not in the kernel log yet | Expected, not a failure. The tunnel is up and the log has not caught up. Take it a minute later with `endpoint base-url`. |
+| Nothing on the ntfy topic carries the tunnel URL any more | Working as intended after `scripts/apply-endpoint-tunnel-url-privacy.sh` — the URL is in the kernel log now, and the topic deliberately carries `TUNNEL ACQUIRED:` with an empty value. Use `endpoint base-url`. |
+| `endpoint base-url` says it could not read the kernel log | Two different sentences, two different causes: **no credentials** (this shell cannot see a Kaggle token) or **Kaggle refused**. Read which one printed. The fix for the first is `~/.kaggle/kaggle.json` — a shell rc file is not read by non-interactive shells, which is where cron and most scripts run. |
+| The URL stops arriving right after reverting the ntfy or stop fixes | Expected — those patches touch the same three files this one does. Re-apply in order: ntfy fixes, stop fixes, then `apply-endpoint-tunnel-url-privacy.sh`. The hash gate only notices on the next run, so nothing warns you at the moment it happens. |
+| `apply-endpoint-tunnel-url-privacy.sh` refuses with a hash mismatch | Either `endpoint-vps` was upgraded, or the ntfy/stop fixes are not applied (they are the baseline this patch was built against). Run `--verify` on those two first. |
 
 After connecting, `bash scripts/check-egress.sh` will list your runtime under
 "啟用中". That is correct and intended. The probe exists so that it is a
