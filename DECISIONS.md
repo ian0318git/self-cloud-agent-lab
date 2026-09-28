@@ -9606,21 +9606,78 @@ if not config.api_key:
 
 ### 三、缺陷二：逾時之後沒有官方復原路徑
 
-boot 逾時之後，官方的復原指令 `endpoint base-url` 也讀不到 —— `get_tunnel_url()`
-（`core.py:928`）逐行**反序**掃描，跳過 `STATUS:` 與長度 < 8 的行，然後
+boot 逾時之後，官方的復原指令 `endpoint base-url`（`commands.py:1611`）也讀不到。
+
+**結論不變，成因是錯的。** 本節原本寫「notebook 發的是明文的 `TUNNEL ACQUIRED:`，
+而判準只認 base64」—— **那句在同一天稍晚被推翻**。真正的成因是一個**沒傳的參數**。
+
+#### 原本的診斷（保留，見證一個推論式的錯誤）
+
+`get_tunnel_url()`（`core.py:928`）逐行**反序**掃描，跳過 `STATUS:` 與長度 < 8 的行，然後
 
 ```python
 if (decoded := base64.b64decode(line).decode()).startswith("WS:"):
     return decoded[3:]
 ```
 
-只認**base64 解出來以 `WS:` 開頭**的行，而 notebook 發的是**明文的
-`TUNNEL ACQUIRED:`**。另外 `extract_tunnel_url_from_log`（`core.py:1133`）
-**定義了但全檔沒有任何呼叫點**（實查：整個 `endpoint/` 只有那一個定義）。
+~~只認 base64 解出來以 `WS:` 開頭的行，而 notebook 發的是明文的 `TUNNEL ACQUIRED:`。~~
 
-兩個缺陷疊起來 = **官方復原路徑是死的**。這一輪的實際救法是繞過 CLI：自己 `curl`
-推導出來的主題、grep 明文的網址（**經變數，全程沒印**）、寫進 600 的暫存檔，
-再驗它活著。
+**錯在哪：我把「我看到的那一則」當成「它發的全部」。** 同一輪 boot 的**同一條主題上
+有兩則**，用途不同，而且 base64 那則**先到**（11:38:06 / 11:38:10、11:54:48 / 11:54:51）：
+
+| 訊息 | 用途 |
+|---|---|
+| 76 字元的 **base64** 行（解出來以 `WS:` 開頭、長度 55–57、含 `http`） | **給解析器** |
+| `STATUS: [<id>] TUNNEL ACQUIRED: <URL>` | **給人**看的 |
+
+`get_tunnel_url` **刻意跳過** `STATUS:` 開頭的行（`line.startswith("STATUS:")`）——
+那是設計，不是巧合。所以**判準與發布格式從來就是對上的**，本節原本的
+「協定不匹配」不成立。
+
+#### 更正（2026-09-28）：判準是好的，死的是取用
+
+照抄 `core.py:928` 的反序掃描迴圈，餵**真實的 ntfy 資料**：
+
+| 取用方式 | 結果 |
+|---|---|
+| **有** `poll=1` | **取到 URL**（長度 52、以 `https://` 開頭） |
+| **無** `poll=1`（CLI 的預設） | `TimeoutError: The read operation timed out` |
+
+**成因是一個參數。** 簽名是 `get_tunnel_url(config: Config, poll: bool = False)`，
+`params = {"since": "1h"}`，只有 `poll` 為真時才加上 `poll=1`。而 ntfy 的 `/raw`
+**沒有 `poll=1` 就是串流** —— `requests.get` 不是有限查詢，它會一直讀到
+**30 秒讀取逾時**；例外被吞成 `console.dim("Tunnel URL fallback (ntfy.sh): ...")`，
+函式回 `None`。三個呼叫端裡**兩個沒傳**：
+
+| 呼叫端 | `poll=True` |
+|---|---|
+| `run_boot`（`commands.py:1383`） | **有** —— 所以 boot 那條路正常 |
+| `run_base_url`（`commands.py:1622` → `resolve_tunnel_url`，`core.py:1119`） | **沒有** ← 官方復原指令死在這裡 |
+| `run_status` 的 tunnel 那一行（同上） | **沒有** ← 見下 |
+
+#### 順帶解掉一個懸案
+
+D-060 把 `run_status` 的 tunnel 那一行列進「刻意不做／相鄰問題」（它會說 `offline`
+而同一份輸出的 kernel 那行說 `unknown`）。**它就是這個參數。** 2026-09-28 實印：
+
+```
+Tunnel URL fallback (ntfy.sh): HTTPSConnectionPool(host='ntfy.sh', port=443): Read timed out.
+Tunnel: offline
+```
+
+那行 `offline` 的意思是**取用逾時**，不是 tunnel 不在。它與 D-051／D-060 同族
+（把「讀不到」摺進「不在」），是**第四個實例** —— 而它的成因已經定位到一行。
+
+`extract_tunnel_url_from_log`（`core.py:1133`）**定義了但全檔沒有任何呼叫點**。
+這一條原本的觀察**不變**（實查：整個 `endpoint/` 只有那一個定義）。
+
+#### 對結論的影響
+
+**「官方復原路徑是死的」不變，但它死的原因完全不同**：不是 notebook 發錯格式，
+是**取用端少傳一個參數**。這一輪的實際救法（自己 `curl` 推導的主題、grep 明文的
+網址、**經變數、全程沒印**、寫進 600 的暫存檔、再驗它活著）仍然有效 ——
+而現在知道**那個救法等價於 `poll=1`**。這個差別在決定「要不要修」時是關鍵的：
+原本的診斷指向**改生產端的發布格式**，更正後指向**改一行呼叫**。
 
 ### 四、缺陷三：那把金鑰實際上等於公開
 
@@ -9761,9 +9818,10 @@ tunnel** 上重測了一次，結果一模一樣：
 
 ### 七、刻意不做／待拍板
 
-- **不改 `endpoint-vps` 這個套件**（600 秒上限、錯誤診斷、`get_tunnel_url` 的格式
-  判準、`extract_tunnel_url_from_log` 的 dead code、`/v1/apikey` 的免認證）——
-  它是**別人的套件**。記錄，不改。
+- **不改 `endpoint-vps` 這個套件**（600 秒上限、錯誤診斷、
+  ~~`get_tunnel_url` 的格式判準~~ → **更正成：`get_tunnel_url` 少傳的 `poll=True`**
+  （第三節；格式判準是好的）、`extract_tunnel_url_from_log` 的 dead code、
+  `/v1/apikey` 的免認證）—— 它是**別人的套件**。記錄，不改。
 - **notebook 那三刀尚未拍板**：(1) 不再發布 `APIKEY:`；(2) 網址改走 Kaggle kernel log；
   (3) 主題的推導輸入不能是公開識別碼。**第 (1) 刀報酬最高** —— CLI 本來就有那把金鑰
   （config yaml 是來源、也是它烘進 notebook 的），那個訊號是多餘的，
@@ -9796,4 +9854,16 @@ tunnel** 上重測了一次，結果一模一樣：
   **直接管到它**（109/109）。**但訊息內容本身沒有任何斷言** —— 沒有任何測試會
   因為那句話**又不成立**而失敗。也就是說：這次修好的是**這一句**，不是
   **「訊息必須為真」這件事**。
+- **第三節的更正，證據是「用真實 ntfy 資料跑同一段掃描迴圈」，不是重跑一次
+  `endpoint base-url`。** 兩者不等價。那一輪直接量到的是**判準會中**與
+  **不傳 `poll` 會逾時**；**沒有做過**的兩件事是：(a) 在逾時情境下端到端跑一次
+  `endpoint base-url`；(b) `run_status` 的 tunnel 行只觀測到「逾時 ＋ 印出
+  `offline`」，**沒有做過「加上 `poll` 之後它會變對」的對照**。所以
+  「它就是這個參數」是**讀原始碼 ＋ 兩個獨立量測**推出來的，不是觀測到修好。
+  正面對照只有一個：`run_boot`（有傳 `poll=True`）在 boot 當下確實取到過網址 ——
+  同一段程式碼，差在那一個參數。
+- **第三節被推翻的那句是推論式的錯，不是量測的錯。** 那一輪量到的東西
+  （明文訊息存在、`base-url` 讀不到、dead code 確實沒人呼叫）**全部為真**；
+  錯的是我從「我看到的那一則」跳到「它發的全部」那一步。更正的方向也值得記：
+  **它把處方從「改生產端的發布格式」移到「改取用端的一行呼叫」** —— 兩者成本差很多。
 - **本節與全篇不記任何金鑰指紋** —— 理由見 D-065 第七節。
