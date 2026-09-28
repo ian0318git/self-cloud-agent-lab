@@ -1,0 +1,12 @@
+--- a/engine/engine.py
++++ b/engine/engine.py
+@@ -1856,9 +1856,8 @@
+ def _startup() -> None:
+     _broadcast("STARTING...")
+-    _broadcast(f"APIKEY:{_get_api_key()}")
+     ensure_dirs()
+     threading.Thread(target=telemetry_loop, daemon=True).start()
+
+     # Try to start immediately; retry every 5s if model/binary not ready yet
+     threading.Thread(target=_auto_load_model, daemon=True).start()
+     _broadcast("WAITING FOR MODEL...")

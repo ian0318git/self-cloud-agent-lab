@@ -633,6 +633,9 @@ Open <http://localhost:3000>.
 | `bash scripts/apply-endpoint-stop-fixes.sh --dry-run` | Check whether `endpoint stop` still has its silent no-op, and whether the patch still applies. Changes nothing |
 | `bash scripts/apply-endpoint-stop-fixes.sh` | Patch the CLI itself — **two files** (`core.py` + `commands.py`), so four pinned hashes and one shared backup stamp. Refuses when the two files disagree. `--revert` undoes both together. **A package-manager file: an `endpoint-vps` upgrade erases this** |
 | `python3 scripts/test_endpoint_stop_fixes.py ROOT` | The verifier behind the above — slices `get_kernel_status`/`run_stop`/`run_boot`'s clear loop out by AST and drives them against fakes (no network, no cache writes). **Fails against the pristine tree on purpose** (D-060) |
+| `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run` | Check whether the engine still broadcasts the API key to the public ntfy topic, and whether the patch still applies. Changes nothing |
+| `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh` | Stop that broadcast — one file, `engine/engine.py`, which is the **producer** the notebook generator base64-embeds (`master_build_notebook.py:331`). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
+| `python3 scripts/test_endpoint_apikey_broadcast_fixes.py ROOT` | The verifier behind the above — execs `_startup()` for real against a captured transport and asserts the POST body carries no key, plus the AST guard that deleting the broadcast cannot hang boot. **Fails against the pristine file on purpose** (D-067) |
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
 

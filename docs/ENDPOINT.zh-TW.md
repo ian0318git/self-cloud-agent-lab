@@ -424,6 +424,46 @@ bash scripts/apply-endpoint-stop-fixes.sh --revert    # 還原
 > shell 唯一有的路。要確認**活著的** kernel 真的停掉，仍然需要一次 boot，而那
 > 會花掉 GPU 額度。
 
+## 引擎明文發布出去的那把 API 金鑰
+
+`_startup()` 裡有一行
+
+```python
+_broadcast(f"APIKEY:{_get_api_key()}")
+```
+
+而 `_broadcast` 會把 `STATUS: [<session>] <msg>` POST 到一條**由 Kaggle 使用者
+名稱推導出名字的 ntfy 主題**（`endpoint/core.py`）—— 那是公開帳號。所以每一次
+boot 都把自己的 API 金鑰，以明文，發布到一條**任何知道帳號名稱的人都能重算出
+來**的通道上（[D-067](../DECISIONS.md)）。2026-09-28 **整條鏈實測過**，不是推論。
+
+```bash
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run   # 只檢查，不動任何檔案
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh             # 套用
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
+```
+
+這次只有一個檔案 `engine/engine.py`，而它是**生產者**：notebook 產生器讀
+`REPO_ROOT/engine/engine.py`、base64 嵌進去，kernel 開機時解出來執行。所以改
+安裝目錄裡的這一份，就等於改了下一次 boot 會跑的東西。補丁**刪掉那一行，不替換
+成別的東西**；`STARTING...` 與 `WAITING FOR MODEL...` 照常發布，那條主題上的
+生命週期訊號不變。
+
+刪掉這則廣播**不會**卡住 boot，而這一點是**斷言出來的、不是假設的**：`run_boot`
+的 600 秒等待迴圈只在 `TUNNEL ACQUIRED` 分支 `break`，`APIKEY:` 分支只
+`continue`。上游哪天改成會離開迴圈，驗證器就會紅 —— 因為那時這個刪除的代價
+會是一次完整的逾時。
+
+> **這件事沒有被確立 —— 在把這條主題當成安全之前請先讀完。**
+> 這一刀移除的是一個環節，不是整條鏈。`GET /v1/apikey` 仍在免認證清單裡，所以
+> 任何人只要拿到 tunnel 網址，仍能用**一次不帶權杖的請求**把金鑰讀回去。這一刀
+> 移除的是**唯一一個完全不需要先知道網址的環節**。要關掉整條鏈，得把網址從公開
+> 主題上拿下來 —— 那是另一件事，還沒做。
+>
+> 而且它只有離線驗證。烘驗把引擎原始碼從產生出來的 notebook 裡**解碼回來**，
+> 在修補版上找到 0 則 `APIKEY:` 廣播、在原始版上找到 1 則；但**沒有真的 boot
+> 過**，那會花掉 GPU 額度。這次新確立的只是：**產物裡不再含有那則廣播**。
+
 ## 疑難排解
 
 | 症狀 | 可能原因 |
@@ -440,6 +480,8 @@ bash scripts/apply-endpoint-stop-fixes.sh --revert    # 還原
 | `endpoint stop` 說「No running kernel found.」但 runtime 還在答話 | 未修補的狀態讀取：`get_kernel_status()` 把每一條失敗都叫成 `offline`。套用 `scripts/apply-endpoint-stop-fixes.sh`。（修補後這會變成結束碼 2 與一句明講的「無法確認」。） |
 | `endpoint stop` 回傳 2 | 這是刻意設計，不是失敗。kill 訊號已送出；狀態讀不到，因為這個 shell 沒有 Kaggle 權杖。改在拿得到權杖的 shell 裡用 `endpoint status` 確認。 |
 | `apply-endpoint-stop-fixes.sh` 拒絕，說兩個檔案不一致 | 上一次套用被中斷，或有人手動改過其中一個。先用 `--revert` 還原再重跑。 |
+| 某次 boot 沒有出現 `API key registered with engine` | 套過 `scripts/apply-endpoint-apikey-broadcast-fixes.sh` 之後的正常現象 —— 那行訊息來自被刪掉的廣播。金鑰仍會走 HTTP 註冊；這行不見了不是故障。 |
+| `apply-endpoint-apikey-broadcast-fixes.sh` 警告連結數 | `engine.py` 是由 uv 快取硬連結出來的，而 `patch` 會打斷那些連結。對產生器無害（它讀的就是你改的那一份），但重裝會把快取裡的副本還原 —— 升級後請重跑本腳本。 |
 | `endpoint status` 印出 `unknown (could not check)` | 補丁正在作用：`endpoint status` 也需要權杖，而這個 shell 沒有。是黃色不是紅色 —— 讀不到的狀態不等於確認過的 `offline`。 |
 | endpoint 明明是活的，`connect-endpoint.sh` 或探針卻拿到 401 | `.env` 拿著**過期的硬拷貝**——它不會自己更新。跑 `scripts/rotate-endpoint-key.sh --check`。 |
 | `rotate-endpoint-key.sh --check` 回傳 2 | 這是刻意設計：三個持有點不一致，而不一致在出事之前都是無聲的。跑一次不帶 `--check` 的，讓它們一致。 |

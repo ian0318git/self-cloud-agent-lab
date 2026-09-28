@@ -578,6 +578,9 @@ bash scripts/up.sh
 | `bash scripts/apply-endpoint-stop-fixes.sh --dry-run` | 檢查 `endpoint stop` 的靜默 no-op 還在不在、以及補丁還套不套得上。不做任何變更 |
 | `bash scripts/apply-endpoint-stop-fixes.sh` | 對 **CLI 本體**套補丁 —— **兩個檔案**（`core.py` ＋ `commands.py`），所以釘四個雜湊、共用一個備份章節。兩個檔案狀態不一致時會拒絕。`--revert` 一次還原兩個。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
 | `python3 scripts/test_endpoint_stop_fixes.py ROOT` | 上面那支的行為驗證 —— 用 AST 把 `get_kernel_status`／`run_stop`／`run_boot` 的清舊迴圈切出來，餵假物件驅動（不碰網路、不寫快取）。**對原始樹是預期要失敗的**（D-060） |
+| `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run` | 檢查引擎是否還把 API 金鑰廣播到那條公開的 ntfy 主題、以及補丁還套不套得上。不做任何變更 |
+| `bash scripts/apply-endpoint-apikey-broadcast-fixes.sh` | 停掉那則廣播 —— 一個檔案 `engine/engine.py`，它是 notebook 產生器 **base64 嵌入的生產者**（`master_build_notebook.py:331`）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
+| `python3 scripts/test_endpoint_apikey_broadcast_fixes.py ROOT` | 上面那支的行為驗證 —— 對捕獲的傳輸層**真的執行** `_startup()`，斷言送出的 POST 內容不含金鑰，外加「刪掉廣播不會卡住 boot」的 AST 守衛。**對原始檔是預期要失敗的**（D-067） |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
 

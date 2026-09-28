@@ -471,6 +471,51 @@ upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
 > shell has. Confirming that a **live** kernel really stops still needs a boot,
 > which spends GPU quota.
 
+## The API key the engine published in cleartext
+
+`_startup()` calls
+
+```python
+_broadcast(f"APIKEY:{_get_api_key()}")
+```
+
+and `_broadcast` POSTs `STATUS: [<session>] <msg>` to an **ntfy topic whose name
+is derived from the Kaggle username** (`endpoint/core.py`) — a public account.
+So every boot published its own API key, in the clear, to a channel anyone who
+knows the account name can reconstruct ([D-067](../DECISIONS.md)). Measured
+end-to-end on 2026-09-28, not inferred.
+
+```bash
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run   # check; change nothing
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh             # apply
+bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # undo
+```
+
+One file this time, `engine/engine.py`, and it is the **producer**: the notebook
+generator reads `REPO_ROOT/engine/engine.py`, base64-embeds it, and the kernel
+decodes it at boot. Patching the installed engine therefore changes what the
+next boot runs. The patch deletes that one line — it does not replace it.
+`STARTING...` and `WAITING FOR MODEL...` still go out, so the lifecycle signal
+on that topic is unchanged.
+
+Deleting the broadcast cannot hang boot, and that is asserted rather than
+assumed: `run_boot`'s 600s wait loop breaks on `TUNNEL ACQUIRED` and nowhere
+else — the `APIKEY:` branch only `continue`s. The verifier fails the moment that
+stops being true, because then the deletion would cost a full timeout.
+
+> **What this does not establish — read this before treating the topic as safe.**
+> This cut removes one link, not the chain. `GET /v1/apikey` sits in the auth
+> middleware's bypass set, so anyone who obtains the tunnel URL still reads the
+> key back with a single unauthenticated request. What this cut removes is the
+> only link that needed *no* prior knowledge of the tunnel at all. Closing the
+> chain means taking the URL off the public topic — that is a separate change,
+> not yet made.
+>
+> It is also verified offline only. The bake test decodes the engine source back
+> out of a generated notebook and finds zero `APIKEY:` broadcasts where the
+> pristine engine produces one, but a real boot was not run — that spends GPU
+> quota. The new proof is that the artifact no longer *contains* the broadcast.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -487,6 +532,8 @@ upgrading `endpoint-vps` reverts it; re-run the script after an upgrade.
 | `endpoint stop` says "No running kernel found." but the runtime still answers | The unpatched status read: `get_kernel_status()` called every failure `offline`. Apply `scripts/apply-endpoint-stop-fixes.sh`. (After the patch this becomes exit code 2 with an explicit "could not confirm".) |
 | `endpoint stop` exits 2 | Working as intended, not a failure. The kill signal was sent; the state could not be read because this shell has no Kaggle token. Confirm with `endpoint status` in a shell that has one. |
 | `apply-endpoint-stop-fixes.sh` refuses, saying the two files disagree | A previous run was interrupted, or one file was edited by hand. Run the script with `--revert` first. |
+| A boot has no `API key registered with engine` line | Expected after `scripts/apply-endpoint-apikey-broadcast-fixes.sh` — that message came from the removed broadcast. The key still registers over HTTP; this line going away is not a failure. |
+| `apply-endpoint-apikey-broadcast-fixes.sh` warns about link count | `engine.py` is hard-linked out of the uv cache, and `patch` breaks those links. Harmless for the generator (it reads the file you patched), but a reinstall restores the cached copies — re-run the script after an upgrade. |
 | `endpoint status` prints `unknown (could not check)` | The patch working: `endpoint status` also needs the token, and this shell does not have it. Yellow, not red — an unreadable state is not a confirmed `offline`. |
 | `connect-endpoint.sh` or a probe gets a 401 while the endpoint itself is up | `.env` is holding a **stale hard copy** of the key — it never refreshes. Run `scripts/rotate-endpoint-key.sh --check`. |
 | `rotate-endpoint-key.sh --check` exits 2 | Working as intended: the three holders disagree, and disagreeing is silent until something 401s. Run the script without `--check` to make them agree. |
