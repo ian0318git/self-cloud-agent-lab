@@ -10379,3 +10379,210 @@ B 的 apply 腳本檔頭明講這件事，並且拒絕在雜湊對不上時動�
 | `endpoint/commands.py` | `d8b7cd81…` | `8d6f2ade…` |
 
 依 D-065 第七節，本節不記任何**金鑰**指紋 —— 這六個是**檔案**雜湊，不是憑證。
+
+---
+
+## D-069：切 C —— 主題的推導輸入不再是一個公開識別碼
+
+**2026-09-29。** D-066 第七節拍板的三刀，這是最後一刀。實作已完成、
+**未 push、未套用**（套用順序見第九節，C 只能在 B 之上）。
+
+### 一、這一刀砍的是鏈上的哪一段
+
+| # | 段 | 這一刀 |
+|---|---|---|
+| 1 | Kaggle 使用者名稱是公開的 | 不動（動不了） |
+| 2 | **主題名由該名稱推導**（`sha256(username)[:12]`） | ← **砍掉了** |
+| 3 | 那條公開主題上有明文的網址與金鑰 | A（D-067）、B（D-068）已砍 |
+| 4 | `GET <網址>/v1/apikey` 不帶權杖回 200 | 不動（**未拍板的第四刀**） |
+| 5 | 完整的 GPU 使用權 | —— |
+
+### 二、誠實的價值評估（比照 D-067 第二節對 A 的做法）
+
+B 之後主題上只剩生命週期文字，所以 **C 不是「擋住某個秘密外洩」**。它擋的是
+**誰能動這條通道**。C 之前，任何知道那個公開帳號的人都能用一行程式碼推導出主題，
+然後（a）讀生命週期、（b）**偽造 KILL**、（c）依勘查的洪水分析**延遲**真的 KILL。
+C 之後這三件都需要本機的秘密。
+
+**而鏈沒有關。** 第 4 段還在，且未拍板。C 的貢獻是拿掉**最後一個零前置知識的環節**。
+
+### 三、設計
+
+**（1）推導：領域分隔 ＋ 秘密，兩個副本逐字相同。** `endpoint/core.py:42-44` 定義
+`TOPIC_SECRET_DOMAIN = "endpoint-signal-v1:"`、形狀 ERE、處方訊息；
+`core.py:65-67` 的 `topic_digest` 是 `sha256(DOMAIN + secret)[:12]`。
+產生器端 `scripts/master_build_notebook.py:130-134` 同式。
+
+改之前兩份**不一致**：`core.py` 沒有 `.lower()`，產生器有。今天不爆是因為 Kaggle
+帳號是小寫的 —— 但切 C 之後**前綴是唯一帶大小寫的部分**，`topic_prefix: Endpoint`
+會讓 CLI 與 kernel 各自聽一條主題（靜默失效）。C 順手修掉並釘住（D3 的混合大小寫列）。
+
+領域分隔字串的理由：主題名會被看見，裸的 `sha256(secret)` 等於把秘密變成可跨系統
+比對的指紋。⚠️ 它**不綁前綴也不綁帳號** —— **一個 lab 一個秘密**。
+
+**（2）缺席時大聲失敗，絕不退舊路。** `core.py:51-62` 的 `topic_secret_of` 在缺席、
+空字串、型別錯、形狀錯時**同一個乾淨的 raise**，路徑上**不存在**帳號推導的退路。
+但拋例外只是後盾；真正的工作是**讓那個狀態不可達**，加上四條顯式分支：
+
+| 路徑 | 缺席時 |
+|---|---|
+| `endpoint boot`（`commands.py:1078`） | 在殺舊 kernel 的脈衝**之前**就早退（`:1088`） |
+| `endpoint stop`（`commands.py:1511`） | 不中止：跳過 kill 訊號、說清楚，**照走 Kaggle 取消** |
+| `endpoint watch`（`commands.py:1647`） | `console.err(...)`，不對著不存在的主題等 |
+| `status`／`doctor`／`base-url` | 不受影響 |
+
+**（3）讓狀態不可達：套用腳本的秘密閘門。** `apply-endpoint-topic-secret.sh` 在動手
+前檢查本機檔案裡有沒有一個**形狀正確**的 `signal.topic_secret`。這條是**離線的、
+精確的、不是代理量** —— 它把「補丁已套但秘密不存在」這個災難視窗在構造上關掉。
+
+**（4）`send_kill_signal` 收窄例外（`core.py:1053`）。** `except Exception` 收成
+`except requests.RequestException`。原本設定錯誤會被降級成一句 warning 後正常返回，
+而 `run_stop` 在狀態 `unknown` 時本來就會跳過取消 kernel —— 兩條殺 kernel 的路同時斷。
+CLAUDE.md：不允許靜默失敗。
+
+**（5）遮蔽（兩處）。** `commands.py:1659` 的標頭不再含主題；
+`core.py` 那句 warning **不再插值例外物件**（保留 `type(e).__name__` 以保住可診斷性）。
+⚠️ **洩漏的不是那個 `print`，是它印的 `e`** —— 載體是交給 `requests.post` 的 URL，
+而 `requests` 的例外字串內嵌整個 URL。所以修法是不要插值，不是去 sed 那句字串。
+
+**（6）順手修輸出目錄權限。** `master_build_notebook.py:1625` 的 `os.makedirs` 改
+`mode=0o700`。`/tmp/endpoint-engine-output/endpoint_setup.ipynb` **會留存**，
+內含各 5 處 `SIGNAL_TOPIC`／`CONTROL_TOPIC` —— 切 C 之後那是憑證。
+
+**（7）秘密的產生：`scripts/set-endpoint-topic-secret.sh`**（三部曲之外的第 4 個交付物）。
+`openssl rand -hex 16`；**永不接受 argv 傳值**（argv 是 `ps` 可見的）；**永不印值**，
+只印 `sha256:<12>` 指紋；就地改寫 yaml（tmp ＋ `replace`），權限收成 0600；
+**不建備份**（復原路徑是 `endpoint kill-all --yes` —— 勘查證實它**從不建構 `Config`**）。
+活性閘門**能查就拒、查不到就警告**（第三態是警告的理由見 D-060 的形狀）。
+CLI **永不自動產生秘密**。
+
+### 四、量到的東西（全部實測，2026-09-29）
+
+| 量測 | 結果 |
+|---|---|
+| 驗證器 @ 已套 C 的樹 | **exit 0**，D1–D13 十三個檢查全過 |
+| 驗證器 @ 未套 C 的樹（＝已套 B） | **exit 1，23 項未過**；紅的是 D1–D7 ＋ D13 |
+| 突變台 | 對照組通過；**13/13 突變被它指名的那一條抓到**；**3/3 守門未被誤觸** |
+| 突變台 meta-test ×4 | 錯的期望→判「漏掉」；反轉的守門→判「守門破了」；`SCRIPT_DIR` 指錯→對照組 exit 1 拒跑；**清單過期→exit 3 且明說「不是驗證器的洞」** |
+| `test_usage_text.sh` | **133/133**（設計時預測 133，實得 133） |
+| `apply-…sh --dry-run` @ **真安裝** | exit 1，逐一指名 ntfy → stop → tunnel-url-privacy；**真安裝樹逐位不變** |
+| `apply-…sh --dry-run --target <B 的樹>` | exit 0；秘密閘門找到 canary（`sha256:3eb1bd439947`）；反向閘門 23 項紅；**五個檔案套用後的雜湊全中**；來源樹逐位不變 |
+| **位元可轉移性** | B 的樹 ＋ `patch -p1 --fuzz=0` → 五檔**逐位等於** C 的樹，無 `.orig`／`.rej` |
+
+**D 清單**：D1 推導不引用帳號／D2 `topic_secret` 屬性／D3 兩份推導一致 ＋ 黃金值／
+D4 fail-closed／D5 兩個呼叫點／D6 錯誤路徑不發主題／D7 烘驗雙向／D8 釘住切 B 的驗證器
+（`abc4125a…`）／D9 釘住 `engine/engine.py`（`68dfa5a2…`，切 A 的閘門不被汙染）／
+D10 讀取端不碰主題／D11 十個釘值描述這棵樹／D12 設定腳本／D13 套用腳本的秘密閘門。
+
+**黃金值**：`topic_prefix="endpoint"` ＋ 驗證器裡的 canary 秘密（`0123456789abcdef…`，
+**假值**）→ `endpoint-6055c1326a30`。任何公式漂移都會讓 D3 變紅。
+
+### 五、電池抓到兩個**真** bug（它們互相掩護）
+
+這兩個都不是假想出來的突變，是實跑時炸出來的，現在各佔一個突變名額（M12／M13）。
+
+**（1）`set-endpoint-topic-secret.sh`：`if [[ "$FROM_STDIN" ]]; then`。
+`[[ "false" ]]` 是**真**。**主要模式**（不帶 `--stdin`）因此掉進讀 stdin 的分支 ——
+在終端上阻塞、在管線裡直接死掉，而且**什麼都沒產生**。D12(a) 抓到。**
+
+**（2）`apply-endpoint-topic-secret.sh`：兩個缺陷疊在一起，而且**互相掩護**。
+`secret_probe` 被定義了卻**從未被呼叫**；同時 `SECRET_OK` 的極性**反了**
+（初始 1、找到時設 0，而 `((SECRET_OK))` 守的卻是「找到」那一支）。
+`((SECRET_OK))` 在 `set -u` 下先死於 `unbound variable`，**所以沒有人活著看到極性也是反的**。
+淨效果：**這支腳本根本無法套用**，而唯一的症狀是一行看不懂的 shell 錯誤。**
+
+修法不只是改那兩行：`secret_gate` 現在**自己呼叫 `secret_probe`**（「閘門跑過但沒探測」
+在構造上不可能），四個全域在函式之外初始化（`set -u` 生不出那個誤導症狀），
+且極性更正處留了註解記錄這段歷史。
+
+**（3）我自己引入的一個掛住風險（誠實記載）。** D13 用 `subprocess.run(..., capture_output=True)`
+呼叫 `patch -R`，**stdin 從終端繼承** → 反轉不了時 `patch` 會問 `Ignore -R? [n]` 並**停在那裡等輸入**。
+**一個掛住的驗證器比一個失敗的驗證器糟得多**，而且症狀看起來像當機。已加 `-f`（一律回答 n）
+＋ `stdin=DEVNULL`。修後原始樹上的訊息是可讀的
+`6 out of 6 hunks FAILED -- saving rejects to file …`。**實測沒有問句。**
+⚠️ 家族裡另外四支 apply 腳本**沒有這個風險** —— 它們是 `patch … < "$PATCH"`，
+stdin 本來就導離終端了。這個洞只在我新寫的 D13 裡。
+
+### 六、與核准的設計不同之處（五處，逐條交代）
+
+1. **`--force` 不給。** 設計的交付物表把它列進 apply 腳本的模式。**刻意不做** ——
+   它會繞過秘密閘門，也就是把 P0 重新打開。活性警告仍可 `--force` 覆寫，
+   但那只在 `set-endpoint-topic-secret.sh`（那裡繞過的是警告，不是閘門）。
+2. **5 個檔案／10 個雜湊，不是 3 個／6 個。** 設計的交付物表寫「3 個檔案…6 個雜湊」，
+   但它自己的註冊段落把兩個隨套件出貨的資料檔（`endpoint-config.example.yaml`、
+   `endpoint.1`）也算進去了。**選擇 10**，因為不釘那兩個，「補丁只碰這五個檔案」
+   就只是句話。**兩個數字都在此留下紀錄。**
+3. **新增 D13**（不在設計的 D1–D10 表裡）。理由：秘密閘門是**讓 P0 狀態不可達**的那個東西，
+   而它原本**一個自動化檢查都沒有** —— 那正是上面那對 bug 活下來的方式。
+4. **新增 M12／M13**（設計列的是 M1–M11）。同上，是實測抓到的真 bug。
+5. **設計的 D3 想要一個「非 ASCII 秘密」的*推導*列 —— 辦不到。** 形狀閘門在雜湊**之前**
+   就擋掉了它，所以它不可能是一列推導。改在它真正落地的地方斷言：**當成一筆拒絕**
+   （D4 的 `MISSING_ROWS` 有它）。
+
+**一個接受的粗糙邊（與設計一致）**：套了 C 之後，**B 的 apply 腳本**的 `state_of` 會對
+三個檔回 `unknown:<hash>`，而它印的訊息只列「升級／ntfy／stop 未套」**不包含「C 已套」**。
+B 的腳本已 commit，改它要另開 commit；**記在這裡、不改 B**。
+
+### 七、座標（依 D-068 第八節立的慣例：對**已套 B 的樹**重取）
+
+| 檔案 | 位置 |
+|---|---|
+| `endpoint/core.py` | `:42-44` 常數、`:51-62` `topic_secret_of`、`:65-67` `topic_digest`、`:563` `topic_secret`、`:599` `signal_topic`、`:610` `control_topic`、`:1053` `send_kill_signal` |
+| `endpoint/commands.py` | `:60` import、`:1078` `run_boot`／`:1088` 早退、`:1511` `run_stop`／`:1543`、`:1647` `run_watch`／`:1652`／`:1659` |
+| `scripts/master_build_notebook.py` | `:118` `require_topic_secret`、`:130` `compute_signal_topic`、`:183`／`:202`、`:1262`／`:1281`、`:1625` |
+
+**十個釘值**（`apply-endpoint-topic-secret.sh:75-84`）：
+
+| 檔案 | 原始 | 修補後 |
+|---|---|---|
+| `endpoint/core.py` | `8c8afbb9…` | `e3d7fe21…` |
+| `endpoint/commands.py` | `8d6f2ade…` | `19b8129e…` |
+| `scripts/master_build_notebook.py` | `a0449014…` | `e29a23aa…` |
+| `endpoint/data/endpoint-config.example.yaml` | `001f849f…` | `52981380…` |
+| `endpoint/data/endpoint.1` | `3830953c…` | `ed791ff3…` |
+
+前三個的**原始**值逐字等於 D-068 記的**修補後**值 → **C 只能在 B 之上套用**，已實測。
+
+**交付物雜湊**（D-069 這一批）：`endpoint-topic-secret.patch` `e571691a…`、
+`apply-endpoint-topic-secret.sh` `e7a7402f…`、`set-endpoint-topic-secret.sh` `8dd274cd…`、
+`test_endpoint_topic_secret.py` `d4e21801…`、
+`test_endpoint_topic_secret_mutants.sh` `8e3045c0…`。
+
+### 八、殘餘與無測試聲明（CLAUDE.md）
+
+- **沒有真 boot。** 秘密存在／缺席時 boot 的真實行為、以及**新主題上 KILL 能否真的送達**，
+  都沒量過 —— 需要一次真 boot，也就是需要 GPU。烘驗與突變台**都不證明真 boot 的行為**。
+- **孤兒的復原路徑沒有實跑。** `endpoint kill-all --yes`、Kaggle UI 都是**讀碼**得出的。
+  而**60 分鐘閒置逾時已證明不是復原路徑** —— 它只殺引擎行程，notebook 本體還在跑，
+  **孤兒會繼續燒 GPU 配額**。
+- **ntfy 主題的大小寫敏感度沒有實測。** 「兩邊都 `.lower()` 就一致」是推論。
+  若 ntfy 其實不分大小寫，那個潛伏 bug 就不存在 —— 而修正也無害。
+- **`run_stop` 缺席分支的結束碼沒有實跑。** **`--force` 覆寫活性警告沒有實跑。**
+- **引擎端 `log.debug` 仍會把主題寫進 kernel log**（私有、需 Kaggle 憑證）。
+  切 A 把 `engine/engine.py` 的雜湊釘死了，**碰它會讓 A 的閘門失效** → 列為殘餘，不動。
+- 秘密形狀的 ERE 是**熵的代理量，不是熵的測量**（但它讓弱秘密無法通過）。
+- **推導是雜湊、不是 KDF。** 知道主題名的人握有一個**離線驗證器**，
+  可以用雜湊速度測試候選秘密 ——「好記的秘密」是真的弱。
+- **一個 lab 一個秘密。** 領域分隔字串不綁前綴也不綁帳號。
+
+### 九、依賴與後續（**全部是你的動作，我不碰值**）
+
+順序不能換：
+
+1. Kaggle 權杖從 `~/.bashrc` 搬到 `~/.kaggle/kaggle.json`（`chmod 600`，含 `username` ＋ `key`）
+   —— 這是**切 B 的前置**
+2. 套用**切 B**（先 `--dry-run`）
+3. **確認沒有 kernel 在跑**（`endpoint status`），然後跑 `scripts/set-endpoint-topic-secret.sh`
+4. 套用**切 C**（先 `--dry-run`）—— **這一步才是真正切換主題的時刻**
+
+⚠️ **順序為什麼不能換**：秘密寫進去的**當下什麼都不會變**，舊程式碼還在推導舊主題。
+補丁一落地而 kernel 還在跑，它就**聽不到任何訊號了**，而它會繼續燒 GPU 配額。
+
+**未拍板的第四刀**：把 `/v1/apikey` 移出免認證清單（`engine.py:1624`）。
+代價是結構性的 —— session 標頭帶的是**快取**金鑰，所以「帶錯金鑰」必然 401，
+而自癒路徑存在的唯一理由正是「帶錯金鑰」。
+
+**不在本刀範圍**：`scripts/build_engines.py:1367` 用的是**另一條**主題
+（`endpoint-build-{secrets.token_hex(8)}`，**本來就是隨機的**、每次執行新鑄），
+不是帳號推導 —— **不需要切 C**。它會印出並寫進 `kernel-metadata.json` 與 notebook 的
+env_vars，那是**建構期**的一次性通道，不是執行期的推導。**記在這裡，不同一刀。**

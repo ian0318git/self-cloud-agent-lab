@@ -437,6 +437,7 @@ _broadcast(f"APIKEY:{_get_api_key()}")
 名稱推導出名字的 ntfy 主題**（`endpoint/core.py`）—— 那是公開帳號。所以每一次
 boot 都把自己的 API 金鑰，以明文，發布到一條**任何知道帳號名稱的人都能重算出
 來**的通道上（[D-067](../DECISIONS.md)）。2026-09-28 **整條鏈實測過**，不是推論。
+（主詞是過去式：切 C 之後主題名不再由帳號推導，見下面的專節。）
 
 ```bash
 bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --dry-run   # 只檢查，不動任何檔案
@@ -460,9 +461,11 @@ bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
 > 任何人只要拿到 tunnel 網址，仍能用**一次不帶權杖的請求**把金鑰讀回去。這一刀
 > 移除的是**唯一一個完全不需要先知道網址的環節**。要關掉整條鏈，得把網址從公開
 > 主題上拿下來 —— **那件事已經做完了**（`scripts/apply-endpoint-tunnel-url-privacy.sh`，
-> [D-068](../DECISIONS.md)，見下一節）。剩下的是主題的**名字**（仍由公開帳號推導）
-> 以及 `GET /v1/apikey` 本身。現在要拿到網址得先有 Kaggle 憑證 —— 那就是這一刀
-> 全部的意義。
+> [D-068](../DECISIONS.md)，見下一節）—— 再讓主題的**名字**不再由公開帳號推導，
+> 而**那件事也已經做完了**（`scripts/apply-endpoint-topic-secret.sh`，
+> [D-069](../DECISIONS.md)，見下面第三節）。剩下的是 `GET /v1/apikey` 本身。
+> 現在要拿到網址得先有 Kaggle 憑證，而要重算出主題得先有一個**從不離開這台機器**
+> 的秘密 —— 那就是這兩刀全部的意義。
 >
 > 而且它只有離線驗證。烘驗把引擎原始碼從產生出來的 notebook 裡**解碼回來**，
 > 在修補版上找到 0 則 `APIKEY:` 廣播、在原始版上找到 1 則；但**沒有真的 boot
@@ -472,11 +475,12 @@ bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
 
 步驟 3 寫的是 `endpoint base-url`。這一節說那個網址現在從哪裡來，以及為什麼換了。
 
-**它原本走的那條通道是公開的。** 開機訊號發到一條 ntfy 主題，而主題的**名字**是由
+**它原本走的那條通道是公開的。** 開機訊號發到一條 ntfy 主題，而主題的**名字**當時是由
 Kaggle 使用者名稱推導出來的（`endpoint/core.py`）—— 那是公開帳號。所以 tunnel 網址
 以明文躺在一條**任何知道帳號名稱的人都能重算出來**的通道上；而拿到那個網址，就足以
 用**一次不帶權杖的請求**從 `GET /v1/apikey` 把金鑰讀回去（[D-067](../DECISIONS.md)）。
 這一刀把網址從那條主題上拿下來，改由 **kernel log** 提供，而讀日誌需要 **Kaggle 權杖**。
+主題的**名字**在這一刀之後仍是公開帳號的函式 —— 那是下一刀，見下面第三節。
 
 它比聽起來的改動小，因為**網址本來就已經在 kernel log 裡了**：產生器的 `signal()`
 是**先 print、後 POST**。補丁改的是「發布」，不是「寫入」。
@@ -528,6 +532,62 @@ python3 scripts/probe_kernel_log_url.py            # 0 找到了 / 1 還沒有 /
 > `~/.kaggle/kaggle.json`（權限 `600`，含 `username` 與 `key`），而不是 shell 的
 > rc 檔。最後，這個補丁只有離線驗證 —— **沒有真的 boot 過**，那會花掉 GPU 額度。
 
+## 主題名不再是一個公開帳號的函式
+
+前面兩刀把主題上的**秘密**清空了。這一刀改的是**誰能碰到那條主題**
+（[D-069](../DECISIONS.md)）。
+
+主題名不是通道識別碼，它是**通行憑證**：ntfy 不做任何認證，所以知道名字**就等於**
+有權讀它、也有權在上面發布。而在切 C 之前，那個名字是 `sha256(kaggle_username)[:12]`
+—— 一個公開帳號的函式，任何人都能一行算出來。那買到三件事，沒有一件需要秘密：
+**讀生命週期**、**偽造 `KILL`**、以及依勘查的洪水分析**延遲**真的 `KILL`。
+
+現在名字由一個**從不離開這台機器**的秘密推導。產生器烘進 notebook 的是**推導出來的
+名字**；引擎只從 `LLM_SIGNAL_TOPIC`／`LLM_CONTROL_TOPIC` 讀，**從不重算**。所以：
+
+> **秘密的爆炸半徑是這台機器。主題的爆炸半徑是這台機器＋Kaggle＋kernel log。**
+
+後半段要緊，也正是主題仍被當成憑證的理由：它會落在 Kaggle 上的 private notebook、
+落在 `/tmp/endpoint-engine-output/endpoint_setup.ipynb`（**會留存** —— 9/28 的檔還在）、
+以及 kernel log。輸出目錄現在以 `0700` 建立，就是為了這個。
+
+**順序很重要，而且這是這裡最容易搞錯的一點。** 寫入秘密的當下**什麼都不會變** ——
+還在跑的程式碼推導的仍是舊名字。真正切換主題的時刻，是補丁落地的那一刻。所以：
+
+```bash
+# 1. 先確認沒有 kernel 在跑 —— endpoint status（要 Kaggle 權杖）
+bash scripts/set-endpoint-topic-secret.sh            # 秘密就位
+bash scripts/apply-endpoint-topic-secret.sh --dry-run # 檢查，不做變更
+bash scripts/apply-endpoint-topic-secret.sh           # 套用 —— 這就是切換的那一刻
+```
+
+反過來做的話，還在跑的 kernel 會**變聾**：它聽的是舊名字，所以沒有 `stop`、也沒有
+`KILL` 到得了它，而它會繼續燒 GPU 配額。**60 分鐘閒置逾時不是復原路徑** —— 它殺的是
+引擎行程，不是 notebook。復原只有 `endpoint kill-all --yes`（它**從不建構 `Config`**，
+所以不受秘密影響）或 Kaggle UI。
+
+**沒有形狀正確的秘密時，腳本拒絕執行，而且這件事沒有 `--force`。** 那個閘門正是讓
+「補丁已套但沒有秘密」這個狀態不可達的東西，因為那是個 P0：`boot` 會**先殺掉健康的
+kernel、再失敗**。所有碰到主題的路徑都改成**大聲失敗**，而不是安靜地退回舊推導。
+
+**一個不會被備份的秘密。** 設定腳本不建備份，就地覆寫。推導是單向的，所以舊名字也
+推不回來 —— 而它**不需要**推回來，因為它本來就是公開帳號的函式。代價是
+**沒有 Kaggle 憑證時就沒有無憑證的復原路徑**；另一個出口是 Kaggle UI。
+
+**一個 lab 一個秘密。** 推導裡的領域分隔字串不綁前綴也不綁帳號，所以同一個秘密用在
+兩個 lab 會導出同一條主題。而且這個推導是**雜湊、不是 KDF**：知道主題名的人握有一個
+**離線驗證器**，可以用雜湊速度測試候選秘密。這就是形狀被強制成 32 個十六進位字元
+（128 bits）而不是憑感覺的理由 —— 它是**熵的代理量，不是熵的測量**。
+
+**只有離線驗證。** 烘驗真的產生一份 notebook，斷言推導出的主題在裡面、canary 秘密
+不在；十三道檢查的驗證器餵假物件驅動兩份推導；突變台證明每一道判準都有牙齒。
+**沒有真的 boot 過** —— 那會花掉 GPU 額度 —— 所以「新主題上的 `KILL` 真的到得了」
+**沒有量過**。這裡沒有任何東西證明真 boot 的行為。
+
+⚠️ 套用之後，**切 B** 的 apply 腳本的 `state_of` 會對共用的三個檔案回
+`unknown:<hash>`，而它的訊息不會提到切 C。**記下來，不改它。**
+而**切 C 的原始雜湊逐字等於切 B 的修補後雜湊**，所以 **B 必須先套**。
+
 ## 疑難排解
 
 | 症狀 | 可能原因 |
@@ -556,6 +616,13 @@ python3 scripts/probe_kernel_log_url.py            # 0 找到了 / 1 還沒有 /
 | `endpoint base-url` 說讀不到 kernel log | 兩句不同的訊息、兩個不同的原因：**沒有憑證**（這個 shell 看不到 Kaggle 權杖）或 **Kaggle 拒絕**。看清楚印的是哪一句。前者的解法是 `~/.kaggle/kaggle.json` —— **非互動 shell 不會讀 shell 的 rc 檔**，而 cron 與大多數腳本都跑在非互動 shell 裡。 |
 | 對 ntfy 或 stop 補丁執行 `--revert` 之後，網址就不來了 | 這是預期行為 —— 那兩支補丁打的正是本補丁的三個檔案。照順序重套：ntfy 修正 → stop 修正 → `apply-endpoint-tunnel-url-privacy.sh`。雜湊閘門要等到下一次跑才會發現，所以出事當下不會有任何警告。 |
 | `apply-endpoint-tunnel-url-privacy.sh` 說雜湊不符而拒絕 | 不是 `endpoint-vps` 升級了，就是 ntfy／stop 修正沒套（它們是本補丁的建構基準）。先對那兩支跑 `--verify`。 |
+| `boot`／`stop`／`watch` 大聲失敗說沒有可用的 `signal.topic_secret` | 套用 `scripts/apply-endpoint-topic-secret.sh` 之後的預期行為 —— 補丁落地了，但秘密從沒設過。**在沒有 kernel 在跑時**執行 `scripts/set-endpoint-topic-secret.sh`。這正是設計**要的**失敗：另一個選項是安靜地退回那條公開可算的舊名字。 |
+| `set-endpoint-topic-secret.sh` 拒絕，說有個 kernel 是 `running` | 預期行為。現在改主題會讓那個 kernel **變聾**，而它會繼續燒 GPU 配額。先 `endpoint stop`（或 `endpoint kill-all --yes`），再重跑。`--force` 可以覆寫這個檢查。 |
+| `set-endpoint-topic-secret.sh` 警告查不到 kernel 狀態 | **「查不到」不等於「沒有東西在跑」** —— 那是 D-060 的形狀。通常是這個 shell 沒有 Kaggle 憑證。先自己用 `endpoint status` 確認一次。 |
+| 已經有 kernel 在跑，而主題已經被改掉了 | 它再也收不到訊號了。`endpoint kill-all --yes` **不建構 `Config`**，所以仍然有效，Kaggle UI 也是。**60 分鐘閒置逾時救不了你** —— 它殺的是引擎行程，不是 notebook。 |
+| `apply-endpoint-topic-secret.sh` 拒絕，並指名 ntfy／stop／tunnel-url 三支腳本 | 預期行為 —— 切 C 疊在**切 B 之上**，所以它的原始雜湊逐字等於 B 的修補後雜湊。先照順序把那幾支套上去。 |
+| 套用切 C 之後 ntfy 主題就安靜了 | 預期行為，不是失敗 —— kernel 現在發布到**新名字**上。先確認你套用的時候真的沒有 kernel 在跑（見上）；若有，那就是個孤兒。 |
+| `set-endpoint-topic-secret.sh --check` 回 2 | 預期行為：沒有可用的秘密，而套補丁之後每一條碰到主題的路徑都會失敗。拿掉 `--check` 再跑一次。 |
 
 接上之後，`bash scripts/check-egress.sh` 會把你的 runtime 列在「啟用中」。
 那是正確且預期的。這支探針存在的目的，是讓那成為一個**決定**，而不是意外。

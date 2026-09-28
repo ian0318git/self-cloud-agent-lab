@@ -481,9 +481,9 @@ _broadcast(f"APIKEY:{_get_api_key()}")
 ```
 
 and `_broadcast` POSTs `STATUS: [<session>] <msg>` to an **ntfy topic whose name
-is derived from the Kaggle username** (`endpoint/core.py`) — a public account.
+was derived from the Kaggle username** (`endpoint/core.py`) — a public account.
 So every boot published its own API key, in the clear, to a channel anyone who
-knows the account name can reconstruct ([D-067](../DECISIONS.md)). Measured
+knew the account name could reconstruct ([D-067](../DECISIONS.md)). Measured
 end-to-end on 2026-09-28, not inferred.
 
 ```bash
@@ -511,9 +511,12 @@ stops being true, because then the deletion would cost a full timeout.
 > only link that needed *no* prior knowledge of the tunnel at all. Closing the
 > chain means taking the URL off the public topic — **that is now done**
 > (`scripts/apply-endpoint-tunnel-url-privacy.sh`, [D-068](../DECISIONS.md), see
-> the next section). What remains is the topic *name* (still derived from the
-> public username) and `GET /v1/apikey` itself. Obtaining the URL now takes
-> Kaggle credentials, which is the whole point of the change.
+> the next section) — and then taking the topic *name* away from the public
+> username, which is **also now done** (`scripts/apply-endpoint-topic-secret.sh`,
+> [D-069](../DECISIONS.md), three sections down). What remains is
+> `GET /v1/apikey` itself. Obtaining the URL now takes Kaggle credentials, and
+> reconstructing the topic now takes a secret that never leaves this machine —
+> which is the whole point of both changes.
 >
 > It is also verified offline only. The bake test decodes the engine source back
 > out of a generated notebook and finds zero `APIKEY:` broadcasts where the
@@ -526,12 +529,14 @@ Step 3 says `endpoint base-url`. This is where that URL now comes from, and why
 it changed.
 
 **The channel it used to come from was public.** The boot signal went to an ntfy
-topic whose *name* is derived from the Kaggle username (`endpoint/core.py`) — a
-public account. So the tunnel URL sat in cleartext on a channel anyone who knows
-the account name can reconstruct — and holding that URL was enough to read the
+topic whose *name* was derived from the Kaggle username (`endpoint/core.py`) — a
+public account. So the tunnel URL sat in cleartext on a channel anyone who knew
+the account name could reconstruct — and holding that URL was enough to read the
 API key back out of `GET /v1/apikey` with no credentials at all ([D-067](../DECISIONS.md)).
 This cut takes the URL off that topic. The **kernel log** replaces it, and
-reading the log takes a **Kaggle token**.
+reading the log takes a **Kaggle token**. The topic *name* was still a function
+of the public username after this cut — that is the next cut, three sections
+down.
 
 It is a smaller change than it sounds, because the URL was **already** in the
 kernel log: the generator's `signal()` prints every message *before* it POSTs it.
@@ -592,6 +597,81 @@ credential: while it is live, anyone holding it can reach the engine.
 > shell rc file. Finally, the patch is verified offline — no real boot was run,
 > because that spends GPU quota.
 
+## The topic name is no longer a function of a public account
+
+The previous two cuts emptied the topic of secrets. This one changes **who can
+reach the topic at all** ([D-069](../DECISIONS.md)).
+
+A topic name is not a channel identifier. It is a **bearer capability**: ntfy
+authenticates nothing, so knowing the name *is* the right to read it and to
+publish on it. And until this cut the name was `sha256(kaggle_username)[:12]` —
+a function of a public account, computable by anyone in one line. That bought
+three things, none of which needed a secret: **read the lifecycle**, **forge a
+`KILL`**, and **flood the topic to delay a real `KILL`** by analysis of the
+traffic.
+
+The name is now derived from a **secret that never leaves this machine**. The
+generator bakes the *derived name* into the notebook; the engine only ever reads
+`LLM_SIGNAL_TOPIC` / `LLM_CONTROL_TOPIC` and never recomputes it. So:
+
+> **The secret's blast radius is this machine. The topic's blast radius is this
+> machine plus Kaggle plus the kernel log.**
+
+That second half matters, and it is why the topic is still treated as a
+credential: it lands in a private Kaggle notebook, in
+`/tmp/endpoint-engine-output/endpoint_setup.ipynb` (which **persists** — a
+9/28 file was still there), and in the kernel log. The output directory is now
+created `0700` for exactly this reason.
+
+**Order matters, and it is the easiest thing here to get wrong.** Writing the
+secret changes *nothing* — the running code still derives the old name. The
+moment the topic actually switches is the moment the patch lands. So:
+
+```bash
+# 1. confirm no kernel is running — endpoint status (needs a Kaggle token)
+bash scripts/set-endpoint-topic-secret.sh            # secret in place
+bash scripts/apply-endpoint-topic-secret.sh --dry-run # check; change nothing
+bash scripts/apply-endpoint-topic-secret.sh           # apply — the switch
+```
+
+Do it the other way round and a kernel that is still running **goes deaf**: it
+is listening on the old name, so no `stop` and no `KILL` reaches it, and it
+keeps burning GPU quota. The 60-minute idle timeout is **not** a recovery path —
+it kills the engine process, not the notebook. Recovery is
+`endpoint kill-all --yes` (it never constructs a `Config`, so it is unaffected
+by the secret) or the Kaggle UI.
+
+**The script refuses to run without a well-formed secret, and there is no
+`--force` for that.** That gate is what makes the "patched but no secret" state
+unreachable, because that state is a P0: `boot` would kill the healthy kernel
+and *then* fail. Everything that touches the topic fails loudly instead of
+silently falling back to the old derivation.
+
+**A secret that will not be recoverable.** The setter keeps no backup; the
+config file is overwritten in place. The derivation is one-way, so the old name
+is not recoverable either — and does not need to be, since it was a function of
+a public account. The cost is that **without a Kaggle token there is no
+credential-free recovery path**; the Kaggle UI is the other way out.
+
+**One secret per lab.** The domain-separation string in the derivation does not
+bind the prefix or the account, so the same secret used in two labs derives the
+same topic. And the derivation is a **hash, not a KDF**: anyone who learns the
+topic name holds an offline validator and can test candidate secrets at hash
+speed. That is why the shape is enforced at 32 hex characters (128 bits) rather
+than left to taste — it is an entropy proxy, not a measurement of entropy.
+
+**Verified offline only.** The bake test generates a real notebook and asserts
+the derived topic is in it and the canary secret is not, and the thirteen-check
+verifier drives both derivations against stubs; the mutation harness shows each
+check has teeth. **No real boot was run** — that spends GPU quota — so "a `KILL`
+on the new topic actually arrives" is *not* measured. Nothing here proves how a
+real boot behaves.
+
+⚠️ Applying this makes the **cut-B** apply script's `state_of` report
+`unknown:<hash>` for the three shared files; its message does not mention cut C.
+That is recorded, not fixed. And **cut C's pristine hashes are exactly cut B's
+patched hashes**, so **B must be applied first**.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -620,6 +700,13 @@ credential: while it is live, anyone holding it can reach the engine.
 | `endpoint base-url` says it could not read the kernel log | Two different sentences, two different causes: **no credentials** (this shell cannot see a Kaggle token) or **Kaggle refused**. Read which one printed. The fix for the first is `~/.kaggle/kaggle.json` — a shell rc file is not read by non-interactive shells, which is where cron and most scripts run. |
 | The URL stops arriving right after reverting the ntfy or stop fixes | Expected — those patches touch the same three files this one does. Re-apply in order: ntfy fixes, stop fixes, then `apply-endpoint-tunnel-url-privacy.sh`. The hash gate only notices on the next run, so nothing warns you at the moment it happens. |
 | `apply-endpoint-tunnel-url-privacy.sh` refuses with a hash mismatch | Either `endpoint-vps` was upgraded, or the ntfy/stop fixes are not applied (they are the baseline this patch was built against). Run `--verify` on those two first. |
+| `boot` / `stop` / `watch` fail loudly saying there is no usable `signal.topic_secret` | Working as intended after `scripts/apply-endpoint-topic-secret.sh` — the patch landed but the secret was never set. Run `scripts/set-endpoint-topic-secret.sh` (with no kernel running). This is the failure the design *wants*: the alternative was silently deriving the old, publicly computable name. |
+| `set-endpoint-topic-secret.sh` refuses saying a kernel is `running` | Working as intended. Changing the topic now makes that kernel deaf, and it keeps burning GPU quota. `endpoint stop` (or `endpoint kill-all --yes`) first, then re-run. `--force` overrides the check. |
+| `set-endpoint-topic-secret.sh` warns it could not read the kernel status | **"Could not check" is not "nothing is running"** — that is the D-060 shape. It usually means this shell has no Kaggle token. Confirm with `endpoint status` before continuing. |
+| A kernel is running and the topic has already been changed | It cannot be signalled any more. `endpoint kill-all --yes` never constructs a `Config`, so it still works, and so does the Kaggle UI. **The 60-minute idle timeout will not save you** — it kills the engine process, not the notebook. |
+| `apply-endpoint-topic-secret.sh` refuses, naming the ntfy / stop / tunnel-url scripts | Working as intended — cut C stacks **on top of cut B**, so its pristine hashes are exactly B's patched hashes. Apply those in order first. |
+| The ntfy topic went quiet right after applying cut C | Expected, not a failure — the kernel is now publishing on the *new* name. Confirm a kernel was not running when you applied it (see above); if one was, it is an orphan. |
+| `--check` on `set-endpoint-topic-secret.sh` exits 2 | Working as intended: there is no usable secret, and after the patch everything that touches the topic fails. Run the script without `--check`. |
 
 After connecting, `bash scripts/check-egress.sh` will list your runtime under
 "啟用中". That is correct and intended. The probe exists so that it is a
