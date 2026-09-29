@@ -1,0 +1,127 @@
+--- a/engine/engine.py
++++ b/engine/engine.py
+@@ -1621,7 +1621,11 @@
+ 
+ @app.middleware("http")
+ async def _auth_middleware(request: Request, call_next: Any) -> Any:
+-    bypass = {"/health", "/metrics", "/tunnel", "/docs", "/openapi.json", "/v1/apikey"}
++    # `/v1/apikey` is deliberately absent (D-070): it hands back the key, so
++    # leaving it unauthenticated made the tunnel URL alone sufficient. The route
++    # itself is kept -- an authenticated caller can confirm which key the engine
++    # expects -- but it is no longer a way in.
++    bypass = {"/health", "/metrics", "/tunnel", "/docs", "/openapi.json"}
+     if request.url.path in bypass:
+         return await call_next(request)
+     auth = request.headers.get("Authorization", "")
+@@ -1928,6 +1932,9 @@
+ 
+ @app.get("/v1/apikey")
+ async def apikey() -> Any:
++    # Auth-gated since D-070 (no longer in the bypass set above). This is now an
++    # introspection route: a caller who already holds the key can check which
++    # key the engine expects. It can no longer *obtain* one.
+     return {"key": _get_api_key()}
+ 
+ 
+--- a/endpoint/commands.py
++++ b/endpoint/commands.py
+@@ -1278,13 +1278,6 @@
+                     if sig_key in _seen_signals:
+                         continue
+                     _seen_signals.add(sig_key)
+-                if signal.startswith("APIKEY:"):
+-                    _, _, key = signal.partition(":")
+-                    key = key.strip()
+-                    if key:
+-                        save_cached_apikey(key)
+-                        console.print("  [dim]\u2192 API key registered with engine[/]")
+-                    continue
+                 if signal.startswith("TUNNEL:") or signal.startswith(
+                     "TUNNEL ACQUIRED:"
+                 ):
+@@ -1478,25 +1471,18 @@
+ def _register_with_proxy(config: Config, tunnel_url: str) -> str:
+     if not config.proxy_enabled:
+         return tunnel_url
+-    # Try cached API key first (broadcast by engine via ntfy.sh during startup).
+-    # This avoids DNS-resolution failures on the dynamically-assigned
+-    # trycloudflare.com tunnel hostname from the user's machine.
+-    api_key = load_cached_apikey()
++    # The authoritative key is the local one: `identity.api_key` in
++    # endpoint-config.yaml, provisioned by run_boot() and baked into the engine.
++    # D-070 removed the tunnel round-trip that used to fetch a key from the
++    # engine when the cache was empty -- /v1/apikey is no longer in the auth
++    # bypass, so that request can only ever return a key we already hold, and it
++    # fails outright when we hold none. Reading it locally also sidesteps the
++    # DNS-resolution failures on the dynamically-assigned trycloudflare.com
++    # tunnel hostname, which is why the cache was consulted first.
++    api_key = config.api_key or load_cached_apikey() or ""
+     if not api_key:
+-        # Fallback: fetch from engine via tunnel URL (4 retries, exp backoff)
+-        for attempt in range(4):
+-            try:
+-                client = VPSClient(tunnel_url, timeout=5)
+-                api_key = client.get_api_key()
+-                break
+-            except Exception as e:
+-                if attempt < 3:
+-                    time.sleep(2 ** (attempt + 1))
+-                    continue
+-                console.warn(f"Proxy registration: could not reach engine ({e})")
+-                console.dim("Run 'endpoint register' once the VPS is online.")
+-                return config.proxy_url if config.proxy_url else tunnel_url
+-    if not api_key:
++        console.warn("Proxy registration: no local API key configured.")
++        console.dim("  Run 'endpoint boot' once to provision one.")
+         return config.proxy_url if config.proxy_url else tunnel_url
+     save_cached_apikey(api_key)
+     ok, msg = register_tunnel_with_proxy(config.register_url, tunnel_url, api_key)
+@@ -2154,12 +2140,14 @@
+ 
+     client = VPSClient(url)
+ 
+-    # Use cached key from boot signal first (avoids proxy 401 from missing auth)
+-    api_key = load_cached_apikey() or ""
++    # Authenticate with the local key. VPSClient already installed the cached
++    # key on construction; this re-installs the authoritative one so a stale
++    # cache cannot shadow it (D-070).
++    api_key = config.api_key or load_cached_apikey() or ""
+     if api_key:
+         client._session.headers.update({"Authorization": f"Bearer {api_key}"})
+     else:
+-        console.warn("No cached API key — boot may have failed to broadcast it.")
++        console.warn("No local API key configured — run 'endpoint boot' to provision one.")
+ 
+     # Models (required — VPS must respond)
+     try:
+@@ -2167,7 +2155,11 @@
+     except requests.HTTPError as e:
+         if e.response is not None and e.response.status_code == 401:
+             console.warn(
+-                "Authentication denied by proxy — run 'endpoint register' for a fresh key."
++                "Authentication denied — the key this machine holds is not the "
++                "one the engine was baked with."
++            )
++            console.dim(
++                "  Re-run 'endpoint boot' so the engine is rebuilt with the local key."
+             )
+         _report_vps_offline(e, api_key)
+     except Exception as e:
+@@ -2631,11 +2623,12 @@
+     if not tunnel_url:
+         console.err("No tunnel URL found. Boot the VPS first: endpoint boot")
+         return
+-    try:
+-        client = VPSClient(tunnel_url)
+-        api_key = client.get_api_key()
+-    except Exception as e:
+-        console.err(f"Could not fetch API key from VPS: {e}")
++    # Same source as _register_with_proxy (D-070): the local key written at
++    # boot. There is nothing to fetch over the tunnel any more.
++    api_key = config.api_key or load_cached_apikey() or ""
++    if not api_key:
++        console.err("No local API key configured — nothing to register with.")
++        console.dim("  Run 'endpoint boot' once to provision one.")
+         return
+     save_cached_apikey(api_key)
+     ok, msg = register_tunnel_with_proxy(config.register_url, tunnel_url, api_key)

@@ -19,6 +19,15 @@ unauthenticated request. This patch removes the one link in that chain which
 needs no prior knowledge of the tunnel at all. It does not close the chain; that
 is cut B.
 
+UPDATE 2026-09-29 (D-070). The fourth cut removed `/v1/apikey` from that bypass
+set, so the paragraph above describes the state this patch was written against,
+not the state of an installed tree today. Two consequences are handled below
+rather than left to surprise a reader: check B's marker moved off the deleted
+`APIKEY:` branch, and check C's premise -- that the CLI's HTTP fallback must
+keep working -- was deliberately reversed by the fourth cut. Check C's
+assertions still guard something real (the route and `_get_api_key` must survive
+as an authenticated introspection route), so they stay; only the reason changed.
+
 WHAT IS DRIVEN, AND WHY NOT import. The payload is real Python, so functions are
 sliced out by AST and exec'd against fakes. Importing `engine.engine` is not an
 option: it binds FastAPI routes, builds a real settings object out of
@@ -43,9 +52,15 @@ WHAT EACH CHECK IS FOR.
      true. NOTE: it passes on the pristine file too -- it is a guard, not the
      bug.
 
-  C  The key must still be reachable by the CLI. `run_boot` has an HTTP fallback
-     (`commands.py:1454` -> `client.get_api_key()` -> `GET /v1/apikey`), and that
-     route must still exist and still return the key. Also a guard.
+  C  The route and its helper must survive. This began as "the key must still be
+     reachable by the CLI", resting on `run_boot`'s HTTP fallback
+     (`commands.py:1454` -> `client.get_api_key()` -> `GET /v1/apikey`). The
+     fourth cut removed that fallback on purpose (D-070) -- it could no longer
+     succeed once the bypass closed -- so the *stated reason* is now reversed
+     while the assertions stay: the route must still exist and still return
+     `_get_api_key()`, and `_get_api_key` must not become an orphan. Those are
+     still worth guarding; they just guard introspection now, not healing. The
+     "the fallback is gone" half is asserted by the fourth cut's own verifier.
 
 NOTE ON THE VERDICT: a pristine engine FAILS check A -- that is the bug being
 demonstrated. Run it in both directions: the patched file must pass, the
@@ -135,14 +150,22 @@ def _boot_loop(src: str) -> ast.While:
     """`run_boot`'s wait loop: the `while ... < 600` that holds the APIKEY branch.
 
     There are two other `while time.time() - start < N` loops in commands.py, so
-    the marker alone is not enough -- the loop that contains the APIKEY branch
-    is the one that matters.
+    the marker alone is not enough -- the loop that contains the tunnel branch is
+    the one that matters.
+
+    2026-09-29 (D-070). The marker used to be the `APIKEY:` branch. The fourth
+    cut deleted that branch -- dead since D-067 took away its producer -- so this
+    now anchors on `TUNNEL ACQUIRED:`, which the fourth cut deliberately keeps.
+    The lesson is worth keeping in view: anchoring a locator on something a later
+    patch removes is what made this break, and it broke by raising, not by
+    failing a check. The tunnel branch is also the more honest marker, since it
+    is the loop's actual exit condition.
     """
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.While) and 600 in {
             n.value for n in ast.walk(node.test) if isinstance(n, ast.Constant)
         }:
-            if any("APIKEY:" in _constants(sub.test)
+            if any("TUNNEL ACQUIRED:" in _constants(sub.test)
                    for sub in ast.walk(node) if isinstance(sub, ast.If)):
                 return node
     raise AssertionError("run_boot's wait loop not found")
@@ -249,8 +272,28 @@ def check_boot_safety(engine: Path, commands: Path, fails: list[str]) -> None:
     tunnel_branch = _if_branch(loop, "TUNNEL ACQUIRED:")
 
     if key_branch is None:
-        print("    ✗ 找不到 APIKEY: 分支 —— 前提無從確認")
-        fails.append("APIKEY: branch not found in run_boot's wait loop")
+        # 2026-09-29 (D-070)。第四刀把這個分支刪掉了（它自 D-067 移除產生端之後
+        # 就是死的）。守衛的對象消失，不等於可以放行 —— 那會讓這一條變成在檢查
+        # 空氣。改成驗退場**乾淨**：這個訊號兩端都不存在，才算前提消滅。
+        #
+        # 只拆一半會在這裡紅：有人還在等一則永遠不會來的訊息，而外面看不出來。
+        # 那正是 D-060 的形狀，也是這一刀當初被要求「一起清」的理由。
+        print("    → APIKEY: 分支已於 D-070 退場，改驗訊號兩端皆已不存在")
+        stray = [
+            f"{label}:{n.lineno}"
+            for label, path in (("engine.py", engine), ("commands.py", commands))
+            for n in ast.walk(ast.parse(_source(path)))
+            if isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and "APIKEY:" in n.value
+        ]
+        if stray:
+            print(f"    ✗ 分支不見了，但訊號的另一端還在（{'、'.join(stray)}）"
+                  " —— 有人還在等一則永遠不會來的訊息")
+            fails.append("APIKEY: branch is gone but the signal is still referenced")
+        else:
+            print("    ✓ 分支已退場，且訊號兩端都不存在 —— 承重前提消滅，守衛一併退場")
+        print()
         return
     if tunnel_branch is None:
         print("    ✗ 找不到 TUNNEL ACQUIRED: 分支 —— 前提無從確認")
@@ -276,7 +319,10 @@ def check_boot_safety(engine: Path, commands: Path, fails: list[str]) -> None:
 
 
 def check_key_still_reachable(engine: Path, fails: list[str]) -> None:
-    print("  檢查 C：金鑰仍然拿得到（CLI 的 HTTP 退路沒有被這刀砍掉）")
+    # 這一行原本印「金鑰仍然拿得到（CLI 的 HTTP 退路沒有被這刀砍掉）」。第四刀
+    # 之後那句話是**反的** —— 退路是被刻意拿掉的。標頭改成描述真正被斷言的東西，
+    # 否則下一個讀者會在兩個版本之間讀到同一句已經不成立的話。
+    print("  檢查 C：路由與 _get_api_key 都還在（守衛；2026-09-29 起不含退路）")
 
     tree = ast.parse(_source(engine))
 
