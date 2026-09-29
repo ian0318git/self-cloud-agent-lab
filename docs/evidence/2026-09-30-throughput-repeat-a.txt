@@ -1,0 +1,11 @@
+# 2026-09-30-throughput-repeat-a.txt
+#
+# 指令：time scripts/verify-throughput.sh --json -- --models qwen3:4b qwen2.5:3b --ctx 4096 8192 --length-predict 128 > tmp/rep-a.json 2> tmp/rep-a.log
+# 時間：2026-09-30 01:24:37 +1000（來源檔的 mtime）
+# 結束碼：未留存（那一輪沒有跑起來）
+# 牆上時間：0 秒（當場失敗）
+# 引用：DECISIONS.md D-071 §十二
+# 註  ：**這一輪沒有產出任何東西。** 指令少了 `bash`，而 `scripts/verify-throughput.sh` 沒有可執行位 —— 整輪死在 `Permission denied`。留下它是為了讓下一個看到 `rep-a` 缺號的人知道原因，不是因為它是一個資料點。
+#
+# 上面開頭連續的 `#` 行是這次搬遷加上去的說明。把它們整段拿掉，剩下的就是原檔 —— 除了移除 ANSI 色碼之外，一個位元組都沒動。
+/bin/bash: line 24: scripts/verify-throughput.sh: Permission denied

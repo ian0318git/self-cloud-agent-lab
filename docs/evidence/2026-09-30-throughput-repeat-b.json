@@ -1,0 +1,1059 @@
+{
+  "ollama_url": "http://ollama:11434",
+  "available_models": [
+    {
+      "name": "qwen3:8b",
+      "size_bytes": 5225388164,
+      "digest": "500a1f067a9f"
+    },
+    {
+      "name": "qwen2.5:3b",
+      "size_bytes": 1929912432,
+      "digest": "357c53fb659c"
+    },
+    {
+      "name": "qwen3:4b",
+      "size_bytes": 2497293931,
+      "digest": "359d7dd4bcda"
+    },
+    {
+      "name": "bge-m3:latest",
+      "size_bytes": 1157672605,
+      "digest": "790764642607"
+    },
+    {
+      "name": "qwen3-embedding:0.6b",
+      "size_bytes": 639150858,
+      "digest": "ac6da0dfba84"
+    }
+  ],
+  "conditions": [
+    {
+      "label": "qwen3:4b num_ctx=4096",
+      "model": "qwen3:4b",
+      "num_ctx": 4096,
+      "num_predict": 160,
+      "prompt_chars": 19,
+      "warmup": {
+        "eval_count": 131,
+        "load_duration_ns": 4218873,
+        "done_reason": "stop"
+      },
+      "samples": [
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 20390111000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 143894000,
+          "load_duration_ns": 2040179,
+          "total_duration_ns": 20555846273,
+          "done_reason": "stop",
+          "decode_tps": 6.424683024040428,
+          "prefill_tps": 132.04164176407633,
+          "identity_error_s": 0.019801094,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 29175976000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 128270999,
+          "load_duration_ns": 5744231,
+          "total_duration_ns": 29320116688,
+          "done_reason": "stop",
+          "decode_tps": 4.489995467503812,
+          "prefill_tps": 148.123895098065,
+          "identity_error_s": 0.010125458,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 29008728000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 477851000,
+          "load_duration_ns": 10316166,
+          "total_duration_ns": 29506707806,
+          "done_reason": "stop",
+          "decode_tps": 4.515882254471826,
+          "prefill_tps": 39.76134820268243,
+          "identity_error_s": 0.00981264,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 27253458000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 169715000,
+          "load_duration_ns": 3124791,
+          "total_duration_ns": 27429841913,
+          "done_reason": "stop",
+          "decode_tps": 4.806729479980119,
+          "prefill_tps": 111.95239077276611,
+          "identity_error_s": 0.003544122,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24560914000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 443269000,
+          "load_duration_ns": 2157172,
+          "total_duration_ns": 25011109237,
+          "done_reason": "stop",
+          "decode_tps": 5.333677728768563,
+          "prefill_tps": 42.863362878974165,
+          "identity_error_s": 0.004769065,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24732681000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 150806000,
+          "load_duration_ns": 3012856,
+          "total_duration_ns": 24889481608,
+          "done_reason": "stop",
+          "decode_tps": 5.296635653854105,
+          "prefill_tps": 125.98968210813894,
+          "identity_error_s": 0.002981752,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24244732000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 135294000,
+          "load_duration_ns": 7068743,
+          "total_duration_ns": 24393682534,
+          "done_reason": "stop",
+          "decode_tps": 5.403235638983348,
+          "prefill_tps": 140.4349047260041,
+          "identity_error_s": 0.006587791,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 5.297,
+      "stability": "noisy",
+      "summary": {
+        "n": 7,
+        "min": 4.49,
+        "median": 5.297,
+        "max": 6.425,
+        "spread_pct": 36.53,
+        "cv_pct": 12.65,
+        "stability": "noisy",
+        "message": "CV 12.6% > 8.9%（全距 36.5%）—— 重複量測彼此不一致，這一組的**中位數**不是機器的性質。"
+      },
+      "prefill_tps": 125.99,
+      "prompt_eval_count": 19,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=131 ≤ num_predict=160（done_reason=stop），上限有效。"
+      }
+    },
+    {
+      "label": "qwen3:4b num_ctx=8192",
+      "model": "qwen3:4b",
+      "num_ctx": 8192,
+      "num_predict": 160,
+      "prompt_chars": 19,
+      "warmup": {
+        "eval_count": 131,
+        "load_duration_ns": 3661620,
+        "done_reason": "stop"
+      },
+      "samples": [
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 26008917000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 227461000,
+          "load_duration_ns": 9070648,
+          "total_duration_ns": 26299377234,
+          "done_reason": "stop",
+          "decode_tps": 5.0367341323746775,
+          "prefill_tps": 83.53080308272627,
+          "identity_error_s": 0.053928586,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24799709000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 130780000,
+          "load_duration_ns": 1683284,
+          "total_duration_ns": 24935592163,
+          "done_reason": "stop",
+          "decode_tps": 5.282320046577966,
+          "prefill_tps": 145.2821532344395,
+          "identity_error_s": 0.003419879,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 25881801000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 132001000,
+          "load_duration_ns": 1669597,
+          "total_duration_ns": 26019024670,
+          "done_reason": "stop",
+          "decode_tps": 5.061471572244915,
+          "prefill_tps": 143.93830349770076,
+          "identity_error_s": 0.003553073,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24022818000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 176886000,
+          "load_duration_ns": 5332623,
+          "total_duration_ns": 24211641937,
+          "done_reason": "stop",
+          "decode_tps": 5.45314875215722,
+          "prefill_tps": 107.41381454722251,
+          "identity_error_s": 0.006605314,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 21612266000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 122725000,
+          "load_duration_ns": 1965012,
+          "total_duration_ns": 21742603417,
+          "done_reason": "stop",
+          "decode_tps": 6.061372740831525,
+          "prefill_tps": 154.81768180892237,
+          "identity_error_s": 0.005647405,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 25084102000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 1369710000,
+          "load_duration_ns": 4294175,
+          "total_duration_ns": 26464163348,
+          "done_reason": "stop",
+          "decode_tps": 5.222431323234134,
+          "prefill_tps": 13.871549452073797,
+          "identity_error_s": 0.006057173,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 131,
+          "eval_duration_ns": 24360565000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 131791000,
+          "load_duration_ns": 3625744,
+          "total_duration_ns": 24500952658,
+          "done_reason": "stop",
+          "decode_tps": 5.377543583246119,
+          "prefill_tps": 144.16765940011078,
+          "identity_error_s": 0.004970914,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 5.282,
+      "stability": "stable",
+      "summary": {
+        "n": 7,
+        "min": 5.037,
+        "median": 5.282,
+        "max": 6.061,
+        "spread_pct": 19.4,
+        "cv_pct": 6.56,
+        "stability": "stable",
+        "message": "CV 6.6% ≤ 8.9%（= 全距門檻 15% 換算到 n=7）—— 這一組可以留。"
+      },
+      "prefill_tps": 143.938,
+      "prompt_eval_count": 19,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=131 ≤ num_predict=160（done_reason=stop），上限有效。"
+      }
+    },
+    {
+      "label": "qwen2.5:3b num_ctx=4096",
+      "model": "qwen2.5:3b",
+      "num_ctx": 4096,
+      "num_predict": 160,
+      "prompt_chars": 19,
+      "warmup": {
+        "eval_count": 125,
+        "load_duration_ns": 7278158,
+        "done_reason": "stop"
+      },
+      "samples": [
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 17109788000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 86437000,
+          "load_duration_ns": 1389337,
+          "total_duration_ns": 17202854576,
+          "done_reason": "stop",
+          "decode_tps": 7.3057597206932074,
+          "prefill_tps": 439.6265488159006,
+          "identity_error_s": 0.005240239,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 14322304000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 94198000,
+          "load_duration_ns": 2602597,
+          "total_duration_ns": 14424558211,
+          "done_reason": "stop",
+          "decode_tps": 8.727646054712984,
+          "prefill_tps": 403.4055924754241,
+          "identity_error_s": 0.005453614,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 20394655000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 98590000,
+          "load_duration_ns": 2001514,
+          "total_duration_ns": 20502050524,
+          "done_reason": "stop",
+          "decode_tps": 6.129056853376534,
+          "prefill_tps": 385.4346282584441,
+          "identity_error_s": 0.00680401,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 20318715000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 107310000,
+          "load_duration_ns": 1823765,
+          "total_duration_ns": 20435113596,
+          "done_reason": "stop",
+          "decode_tps": 6.151963842201635,
+          "prefill_tps": 354.1142484391017,
+          "identity_error_s": 0.007264831,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 17552070000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 108370000,
+          "load_duration_ns": 2675005,
+          "total_duration_ns": 17666539009,
+          "done_reason": "stop",
+          "decode_tps": 7.121667130999364,
+          "prefill_tps": 350.65054904493866,
+          "identity_error_s": 0.003424004,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13212864000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 107105000,
+          "load_duration_ns": 2594574,
+          "total_duration_ns": 13329940146,
+          "done_reason": "stop",
+          "decode_tps": 9.460477304541998,
+          "prefill_tps": 354.79202651603566,
+          "identity_error_s": 0.007376572,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13558068000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 100608000,
+          "load_duration_ns": 1784585,
+          "total_duration_ns": 13665053468,
+          "done_reason": "stop",
+          "decode_tps": 9.219602674953393,
+          "prefill_tps": 377.7035623409669,
+          "identity_error_s": 0.004592883,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 7.306,
+      "stability": "noisy",
+      "summary": {
+        "n": 7,
+        "min": 6.129,
+        "median": 7.306,
+        "max": 9.46,
+        "spread_pct": 45.6,
+        "cv_pct": 19.21,
+        "stability": "noisy",
+        "message": "CV 19.2% > 8.9%（全距 45.6%）—— 重複量測彼此不一致，這一組的**中位數**不是機器的性質。"
+      },
+      "prefill_tps": 377.704,
+      "prompt_eval_count": 38,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=125 ≤ num_predict=160（done_reason=stop），上限有效。"
+      }
+    },
+    {
+      "label": "qwen2.5:3b num_ctx=8192",
+      "model": "qwen2.5:3b",
+      "num_ctx": 8192,
+      "num_predict": 160,
+      "prompt_chars": 19,
+      "warmup": {
+        "eval_count": 125,
+        "load_duration_ns": 4677991,
+        "done_reason": "stop"
+      },
+      "samples": [
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13443870000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 94377000,
+          "load_duration_ns": 3147615,
+          "total_duration_ns": 13547454207,
+          "done_reason": "stop",
+          "decode_tps": 9.297917935832464,
+          "prefill_tps": 402.6404738442629,
+          "identity_error_s": 0.006059592,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13112855000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 101871000,
+          "load_duration_ns": 2655380,
+          "total_duration_ns": 13229562608,
+          "done_reason": "stop",
+          "decode_tps": 9.53263038445861,
+          "prefill_tps": 373.0207811840465,
+          "identity_error_s": 0.012181228,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13609318000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 119325000,
+          "load_duration_ns": 1732507,
+          "total_duration_ns": 13733471302,
+          "done_reason": "stop",
+          "decode_tps": 9.184883474689915,
+          "prefill_tps": 318.45799287659753,
+          "identity_error_s": 0.003095795,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13160292000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 113307000,
+          "load_duration_ns": 2272782,
+          "total_duration_ns": 13281654193,
+          "done_reason": "stop",
+          "decode_tps": 9.498269491284844,
+          "prefill_tps": 335.37204232748195,
+          "identity_error_s": 0.005782411,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 13575490000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 99951000,
+          "load_duration_ns": 1648352,
+          "total_duration_ns": 13686257867,
+          "done_reason": "stop",
+          "decode_tps": 9.207770769231903,
+          "prefill_tps": 380.1862912827285,
+          "identity_error_s": 0.009168515,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 20992569000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 99313000,
+          "load_duration_ns": 7833625,
+          "total_duration_ns": 21104709566,
+          "done_reason": "stop",
+          "decode_tps": 5.954487990488444,
+          "prefill_tps": 382.6286588865506,
+          "identity_error_s": 0.004993941,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 125,
+          "eval_duration_ns": 14302700000,
+          "prompt_eval_count": 38,
+          "prompt_eval_duration_ns": 101639000,
+          "load_duration_ns": 1795954,
+          "total_duration_ns": 14411899146,
+          "done_reason": "stop",
+          "decode_tps": 8.739608605368216,
+          "prefill_tps": 373.87223408337354,
+          "identity_error_s": 0.005764192,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 9.208,
+      "stability": "noisy",
+      "summary": {
+        "n": 7,
+        "min": 5.954,
+        "median": 9.208,
+        "max": 9.533,
+        "spread_pct": 38.86,
+        "cv_pct": 13.8,
+        "stability": "noisy",
+        "message": "CV 13.8% > 8.9%（全距 38.9%）—— 重複量測彼此不一致，這一組的**中位數**不是機器的性質。"
+      },
+      "prefill_tps": 373.872,
+      "prompt_eval_count": 38,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=125 ≤ num_predict=160（done_reason=stop），上限有效。"
+      }
+    },
+    {
+      "label": "qwen3:4b num_ctx=8192 num_predict=128",
+      "model": "qwen3:4b",
+      "num_ctx": 8192,
+      "num_predict": 128,
+      "prompt_chars": 19,
+      "warmup": {
+        "eval_count": 128,
+        "load_duration_ns": 5467931943,
+        "done_reason": "length"
+      },
+      "samples": [
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 25164647000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 142813000,
+          "load_duration_ns": 3197855,
+          "total_duration_ns": 25336257542,
+          "done_reason": "length",
+          "decode_tps": 5.086500915351604,
+          "prefill_tps": 133.0411097028982,
+          "identity_error_s": 0.025599687,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 24613374000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 196059000,
+          "load_duration_ns": 3048956,
+          "total_duration_ns": 24818742773,
+          "done_reason": "length",
+          "decode_tps": 5.200424777196332,
+          "prefill_tps": 96.9096037417308,
+          "identity_error_s": 0.006260817,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 24554746000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 135358000,
+          "load_duration_ns": 1780543,
+          "total_duration_ns": 24694474795,
+          "done_reason": "length",
+          "decode_tps": 5.212841541916173,
+          "prefill_tps": 140.36850426276985,
+          "identity_error_s": 0.002590252,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 23640934000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 117014000,
+          "load_duration_ns": 2713753,
+          "total_duration_ns": 23763167235,
+          "done_reason": "length",
+          "decode_tps": 5.4143376907189875,
+          "prefill_tps": 162.37373305758285,
+          "identity_error_s": 0.002505482,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 23754259000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 125891000,
+          "load_duration_ns": 1871480,
+          "total_duration_ns": 23887905744,
+          "done_reason": "length",
+          "decode_tps": 5.3885073830339225,
+          "prefill_tps": 150.92421221532913,
+          "identity_error_s": 0.005884264,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 24329626000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 205124000,
+          "load_duration_ns": 2219868,
+          "total_duration_ns": 24540643771,
+          "done_reason": "length",
+          "decode_tps": 5.261075529891006,
+          "prefill_tps": 92.62689885142646,
+          "identity_error_s": 0.003673903,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 128,
+          "eval_duration_ns": 24441595000,
+          "prompt_eval_count": 19,
+          "prompt_eval_duration_ns": 154682000,
+          "load_duration_ns": 3259567,
+          "total_duration_ns": 24606649681,
+          "done_reason": "length",
+          "decode_tps": 5.236974100912809,
+          "prefill_tps": 122.83265021140147,
+          "identity_error_s": 0.007113114,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 5.237,
+      "stability": "stable",
+      "summary": {
+        "n": 7,
+        "min": 5.087,
+        "median": 5.237,
+        "max": 5.414,
+        "spread_pct": 6.26,
+        "cv_pct": 2.16,
+        "stability": "stable",
+        "message": "CV 2.2% ≤ 8.9%（= 全距門檻 15% 換算到 n=7）—— 這一組可以留。"
+      },
+      "prefill_tps": 133.041,
+      "prompt_eval_count": 19,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=128 ≤ num_predict=128（done_reason=length），上限有效。"
+      }
+    },
+    {
+      "label": "qwen3:4b num_ctx=8192 長 prompt",
+      "model": "qwen3:4b",
+      "num_ctx": 8192,
+      "num_predict": 32,
+      "prompt_chars": 12925,
+      "warmup": {
+        "eval_count": 32,
+        "load_duration_ns": 2088715,
+        "done_reason": "length"
+      },
+      "samples": [
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 12527904000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 1311043000,
+          "load_duration_ns": 3302175,
+          "total_duration_ns": 13877779001,
+          "done_reason": "length",
+          "decode_tps": 2.554297989512053,
+          "prefill_tps": 2304.272247363359,
+          "identity_error_s": 0.035529826,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 13871037000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 299362000,
+          "load_duration_ns": 1196585,
+          "total_duration_ns": 14186713474,
+          "done_reason": "length",
+          "decode_tps": 2.3069652254550257,
+          "prefill_tps": 10091.461174096912,
+          "identity_error_s": 0.015117889,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 11754428000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 289606000,
+          "load_duration_ns": 5377150,
+          "total_duration_ns": 12082225190,
+          "done_reason": "length",
+          "decode_tps": 2.722378324151545,
+          "prefill_tps": 10431.413713804273,
+          "identity_error_s": 0.03281404,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 10740005000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 337639000,
+          "load_duration_ns": 6945057,
+          "total_duration_ns": 11117406196,
+          "done_reason": "length",
+          "decode_tps": 2.9795144415668333,
+          "prefill_tps": 8947.426097103711,
+          "identity_error_s": 0.032817139,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 10220963000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 673281000,
+          "load_duration_ns": 2383638,
+          "total_duration_ns": 10926931274,
+          "done_reason": "length",
+          "decode_tps": 3.130820452045468,
+          "prefill_tps": 4486.98240407794,
+          "identity_error_s": 0.030303636,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 12974263000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 289592000,
+          "load_duration_ns": 2244902,
+          "total_duration_ns": 13290796712,
+          "done_reason": "length",
+          "decode_tps": 2.466421406749655,
+          "prefill_tps": 10431.918008784773,
+          "identity_error_s": 0.02469681,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        },
+        {
+          "eval_count": 32,
+          "eval_duration_ns": 13724355000,
+          "prompt_eval_count": 3021,
+          "prompt_eval_duration_ns": 311641000,
+          "load_duration_ns": 2751017,
+          "total_duration_ns": 14067715206,
+          "done_reason": "length",
+          "decode_tps": 2.3316214131738797,
+          "prefill_tps": 9693.846445108315,
+          "identity_error_s": 0.028968189,
+          "usable": {
+            "usable": true,
+            "reason": "ok",
+            "message": "可用。"
+          }
+        }
+      ],
+      "usable_samples": 7,
+      "excluded": [],
+      "rate": 2.554,
+      "stability": "noisy",
+      "summary": {
+        "n": 7,
+        "min": 2.307,
+        "median": 2.554,
+        "max": 3.131,
+        "spread_pct": 32.25,
+        "cv_pct": 12.45,
+        "stability": "noisy",
+        "message": "CV 12.4% > 8.9%（全距 32.3%）—— 重複量測彼此不一致，這一組的**中位數**不是機器的性質。"
+      },
+      "prefill_tps": 9693.846,
+      "prompt_eval_count": 3021,
+      "cap": {
+        "verdict": "respected",
+        "message": "eval_count=32 ≤ num_predict=32（done_reason=length），上限有效。"
+      },
+      "truncation": {
+        "verdict": "intact",
+        "limit": 4098,
+        "message": "prompt_eval_count=3021 小於 num_ctx 8192 —— prompt 完整（塞得下就不會被切，limit 4098 不適用）。"
+      }
+    }
+  ],
+  "kv_points": [
+    {
+      "model": "qwen3:4b",
+      "context_length": 4096,
+      "size_bytes": 3184001022,
+      "label": "qwen3:4b@4096"
+    },
+    {
+      "model": "qwen3:4b",
+      "context_length": 8192,
+      "size_bytes": 3884460276,
+      "label": "qwen3:4b@8192"
+    },
+    {
+      "model": "qwen2.5:3b",
+      "context_length": 4096,
+      "size_bytes": 2164156005,
+      "label": "qwen2.5:3b@4096"
+    },
+    {
+      "model": "qwen2.5:3b",
+      "context_length": 8192,
+      "size_bytes": 2412154715,
+      "label": "qwen2.5:3b@8192"
+    }
+  ],
+  "notes": [],
+  "measurement_error": null,
+  "instrument_self_test": {
+    "requested_num_predict": 24,
+    "eval_count": 24,
+    "done_reason": "length",
+    "verdict": "respected",
+    "message": "eval_count=24 ≤ num_predict=24（done_reason=length），上限有效。"
+  },
+  "reservation_rows": [
+    {
+      "num_predict": 1,
+      "prompt_eval_count": 4098,
+      "done_reason": "length"
+    },
+    {
+      "num_predict": 512,
+      "prompt_eval_count": 4098,
+      "done_reason": "length"
+    },
+    {
+      "num_predict": 2000,
+      "prompt_eval_count": 4098,
+      "done_reason": "length"
+    }
+  ],
+  "reservation": {
+    "verdict": "independent",
+    "observed_limit": 4098,
+    "limit": 4098,
+    "message": "prompt 被切在固定的 4098，num_predict 分別是 1／512／2000 都一樣 —— 上限與 num_predict 無關。而且它與公式預測的 4098 相符。"
+  },
+  "kv": {
+    "verdict": "linear",
+    "bytes_per_token": null,
+    "kib_per_token": null,
+    "per_model": {
+      "qwen3:4b": {
+        "verdict": "linear",
+        "bytes_per_token": 171011,
+        "kib_per_token": 167.0,
+        "points": [
+          {
+            "context_length": 4096,
+            "size_mib": 3036.5
+          },
+          {
+            "context_length": 8192,
+            "size_mib": 3704.5
+          }
+        ],
+        "message": "`size` 每 token 167.0 KiB（只有兩點，無法檢查線性）；其中約 23 KiB/token 不是 KV（ctx 4096 下約 92 MiB），所以這只能當 KV 成本的**上界**"
+      },
+      "qwen2.5:3b": {
+        "verdict": "linear",
+        "bytes_per_token": 60547,
+        "kib_per_token": 59.1,
+        "points": [
+          {
+            "context_length": 4096,
+            "size_mib": 2063.9
+          },
+          {
+            "context_length": 8192,
+            "size_mib": 2300.4
+          }
+        ],
+        "message": "`size` 每 token 59.1 KiB（只有兩點，無法檢查線性）；其中約 23 KiB/token 不是 KV（ctx 4096 下約 92 MiB），所以這只能當 KV 成本的**上界**"
+      }
+    },
+    "message": "qwen3:4b 每 token 167.0 KiB；qwen2.5:3b 每 token 59.1 KiB。多個模型各有自己的 KV 成本，不給單一數字。"
+  },
+  "baseline_attempted": true,
+  "baseline": {
+    "verdict": "unstable",
+    "measured_conditions": 6,
+    "message": "4 個條件的重複量測散得太開（CV > 8.9%）：qwen3:4b num_ctx=4096、qwen2.5:3b num_ctx=4096、qwen2.5:3b num_ctx=8192、qwen3:4b num_ctx=8192 長 prompt。這一輪不能當基準線。"
+  }
+}

@@ -1,0 +1,60 @@
+# 2026-09-30-throughput-baseline-r3.txt
+#
+# 指令：bash scripts/verify-throughput.sh --json > tmp/throughput-baseline-rerun.json 2> tmp/throughput-baseline-rerun.err; echo "EXIT=$?" > tmp/throughput-baseline-rerun.exit
+# 時間：2026-09-30 00:04:47 +1000（來源檔的 mtime）
+# 結束碼：1（逐字見 2026-09-30-throughput-probe-exit-codes.txt）
+# 牆上時間：未留存（探針的報告不含牆上時間；外層也沒有記時）
+# 引用：DECISIONS.md D-071 §一、§二、§三、§十
+# 註  ：第 3 輪完整量測，7 個條件。
+#
+# 上面開頭連續的 `#` 行是這次搬遷加上去的說明。把它們整段拿掉，剩下的就是原檔 —— 除了移除 ANSI 色碼之外，一個位元組都沒動。
+
+前提
+✓ ollama 容器在跑
+✓ ollama API 有回應
+
+機器的形狀
+→ vCPU = 4，記憶體 = 15946 MB
+→ physical id = {0 2 4 6}，siblings = {1}
+→ ollama 的執行緒數：n_threads = 4
+→ 日誌裡最後一次載入：KV buffer size =   576.00 MiB
+
+量測（完整矩陣）
+→ 模型載入約 30 秒；完整矩陣約 35 分鐘（每個條件取樣 7 次）。中途沒有進度輸出是正常的。
+══════════════════════════════════════════════════════════════════════════════
+  推論吞吐量基準線
+══════════════════════════════════════════════════════════════════════════════
+
+儀器自我檢查：eval_count=24 ≤ num_predict=24（done_reason=length），上限有效。
+
+── 模型 ──
+   qwen3:8b                  4.87 GiB  500a1f067a9f
+   qwen2.5:3b                1.80 GiB  357c53fb659c
+   qwen3:4b                  2.33 GiB  359d7dd4bcda
+   bge-m3:latest             1.08 GiB  790764642607
+   qwen3-embedding:0.6b      0.60 GiB  ac6da0dfba84
+
+── 速率 ──
+   條件                                            decode t/s prefill t/s*  n      CV      全距
+   qwen3:4b num_ctx=4096                               6.29        143.0  7   12.2%   33.0%
+   qwen3:4b num_ctx=8192                               5.88        131.5  7   19.8%   54.5%
+   qwen2.5:3b num_ctx=4096                             8.01        368.4  7   13.5%   33.4%
+   qwen2.5:3b num_ctx=8192                             8.35        372.5  7   15.4%   41.1%
+   qwen3:4b num_ctx=8192 num_predict=128               7.41        142.9  7    6.4%   16.7%
+   qwen3:4b num_ctx=8192 num_predict=512               7.87        142.4  7   15.9%   37.1%
+   qwen3:4b num_ctx=8192 長 prompt                      3.81      12204.9  7    9.4%   21.5%
+   * prefill 速率**沒有控制 prefix cache 重用**，同一支探針報出 306～14,710 t/s，
+     而日誌顯示請求帶著 cached n_tokens（本輪 1,448）、真實冷 prefill 約 25 t/s。
+     這一欄現在不可引用；decode 那一欄不受影響。（見 D-031）
+
+── KV cache（size 的斜率，非純 KV）──
+   qwen3:4b 每 token 167.0 KiB；qwen2.5:3b 每 token 59.1 KiB。多個模型各有自己的 KV 成本，不給單一數字。
+
+── prompt 上限（截斷規則）──
+   prompt 被切在固定的 4098，num_predict 分別是 1／512／2000 都一樣 —— 上限與 num_predict 無關。而且它與公式預測的 4098 相符。
+   num_predict=    1 → prompt_eval_count=  4098  done=length
+   num_predict=  512 → prompt_eval_count=  4098  done=length
+   num_predict= 2000 → prompt_eval_count=  4098  done=length
+   截斷檢查：prompt_eval_count=3021 小於 num_ctx 8192 —— prompt 完整（塞得下就不會被切，limit 4098 不適用）。
+
+── 診斷 ──

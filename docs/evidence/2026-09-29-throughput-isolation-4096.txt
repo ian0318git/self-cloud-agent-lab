@@ -1,0 +1,54 @@
+# 2026-09-29-throughput-isolation-4096.txt
+#
+# 指令：bash scripts/verify-throughput.sh --json -- --models qwen3:4b --ctx 4096 --repeats 7 --length-predict 128 --long-prompt-repeats 1 --overflow-prompt-repeats 1 --reservation-predict 1 > tmp/iso-4096.json 2> tmp/iso-4096.err; echo "EXIT=$?" > tmp/iso-4096.exit
+# 時間：2026-09-29 22:52:28 +1000（來源檔的 mtime）
+# 結束碼：1（逐字見 2026-09-30-throughput-probe-exit-codes.txt）
+# 牆上時間：未留存（探針的報告不含牆上時間；外層也沒有記時）
+# 引用：DECISIONS.md D-071 §二、§九補記之二
+# 註  ：隔離輪：只重測第 1 輪出問題的那一個條件。該條件本身 CV 6.40%、`stable`，但整輪的判定仍是 1。
+#
+# 上面開頭連續的 `#` 行是這次搬遷加上去的說明。把它們整段拿掉，剩下的就是原檔 —— 除了移除 ANSI 色碼之外，一個位元組都沒動。
+
+前提
+✓ ollama 容器在跑
+✓ ollama API 有回應
+
+機器的形狀
+→ vCPU = 4，記憶體 = 15946 MB
+→ physical id = {0 2 4 6}，siblings = {1}
+→ ollama 的執行緒數：n_threads = 4
+→ 日誌裡最後一次載入：KV buffer size =  1152.00 MiB
+
+量測（完整矩陣）
+→ 模型載入約 30 秒；完整矩陣約 35 分鐘（每個條件取樣 7 次）。中途沒有進度輸出是正常的。
+══════════════════════════════════════════════════════════════════════════════
+  推論吞吐量基準線
+══════════════════════════════════════════════════════════════════════════════
+
+儀器自我檢查：eval_count=24 ≤ num_predict=24（done_reason=length），上限有效。
+
+── 模型 ──
+   qwen3:8b                  4.87 GiB  500a1f067a9f
+   qwen2.5:3b                1.80 GiB  357c53fb659c
+   qwen3:4b                  2.33 GiB  359d7dd4bcda
+   bge-m3:latest             1.08 GiB  790764642607
+   qwen3-embedding:0.6b      0.60 GiB  ac6da0dfba84
+
+── 速率 ──
+   條件                                            decode t/s prefill t/s*  n      CV      全距
+   qwen3:4b num_ctx=4096                               6.55        135.3  7    6.4%   15.3%
+   qwen3:4b num_ctx=4096 num_predict=128               7.82        148.6  7    5.0%   11.7%
+   qwen3:4b num_ctx=4096 長 prompt                      8.26        328.2  7    1.9%    4.8%
+   * prefill 速率**沒有控制 prefix cache 重用**，同一支探針報出 306～14,710 t/s，
+     而日誌顯示請求帶著 cached n_tokens（本輪 1,448）、真實冷 prefill 約 25 t/s。
+     這一欄現在不可引用；decode 那一欄不受影響。（見 D-031）
+
+── KV cache（size 的斜率，非純 KV）──
+   qwen3:4b：少於兩個 ctx 取樣點，求不出斜率。
+
+── prompt 上限（截斷規則）──
+   少於兩筆可用的 (num_predict, prompt_eval_count)，分不出上限在哪。
+   num_predict=    1 → prompt_eval_count=    31  done=length
+   截斷檢查：prompt_eval_count=41 小於 num_ctx 4096 —— prompt 完整（塞得下就不會被切，limit 2050 不適用）。
+
+── 診斷 ──
