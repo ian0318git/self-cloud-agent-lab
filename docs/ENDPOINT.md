@@ -672,6 +672,16 @@ real boot behaves.
 That is recorded, not fixed. And **cut C's pristine hashes are exactly cut B's
 patched hashes**, so **B must be applied first**.
 
+⚠️ **That is not the only thing recorded rather than fixed.** Each cut's
+verifier was written against the tree as it stood *at the time*, and later cuts
+legitimately move the files earlier ones pinned. **Four of the six verifiers
+therefore fail today** — every one of them on a stale pin or a stale locator,
+none on a live defect. The list, the two root causes, and the re-run commands
+are in [`ENDPOINT-VERIFIER-ROT.md`](ENDPOINT-VERIFIER-ROT.md) *(Chinese)*.
+**Read it before concluding that a red verifier means the tree is broken.**
+The verifiers are not being fixed: editing one until it goes green is D-033's
+lesson, the mirror image of the bug it was written to catch.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
