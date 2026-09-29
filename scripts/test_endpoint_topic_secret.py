@@ -1016,6 +1016,10 @@ def check_setter(script_dir: Path, fails: list[str]) -> None:
     read or written. What is asserted here is the contract the header promises:
     only a fingerprint leaves the process, a dry run changes nothing, and a
     present secret is reported without being echoed.
+
+    (f) additionally asks what the *liveness gate decides*. Everything else here
+    is about the secret's shape and whereabouts, which is why the gate's polarity
+    was wrong in the shipped script without this function noticing.
     """
     setter = script_dir / "set-endpoint-topic-secret.sh"
     if not setter.is_file():
@@ -1137,6 +1141,59 @@ def check_setter(script_dir: Path, fails: list[str]) -> None:
         if generated and generated.group(1) in proc.stdout:
             fails.append("D12: the generated secret was echoed")
             print("    ✗ 產生的值被印出來了")
+
+        # (f) The liveness arm. This is the hole the rest of this function had:
+        # every other assertion here is about *the secret* (does it land, does it
+        # leak, what shape is it), so none of them ever asked what the gate
+        # *decides*. It decided wrong -- `ok:*` read "unknown", the one word
+        # `get_kernel_status`'s own docstring says must never be read that way
+        # ("Every path that reaches it is a *failure to ask*"), as "nothing is
+        # running, go ahead". A stub `bin/python3` drives the real case arms with
+        # each word the probe can produce, so what is measured is the shipped
+        # control flow rather than a copy of it -- a copy would have drifted.
+        #
+        # The `running` row is a positive control and it is load-bearing: without
+        # it, deleting the whole gate would satisfy the other three.
+        stub_tool = scratch / "tool"
+        (stub_tool / "bin").mkdir(parents=True)
+        stub = stub_tool / "bin" / "python3"
+        stub.write_text('#!/usr/bin/env bash\nprintf "ok\\t%s\\n" "${FAKE_WORD:-unknown}"\n',
+                        encoding="utf-8")
+        stub.chmod(0o755)
+
+        def verdict(word: str) -> tuple[int, str]:
+            cfg.write_text("engine:\n  version: 0.1.2\nsignal:\n  topic_prefix: endpoint\n"
+                           f'  topic_secret: "{CANARY_SECRET}"\n', encoding="utf-8")
+            proc = subprocess.run(
+                ["bash", str(setter), "--yes"],
+                capture_output=True, text=True,
+                env=dict(os.environ, HOME=str(home), ENDPOINT_TOOL_DIR=str(stub_tool),
+                         FAKE_WORD=word),
+                timeout=120, check=False)
+            blob = proc.stdout + proc.stderr
+            if "拒絕改動" in blob:
+                return proc.returncode, "refused"
+            if "已經結束了，可以改" in blob:
+                return proc.returncode, "safe"
+            if "這不等於沒有東西在跑" in blob:
+                return proc.returncode, "unknown"
+            return proc.returncode, "none"
+
+        rows = [(w, e, *verdict(w)) for w, e in (
+            ("running", "refused"),   # positive control: the gate must still bite
+            ("complete", "safe"),     # and must not over-correct into refusing all
+            ("unknown", "unknown"),   # D-060 itself
+            ("STOPPED", "unknown"),   # a word outside the vocabulary
+        )]
+        if all(got == want for _, want, _, got in rows):
+            print("    ✓ 活性臂列舉安全字：" + "、".join(f"{w}→{g}" for w, _, _, g in rows))
+        else:
+            fails.append("D12: liveness polarity -- " + ", ".join(
+                f"{w}: want {want} got {got}" for w, want, _, got in rows if want != got))
+            print("    ✗ 活性臂的極性不對 —— 這一格以前整條電池都沒問過：")
+            for word, want, rc, got in rows:
+                print(f"      {'★' if want != got else ' '} {word:<9} 期望 {want:<8} "
+                      f"實得 {got:<8}（結束碼 {rc}）")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

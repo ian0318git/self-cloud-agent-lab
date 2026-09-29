@@ -619,6 +619,7 @@ kernel、再失敗**。所有碰到主題的路徑都改成**大聲失敗**，�
 | `boot`／`stop`／`watch` 大聲失敗說沒有可用的 `signal.topic_secret` | 套用 `scripts/apply-endpoint-topic-secret.sh` 之後的預期行為 —— 補丁落地了，但秘密從沒設過。**在沒有 kernel 在跑時**執行 `scripts/set-endpoint-topic-secret.sh`。這正是設計**要的**失敗：另一個選項是安靜地退回那條公開可算的舊名字。 |
 | `set-endpoint-topic-secret.sh` 拒絕，說有個 kernel 是 `running` | 預期行為。現在改主題會讓那個 kernel **變聾**，而它會繼續燒 GPU 配額。先 `endpoint stop`（或 `endpoint kill-all --yes`），再重跑。`--force` 可以覆寫這個檢查。 |
 | `set-endpoint-topic-secret.sh` 警告查不到 kernel 狀態 | **「查不到」不等於「沒有東西在跑」** —— 那是 D-060 的形狀。通常是這個 shell 沒有 Kaggle 憑證。先自己用 `endpoint status` 確認一次。 |
+| `set-endpoint-topic-secret.sh` 警告狀態字不在已知清單裡 | 預期行為。Kaggle 回了一個不在 `running`／`queued`／`pending`／`complete`／`error` 裡的字。只有 **positively** 代表「kernel 結束了」的那兩個字才准放行，其餘一律當成「查不到」處理 —— 因為反過來的那個錯（把它讀成「沒有在跑」）正是這道閘門存在的理由（D-060）。用 `endpoint status` 確認。 |
 | 已經有 kernel 在跑，而主題已經被改掉了 | 它再也收不到訊號了。`endpoint kill-all --yes` **不建構 `Config`**，所以仍然有效，Kaggle UI 也是。**60 分鐘閒置逾時救不了你** —— 它殺的是引擎行程，不是 notebook。 |
 | `apply-endpoint-topic-secret.sh` 拒絕，並指名 ntfy／stop／tunnel-url 三支腳本 | 預期行為 —— 切 C 疊在**切 B 之上**，所以它的原始雜湊逐字等於 B 的修補後雜湊。先照順序把那幾支套上去。 |
 | 套用切 C 之後 ntfy 主題就安靜了 | 預期行為，不是失敗 —— kernel 現在發布到**新名字**上。先確認你套用的時候真的沒有 kernel 在跑（見上）；若有，那就是個孤兒。 |

@@ -79,6 +79,13 @@ MUTANTS=(
   # 而唯一的症狀是一行看不懂的 shell 錯誤。它們現在各佔一個突變名額。
   "M12 秘密閘門的極性反了（有秘密也拒絕）|S:apply-endpoint-topic-secret.sh|-|SECRET_OK=1|SECRET_OK=0|D13"
   "M13 閘門不呼叫探測（讀了沒填過的變數）|S:apply-endpoint-topic-secret.sh|-|    secret_probe|    true|D13"
+  # M14 是第三個實測抓到的真 bug（D-069 §五）：活性臂本來寫成 `ok:*` → 綠燈，
+  # 於是把 `get_kernel_status` 的 "unknown"（它的 docstring 第一句就說那**不是**
+  # "offline"）讀成「沒有在跑，可以改」。突變把放行臂改回那個 glob —— 改完是
+  # `ok:*|ok:error)`，仍然合法、仍然被拒絕臂擋在前面，行為與原 bug 逐字相同。
+  # 這裡用 `ok:complete`（而不是整條 `ok:complete|ok:error`）當 find，是因為 `|`
+  # 是這份清單的欄位分隔字元，find 裡再放一個會把後面的欄位全部擠掉。
+  "M14 活性臂把「認不得的字」也放行（unknown → 綠燈）|S:set-endpoint-topic-secret.sh|-|ok:complete|ok:*|D12"
 )
 
 # ── 守門：這些改動**不准**讓指定的那一條叫 ────────────────

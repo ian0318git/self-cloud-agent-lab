@@ -36,14 +36,16 @@
 # 反過來的話，補丁一落地、還在跑的那個 kernel 就聽不到任何訊號了 —— 它聽的是舊
 # 名字。**它會繼續燒 GPU 配額。**
 #
-# ── 活性閘門（**能查就拒、查不到就警告**）──────────────────
+# ── 活性閘門（**列舉安全字，其餘一律警告**）────────────────
 # 它會用套件自己的 `get_kernel_status`（要 Kaggle 憑證與網路）問一次。三態：
-#   · 查得到且在跑（running／queued／pending）→ **拒絕**，用 --force 才繼續
-#   · 查得到且不在跑 → 繼續
-#   · 查不到（沒有憑證／沒有網路／認不得的狀態字）→ **警告後繼續**
-# 為什麼第三態是警告而不是拒絕：那正是 D-060 的形狀 —— 把「問不到」讀成「沒有東西
-# 在跑」。反過來把「問不到」當成「有東西在跑」也一樣是猜。它只印狀態字，
-# **不印帳號、不印網址、不印主題**。
+#   · running／queued／pending → **拒絕**，用 --force 才繼續
+#   · complete／error → 繼續（只有這兩個字 positively 代表 kernel 結束了）
+#   · **其餘全部**（unknown、任何認不得的狀態字、查不到）→ **警告後繼續**
+# 界線畫在「列舉安全字」而不是「列舉危險字」，是因為兩個方向的錯代價不對稱：
+# 把「問不到」當成「有東西在跑」是猜，而且會讓這支腳本在離線機器上根本不能用；
+# 但把「問不到」當成「沒有東西在跑」**正是 D-060 的形狀**。所以只有 positively
+# 代表「結束了」的字才放行 —— 誤判成警告只是吵，誤判成放行會讓一個還在跑的
+# kernel 變聾並繼續燒 GPU 配額。它只印狀態字，**不印帳號、不印網址、不印主題**。
 #
 # ── 它刻意不做的事 ───────────────────────────────────────
 #   · **不印秘密。** 全程只印 sha256 前 12 碼（指紋）。指紋足以確認「腳本讀到的
@@ -281,15 +283,32 @@ report_config
 echo "  寫入後：sha256:$NEW_FP"
 echo
 
+# 「沒能確認沒有東西在跑」有兩個來源，**處方相同**：查不到（沒有憑證、非 200、
+# 網路錯誤、探針根本跑不起來），或是查到了但那個狀態字我不認得。兩者的共同點是
+# 「不知道」，而**不知道不是「沒事」**。
+liveness_unknown() {
+    warn "$1 —— **這不等於沒有東西在跑**。"
+    echo "  這一條**刻意不阻擋**：活性是盡力而為的警告，不是硬門（設計 §五）——"
+    echo "  硬門是下面那個秘密，離線且精確。但「不知道」不等於「沒事」：先自己確認"
+    echo "  一次 endpoint status。若套用後才發現有孤兒：endpoint kill-all --yes"
+    echo "  （不建構 Config）或 Kaggle UI。"
+}
+
 if [[ "$FORCE" != true ]]; then
-    echo "── 活性（能查就拒、查不到就警告）──"
+    echo "── 活性（列舉安全字，其餘一律警告）──"
     if [[ -z "$VENV_PY" ]]; then
-        warn "找不到套件的 venv python（$TOOL_DIR/bin/python）—— 查不到狀態。"
-        echo "  · 查不到 ≠ 沒東西在跑。**先自己確認一次**：endpoint status（要 Kaggle 憑證）。"
+        liveness_unknown "找不到套件的 venv python（$TOOL_DIR/bin/python），探針跑不起來"
     else
         live="$("$VENV_PY" -c "$LIVE_PY" 2>/dev/null || printf 'unknown\t%s\n' "執行失敗")"
         live_state="${live%%$'\t'*}"
         live_word="${live#*$'\t'}"
+        # **列舉安全字，不列舉危險字。** 這裡本來寫的是 `ok:*` → 綠燈，而
+        # `get_kernel_status` 的 docstring 第一句就是 `"unknown" is not "offline"`：
+        # 它的每一條失敗路徑（沒有憑證、非 200、網路錯誤、**認不得的狀態字**）都回
+        # "unknown"。所以那個 glob 恰好把所有「問不到」讀成「沒有在跑」—— 就是下面
+        # 警告文字自己在講的 D-060 形狀。文字是對的，控制流沒有照著做。
+        # 反過來之後，complete／error 以外的**每一個**字都會走到警告，包括未來新增
+        # 的狀態字。D12(f) 與突變 M14 釘住這個極性。
         case "$live_state:$live_word" in
             ok:running|ok:queued|ok:pending)
                 fail "Kaggle 上有一個 kernel 的狀態是「$live_word」—— 拒絕改動。"
@@ -299,13 +318,12 @@ if [[ "$FORCE" != true ]]; then
                 echo "  處方：先 endpoint stop（或 endpoint kill-all --yes），再跑本腳本。"
                 echo "  真的要現在改：--force。"
                 exit 2 ;;
+            ok:complete|ok:error)
+                ok "狀態是「$live_word」—— 那個 kernel 已經結束了，可以改。" ;;
             ok:*)
-                ok "狀態是「$live_word」—— 沒有在跑，可以改。" ;;
+                liveness_unknown "狀態字「$live_word」不在已知清單裡（結束態只有 complete／error）" ;;
             *)
-                warn "查不到 kernel 狀態（$live_word）—— **這不等於沒有東西在跑**。"
-                echo "  查不到通常是這個 shell 沒有 Kaggle 憑證，而那正是 D-060 的形狀："
-                echo "  把「問不到」讀成「沒有東西在跑」。先自己確認一次：endpoint status。"
-                echo "  若套用後才發現有孤兒：endpoint kill-all --yes（不建構 Config）或 Kaggle UI。" ;;
+                liveness_unknown "查不到 kernel 狀態（$live_word），通常是這個 shell 沒有 Kaggle 憑證" ;;
         esac
     fi
     echo
