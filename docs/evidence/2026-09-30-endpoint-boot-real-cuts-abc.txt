@@ -1,0 +1,78 @@
+# 2026-09-30 endpoint -g boot —— 三刀（A／B／C）之後第一次真 boot
+#
+# 指令：endpoint -g boot </dev/null
+# 為什麼 stdin 接 /dev/null：boot 是互動的（沒有 --model），但
+#   _interactive_boot_prompt 的兩個 input() 都接 EOFError（commands.py:899、
+#   :935），第二個直接 return 不動任何設定。所以關掉 stdin 就是「接受現有
+#   設定的非互動路徑」。
+# 為什麼加 -g：config 是 accelerator: gpu_t4 配 ngl: 999（DECISIONS.md:7480）。
+#   不加 -g，run_boot:1094-1101 會算出 cpu 並寫回 ngl: 0 —— 那是
+#   DECISIONS.md:7607 記過的陷阱 endpoint-boot-gpu-flag-required。
+# 開始：2026-09-30T23:03:17+10:00
+# 結束：2026-09-30T23:08:34+10:00
+# 結束碼：0
+# 牆上時間：317 秒
+# 引用：DECISIONS.md D-072（本輪）；D-070 第十節「boot 中」三列
+#
+# 這一份動了什麼：ANSI 色碼移除（本目錄的慣例），以及包裝腳本自己加的五行
+#   （### CMD / START / EXIT / END / WALL_SECONDS）移除 —— 那五行的內容已經
+#   全部寫在上面。除此之外逐字。指令輸出本身不含任何 # 開頭的行，所以
+#   「移除開頭連續的 # 行就是原檔」這條性質仍然成立（當場驗過）。
+#
+
+━━━ MODEL SELECTION  [GPU T4 x2 mode — max 70B params] ━━━
+
+    Already uploaded as Kaggle Dataset — zero download time.
+
+  1) endpoint-qwen3-8b  (4.60 GB)
+
+  0) Select a new model from HuggingFace
+
+  Choice [0]:   ⚠ No model configured and no built-in models found.
+  Run: endpoint init
+
+━━━ DEPLOYMENT ━━━
+  ◆ Sending kill pulse to stale sessions...
+  ◆ Clearing old kernel...
+  ✓ Old kernel cleared.
+
+  ✓ Notebook built from config.
+
+  ✓ Notebook deployed!
+  Live Kernel: https://www.kaggle.com/code/ianchang0318/endpoint-engine
+
+━━━ BOOT PROGRESS ━━━
+
+    → Waiting for boot signals... (17s elapsed, kernel: running)
+    → Waiting for boot signals... (34s elapsed, kernel: running)
+  ⚠ ntfy.sh is slow/unreachable (3 empty polls). Boot is continuing on Kaggle — 
+signals will appear when ntfy.sh responds. (51s elapsed, kernel: running)
+  ⚠ ntfy.sh is slow/unreachable (4 empty polls). Boot is continuing on Kaggle — 
+signals will appear when ntfy.sh responds. (67s elapsed, kernel: running)
+  ⚠ ntfy.sh is slow/unreachable (5 empty polls). Boot is continuing on Kaggle — 
+signals will appear when ntfy.sh responds. (84s elapsed, kernel: running)
+  ⚠ ntfy.sh is slow/unreachable (6 empty polls). Boot is continuing on Kaggle — 
+signals will appear when ntfy.sh responds. (100s elapsed, kernel: running)
+  ⚠ ntfy.sh is slow/unreachable (7 empty polls). Boot is continuing on Kaggle — 
+signals will appear when ntfy.sh responds. (117s elapsed, kernel: running)
+  → ACCELERATOR: gpu_t4 [NGL=999]
+  → STARTING SYSTEM PROVISIONING...
+  → PHASE A: INSTALLING SYSTEM PACKAGES...
+    → Waiting for boot signals... (173s elapsed, kernel: running)
+  → SYSTEM PROVISIONED
+  → PHASE B1: INSTALLING PYTHON DEPS...
+  → PHASE B2: MODEL + LLAMA-SERVER...
+  → LLAMA-SERVER READY
+  → SD-SERVER READY
+  → PROVISIONING COMPLETE
+  → ENGINE MATERIALIZED
+  → LAUNCHING ENDPOINT ENGINE...
+  → WAITING FOR MODEL...
+  → INITIALIZING...
+  → STARTING...
+  → ENGINE LAUNCHED
+  → AVAILABLE MODELS: []
+  → ENGINE HEALTHY
+  → Endpoint IS ONLINE
+  ⚠   Tunnel is up, but its URL is not in the kernel log yet.
+    Read it in a moment with: endpoint base-url

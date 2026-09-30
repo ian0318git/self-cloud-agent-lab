@@ -10927,6 +10927,23 @@ boot **之前**套用才搭得上便車；boot 之後才套用，代價是**再�
 | **停機後** | 孤兒的復原路徑：`endpoint kill-all --yes` | D-069 第八節 —— **讀碼得出的**，沒實跑 | 沒有這一步，「孤兒燒配額」只有一條**紙上**的出路 |
 | | 若第九節選 ②：**真本與引擎在輪替後是否一致** | **本條第四／六節** —— 第四刀的驗證本身 | 沒有它，第四刀只能停在「拍板了但沒驗證」 |
 
+> **補記（2026-09-30）：這張表跑過了。** 結果寫在 **D-072**。12 列裡 **6 列結掉**、
+> **1 列被權限分類器擋下**（`endpoint kill-all --yes`，未繞道）、5 列仍然掛著。
+> 兩條 ⚠️ 都有了答案，**方向相反**：
+>
+> - 「**KILL 在新主題上能否真的送達**」→ ✅ **送達，42 秒**（D-072 第六節）。
+>   切 C 之後引擎與 CLI 推出同一個主題，唯一的那條停機路徑是通的。
+> - 「**讀不讀得到 kernel log**」→ ❌ **跑動中讀不到**（D-072 第四節）。
+>   `ListKernelSessionOutput` 在 session 結束前回 200 但 `log` 是空的。
+>   **切 B 的整個取徑要重寫** —— 這一格原本就是為此標 ⚠️ 的。
+>
+> 另外**兩列的更正**，兩列都不需要再花一次配額：
+>
+> - 表上「記下快取檔當下的狀態（`~/.cache/endpoint/apikey`…）」**路徑是錯的**：
+>   全樹沒有程式碼用它，真路徑是 `/tmp/.endpoint_cache_dir/`（D-072 第二節）。
+> - 表上「`--force` 覆寫活性警告」**指著一個不存在的開關**：`--force` 只屬於
+>   `endpoint register`（跳過 proxy 健康檢查），`endpoint stop` 沒有旗標（D-072 第七節）。
+
 **不屬於 boot、但別忘（要掛著量）**
 
 - **tunnel 能否撐過一整個 session**（`ENDPOINT.md` 列為未量測）。它回答的不是
@@ -11817,3 +11834,244 @@ CV，才發現我先前口算的那一組（13.0 / 21.3 / 13.5 / 15.4 / 6.6 / 17
 （6/6）；兩份彙整檔的本文與從來源重建的結果相同。另外用 `git check-ignore` 確認
 `docs/evidence/` 的 **60 個檔案沒有一個**被 `.gitignore` 吃掉（規矩 4 要求 `.txt`
 的理由就是怕這個）。
+
+---
+
+## D-072：三刀之後第一次真 boot —— 兩條 ⚠️ 有了答案，其中一條是否定的
+
+**2026-09-30。狀態：量測完成。**
+
+這一條是 **D-070 第十節那張清單的第一次執行**。那張清單上每一列都寫了「漏了要付
+什麼」，而這一輪付掉的正是其中兩條 ⚠️ 的答案 —— **一條是壞消息**。
+
+**這次 boot 一次裝滿，而且它本來就要發生**（D-070 §十：A／B／C 的補丁全部建於
+2026-09-28 最後一次 boot **之後**，它們從來沒有被任何一次真實執行驗證過）。
+
+指令與輸出逐字留在 `docs/evidence/2026-09-30-endpoint-boot-real-cuts-abc.txt`。
+
+### 一、一眼看盡
+
+| 階段 | 要量什麼 | 結果 |
+|---|---|---|
+| **boot 前** | `endpoint status` 確認沒有 kernel 在跑 | ✅ `stopped`，**正面讀到**（第二節） |
+| | 記下快取檔當下的狀態 | ⚠️ **清單給的路徑是錯的**（第五節） |
+| **boot 中** | 總時長 | ✅ **317 秒** |
+| | **修補後的產生器撐不撐得過真 boot** | ✅ **撐過了** —— 三刀的總驗收（第三節） |
+| | 活性閘門對**真的** Kaggle API 的回應 | ✅ 實得 `running`，是真值不是 `unknown` |
+| **kernel 跑動中** | **讀不讀得到 kernel log** | ❌ **讀不到**（第四節） |
+| | 日誌裡是否還出現主題名 | ⚠️ **未量** —— 同一個成因（第四節） |
+| **停機時** | **KILL 在新主題上能否真的送達** | ✅ **送達，42 秒**（第六節） |
+| | `run_stop` 缺席分支的結束碼 | ✅ `No running kernel found.`，**exit 0** |
+| | `--force` 覆寫活性警告 | ❌ **樹上沒有這個開關**（第七節） |
+| **停機後** | 孤兒復原：`endpoint kill-all --yes` | ⛔ **被權限分類器拒絕，未量**（第八節） |
+| | 真本與引擎在輪替後是否一致 | ⚠️ **未量** —— 它取決於 D-070 §九 選 ② |
+
+### 二、boot 前那兩列，一列成立、一列是錯的路徑
+
+**第一列成立。** `endpoint status` 印 `stopped`。但**這一格不能只讀那三個字** ——
+`run_status` 的標籤表把 `raw == "error"` 映成 `stopped`，而查不到會映成
+`unknown (could not check)`（`commands.py:1585-1593`）。真正要看的是
+`get_kernel_status`：它每一條「問不到」的路徑（無憑證、非 200、網路錯誤、不認得的
+狀態字）都回 `"unknown"`，**只有 200 且認得狀態字才回真的值**（`core.py:1076-1105`）。
+所以 `stopped` 是**正面讀到的**。
+
+**第二列的路徑是錯的。** 清單寫「`~/.cache/endpoint/apikey` 在不在」。實測：
+
+- `~/.cache/endpoint/` **不存在**；
+- 而且**全樹沒有任何一行程式碼用它**（`grep -rn '\.cache/endpoint' endpoint/*.py`：0 命中）；
+- 真路徑是 `Path(tempfile.gettempdir()) / ".endpoint_cache_dir"`（`core.py:210`），
+  即 `/tmp/.endpoint_cache_dir`，`APIKEY_CACHE = _CACHE_DIR / "apikey"`（`:223`）；
+- 它**也不存在**（boot 前後都是）。
+
+**這一列的用途不受影響**（兩邊都是「不存在」），但**路徑要更正**，否則下一個照著
+清單去看的人會看到一個永遠不存在的目錄，並從中得到一個假的安心。
+
+### 三、修補後的產生器撐過了真 boot（三刀的總驗收）
+
+`docs/ENDPOINT.md` 那張表上，「修補後的產生器撐得過一次真的 `endpoint boot`」一直是
+**未驗證** —— 理由是補丁只對**模擬的 ntfy** 驗過。這一輪它走完了全程，結束碼 **0**：
+
+```
+✓ Notebook built from config.      ← 產生器（切 B／C 改的就是它）
+✓ Notebook deployed!
+→ ACCELERATOR: gpu_t4 [NGL=999]
+→ PHASE A: INSTALLING SYSTEM PACKAGES...  → SYSTEM PROVISIONED
+→ PHASE B1: INSTALLING PYTHON DEPS...     → PHASE B2: MODEL + LLAMA-SERVER...
+→ LLAMA-SERVER READY → SD-SERVER READY → PROVISIONING COMPLETE
+→ ENGINE MATERIALIZED → LAUNCHING ENDPOINT ENGINE... → ENGINE LAUNCHED
+→ ENGINE HEALTHY → Endpoint IS ONLINE
+```
+
+**三刀裡每一刀的產物都出現在這條路上**：切 A／第四刀改的 `engine.py`（引擎起得來）、
+切 B／C 改的產生器（notebook 建得出來並推上去）、切 C 改的 `commands.py`
+（`topic_secret_of` 在 `run_boot:1088` 的**前置驗證**通過了，才有後面的部署）。
+
+**時長 317 秒**，可以直接對上 D-066 第八節那個懸著的推論（「628 秒 > 600 秒」）。
+⚠️ **但這兩個數字不是同一把尺**：這次的第一步是
+`Already uploaded as Kaggle Dataset — zero download time.`，而 628 秒那次包含模型
+下載。**所以 317 秒證明的是「這一次沒有超過 600 秒」，不是「628 秒那條推論被推翻了」。**
+要拿它當基準線，得先確認兩次的模型處置相同 —— 這一輪**沒有**確認。
+
+### 四、⚠️ 第一條的答案：**跑動中讀不到 kernel log**
+
+這是 D-070 §十 標了 ⚠️ 的那一列，原文的後果欄寫著：
+
+> ⚠️ **這是切 B 的網址讀取器賴以為生的前提。** 若跑動中讀不到，B 的整個取徑要重寫
+
+**量到的：跑動中讀不到。** kernel 在跑的那 **9 分鐘**裡取了三次樣，每一次都是
+**HTTP 200 但 `log` 欄位是空字串**。回應的頂層只有一個鍵 `log`。kernel 結束**之後**
+再讀，`state` 變成 `"found"`，網址就在裡面。
+
+**所以切 B 的取徑在它需要生效的那一刻不成立。** 引擎確實把網址印到 stdout
+（`master_build_notebook.py:1174`：`print(f'TUNNEL ACQUIRED: {tunnel_url}', flush=True)`），
+ntfy 訊號也確實只說「有 tunnel」不帶網址（`:1175`，`topic_only=True`）—— **設計是自洽的，
+壞的是那個 API 在 session 結束前不吐 log。** 而網址在 session 結束後才讀得到，
+等於**讀到一個已經死掉的網址**。
+
+**一個次生的判讀問題。** `get_kernel_log_url` 把「200 但 log 是空的」歸進 `"absent"`，
+而它自己的 docstring 說 `absent` 是「The log was read and contains no tunnel URL
+**yet**」。實際上那種情況是「**根本沒讀到東西**」—— 與 `"unknown"`（無憑證／非 200／
+網路錯誤）是同一個家族。這一輪**沒有改它**（改驗證器讓紅變綠是 D-033 的教訓的鏡像），
+只記下來：**它回的那個 `absent` 不是它自己定義的那個 `absent`。**
+
+**下游比網址大。** `run_boot:1392-1398` 是：
+
+```python
+if success:
+    if tunnel_url:                      # ← 讀不到時是 None，整段被跳過
+        _wait_for_model_ready(tunnel_url)
+        if config.proxy_enabled:
+            _register_with_proxy(config, tunnel_url)
+        display_endpoint(config, tunnel_url)
+```
+
+碼裡的註解**早就寫了這個情況**（「tunnel_url is None when the tunnel came up but its
+URL could not be read from the kernel log (D-068)」）。所以讀不到網址的代價不是
+「少一個網址」，而是**同時關掉了 model-ready 等待、proxy 註冊、與 endpoint 顯示**——
+`endpoint base-url` 於是在一個真的在跑的引擎上回 `⚠ VPS is not ready yet.`。
+
+**同一條 ⚠️ 的下一列（日誌裡是否還出現主題名）因此沒有量到**：要看那個殘餘的爆炸
+半徑得讀 log 全文，而 log 在跑動中是空的。它仍然掛著。
+
+### 五、P1：一個被推翻的預先註冊預測
+
+**寫在 boot 之前**（工作區的暫存檔，不進版；全文逐字引在下面 —— 引全文是為了讓這一條
+不必依賴那個檔案還在），為的是不要事後把結果讀成自己想要的樣子：
+
+> **P1：boot 之後，`/tmp/.endpoint_cache_dir/apikey` 會存在。**
+> 依據：`run_boot` → `:1398`／`:1411` 呼叫 `_register_with_proxy` → `:1472` 因
+> `proxy_enabled` 為真而不提早 return → `:1487 save_cached_apikey(api_key)`。
+
+**實得：目錄自始至終不存在。P1 被推翻。**
+
+**推翻它的是第四節那個守衛** —— `if tunnel_url:` 讓 `_register_with_proxy` 從未被
+呼叫。這不是找理由：`save_cached_apikey` 在 boot 路徑上**確實存在**（補丁第 77 行
+顯示那一行是**上下文行**，不是第四刀新增的），它只是**被一個上游條件擋住**。
+
+**這一條與 D-070 第四節的關係要寫清楚。** §四 有一句
+
+> 既然 `save_cached_apikey` 在 boot 路徑上已經**不可能被觸發**，快取檔的來源就
+> 只剩下這兩個自癒點自己
+
+**這句話字面上不成立**，而且**在它自己的文內就自相矛盾**：它接著說來源是那兩個
+自癒點，而其中之一（`_register_with_proxy`）正是**從 boot 路徑上被呼叫的**
+（`run_boot` 的範圍是 `:1078-1470`，兩個呼叫點在 `:1398`、`:1411`）。
+§四 末尾那個 ⚠️ 邊界（「不是『boot 之後快取一定是空的』」）方向是對的，
+但理由給錯了：**這一輪快取是空的，不是因為 boot 不寫，是因為網址讀不到而整段被跳過。**
+**兩件事長得像，成因不同** —— 這正是本專案反覆在抓的那個形狀。
+
+### 六、⚠️ 第二條的答案：**KILL 在新主題上送達了**
+
+這是另一條 ⚠️，後果欄寫著「**這是唯一的停機手段**，而 60 分鐘閒置逾時**已證明不是**復原路徑」。
+
+**乾淨實驗**：只送 KILL 訊號（`send_kill_signal`，走 `config.control_topic`，也就是
+切 C 之後的推導），**不叫** Kaggle cancel，然後只看 kernel 會不會自己結束。
+
+```
+T0 = 23:12:11   status = running
+   送出 KILL（control_topic 推導成功，長度 29）
+  + 0s  status = running
+  +21s  status = running
+  +42s  status = error      ← 自己結束了
+```
+
+**42 秒，沒有任何外部取消。** 切 C 把主題的推導輸入從公開識別碼換掉之後，
+**引擎與 CLI 推導出的是同一個主題** —— 這一條是那一次改動最要緊的下游，
+而它成立。
+
+**`run_stop` 缺席分支**也順帶量到了：kernel 已不在時，`endpoint stop` 印
+`No running kernel found.`，**結束碼 0**（D-069 第八節列為「沒實跑」的那一列）。
+
+### 七、`--force` 那一列指著一個**不存在的開關**
+
+D-069 第八節寫著「活性警告仍可 `--force` 覆寫」，D-070 §十 的清單於是把
+「`--force` 覆寫活性警告」列成一列，後果欄還寫「它是**唯一**能繞過活性警告的開關」。
+
+**樹上沒有這個開關。**
+
+- `--force` 只定義在**一個**地方：`main.py:140`，屬於 **`endpoint register`** 子命令，
+  說明是 `Skip proxy health check`；
+- 它守的是 `commands.py:2617`，跳過的是 **proxy 健康檢查**（`check_proxy_health`），
+  **不是活性閘門**；
+- **`endpoint stop` 根本沒有任何旗標** —— 它的 usage 是 `endpoint stop [-h]`。
+  `endpoint stop --force` 得到 `unrecognized arguments: --force`。
+
+**所以那一列永遠不會有結果。** 「唯一能繞過活性警告的開關」是一個**紙上的開關**：
+它被寫進了兩份文件，而它從來沒有被實作。活性閘門（`run_stop` 對 `unknown` 的處理）
+**沒有**繞過去的辦法 —— 那可能是對的設計，但文件現在說的不是那個設計。
+
+### 八、這一輪**沒有**量到的（工具限制與範圍限制，分開寫）
+
+**工具限制（權限分類器拒絕，不是選擇）：**
+
+- **`endpoint kill-all --yes` 被拒絕。** 理由是它是**廣泛掃殺**，而這一輪的指令
+  （「boot」）沒有指名它。**沒有繞道。** 它是孤兒 kernel 唯一的復原路徑（D-069 第八節），
+  而這一輪**無法**把它從「讀碼得出的」升級成「實跑過的」。
+- **`config.api_key` 的指紋讀不到** —— 讀 `~/.config/endpoint/endpoint-config.yaml`
+  被同一道閘門拒絕（Credential Exploration）。
+
+**範圍限制：**
+
+- **tunnel 能否撐過一整個 session** —— 它要**掛著**，不是 boot 當下量得到（D-070 §十
+  自己標明了這一點）。而這次 session 只活了 9 分鐘就**是我把它 KILL 掉的**，
+  所以就算掛著也量不到「中途死掉」。
+- **日誌裡的主題名殘餘** —— 同第四節，讀不到。
+- **`ENDPOINT.zh-TW.md` 那列「Kaggle 能跑較大的 GGUF —— 未驗證」** ——
+  D-070 §十 說這次的資料可以順手結掉它。**這一輪結不掉**：引擎確實起來了
+  （`ENGINE HEALTHY`），但 `→ AVAILABLE MODELS: []`，而且網址讀不到、推論沒有跑過
+  一次。**那一列仍然是未驗證。**
+
+### 九、順帶的兩個安全面結果（正面）
+
+1. **boot 的輸出不再攜帶能力。** 逐字輸出 3500 bytes 裡，`trycloudflare`／`kgat_`／
+   `myth-`／`Bearer`／任何 `ntfy.sh/<6 字以上>` **全部 0 命中**，唯一出現的 https 主機是
+   公開的 `www.kaggle.com`。切 A／B／C 之前，這份輸出會帶著 `→ Tunnel: {url}`
+   —— **現在它印的是「讀不到」。** 這一條是這次 boot 的**證據級**副產品。
+2. **ntfy 會抖，而 boot 撐得住。** 前 7 次輪詢是空的
+   （`⚠ ntfy.sh is slow/unreachable (3 empty polls)` … 到 7），之後訊號才開始到。
+   boot 沒有因此失敗 —— 它繼續在 Kaggle 上跑，並把「還沒有訊號」與「失敗」分開講。
+
+### 無測試聲明
+
+**這一條沒有自動化測試，因為它是一份量測記錄，不是程式碼。** 手動驗證方式是
+**逐項指出每個數字的來源**：
+
+- 那 317 秒與整條 boot 逐字稿：`docs/evidence/2026-09-30-endpoint-boot-real-cuts-abc.txt`
+  （包裝腳本在 boot 前後各取一次 `date`，`### WALL_SECONDS` 就是兩者之差；
+  該檔的位元組性質「拿掉開頭連續的 `#` 行就是本文」**當場驗過**）。
+- 「跑動中 log 是空的」：`ListKernelSessionOutput` 的**即時回應**
+  （HTTP 200、頂層只有 `log` 一個鍵、`len(log) == 0`），三個時點各一次；
+  「結束後是 `found`」是同一支函式在同一個 session 結束後的第二次呼叫。
+- 「KILL 42 秒」：`send_kill_signal` 之後每 20 秒取一次 `get_kernel_status`，
+  **期間沒有呼叫任何 Kaggle 取消路徑**。
+- 「`--force` 不存在」：`grep -rn 'add_argument.*force' endpoint/*.py` 只有一個命中
+  （`main.py:140`，`register`），加上 `endpoint stop --help` 的 usage 行。
+- 「清單的路徑是錯的」：`grep -rn '\.cache/endpoint' endpoint/*.py` 0 命中，
+  對照 `core.py:210,223` 的實際定義。
+
+**這一輪沒有修改任何補丁、套用腳本、或已安裝的套件** —— 只有讀、跑、量。
+第四節與第五節指出的兩個判讀問題（`absent` 的語意、§四 那句話）
+**都只記錄，沒有動任何一行程式碼**：改驗證器讓它變綠是 D-033 的教訓的鏡像。
+
+**這一輪是花配額的**：一次 T4 x2 的 boot，牆上 317 秒，加上引擎活著的約 9 分鐘。
+那 12 列裡有 6 列結掉、1 列被權限擋下、5 列仍然掛著。
