@@ -1,0 +1,860 @@
+<title>哪些狀態要活過重啟</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --paper: #EDF1F0;
+    --surface: #FBFCFB;
+    --surface-2: #F4F7F6;
+    --ink: #141F1E;
+    --ink-2: #2C3B39;
+    --muted: #5A6A68;
+    --rule: #D3DBD9;
+    --rule-strong: #B9C4C2;
+    --persist: #0E5A55;
+    --persist-soft: #E2EFED;
+    --dies: #A5432B;
+    --dies-soft: #F6E7E2;
+    --caution: #7E5A0C;
+    --caution-soft: #F4EBD8;
+    --code-bg: #E7ECEB;
+
+    --font-sans: 'Archivo', 'Noto Sans TC', -apple-system, 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+    --font-mono: 'IBM Plex Mono', 'Noto Sans TC', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+    --step--1: 0.8125rem;
+    --step-0: 1rem;
+    --step-1: 1.0625rem;
+    --step-2: 1.375rem;
+    --step-3: 2.5rem;
+
+    --measure: 43rem;
+    --pad: clamp(1.25rem, 4vw, 3.5rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0C1312;
+      --surface: #141D1C;
+      --surface-2: #1A2524;
+      --ink: #E7EDEB;
+      --ink-2: #C6D2CF;
+      --muted: #93A4A1;
+      --rule: #253130;
+      --rule-strong: #374641;
+      --persist: #56B9AC;
+      --persist-soft: #10312E;
+      --dies: #E08A6E;
+      --dies-soft: #33201B;
+      --caution: #D6A94B;
+      --caution-soft: #332912;
+      --code-bg: #1C2726;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0C1312;
+    --surface: #141D1C;
+    --surface-2: #1A2524;
+    --ink: #E7EDEB;
+    --ink-2: #C6D2CF;
+    --muted: #93A4A1;
+    --rule: #253130;
+    --rule-strong: #374641;
+    --persist: #56B9AC;
+    --persist-soft: #10312E;
+    --dies: #E08A6E;
+    --dies-soft: #33201B;
+    --caution: #D6A94B;
+    --caution-soft: #332912;
+    --code-bg: #1C2726;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: var(--step-1);
+    line-height: 1.78;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .sheet {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: clamp(2.5rem, 7vw, 5rem) var(--pad) 6rem;
+  }
+
+  /* ── masthead ───────────────────────────────── */
+
+  .masthead {
+    max-width: var(--measure);
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .eyebrow {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--persist);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: var(--step-3);
+    line-height: 1.18;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+
+  .lede {
+    margin: 0;
+    font-size: 1.1875rem;
+    line-height: 1.72;
+    color: var(--ink-2);
+  }
+
+  .lede strong { font-weight: 700; color: var(--ink); }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .facts li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.35rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    font-size: var(--step--1);
+    line-height: 1.5;
+  }
+
+  .facts .k {
+    font-family: var(--font-mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-size: 0.6875rem;
+  }
+
+  .facts .v { color: var(--ink-2); }
+
+  /* ── sections ───────────────────────────────── */
+
+  .body-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+    margin-top: 3.5rem;
+  }
+
+  section { display: flex; flex-direction: column; gap: 1rem; }
+
+  h2 {
+    display: flex;
+    align-items: baseline;
+    gap: 0.8rem;
+    margin: 0;
+    padding-top: 1.1rem;
+    border-top: 2px solid var(--ink);
+    font-size: var(--step-2);
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+
+  h2 .num {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    flex: none;
+    transform: translateY(-0.15em);
+  }
+
+  h3 {
+    margin: 0;
+    font-size: var(--step-1);
+    font-weight: 700;
+    line-height: 1.5;
+  }
+
+  p { margin: 0; max-width: var(--measure); }
+
+  a { color: var(--persist); text-underline-offset: 0.18em; }
+  a:focus-visible,
+  summary:focus-visible { outline: 2px solid var(--persist); outline-offset: 3px; border-radius: 2px; }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background: var(--code-bg);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+  }
+
+  .refs {
+    font-family: var(--font-mono);
+    font-size: var(--step--1);
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .note {
+    max-width: var(--measure);
+    padding: 1rem 1.15rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--persist);
+    border-radius: 3px;
+    font-size: var(--step-0);
+    color: var(--ink-2);
+  }
+
+  .note strong { color: var(--ink); }
+
+  ul.plain, ol.plain {
+    margin: 0;
+    padding-left: 1.15rem;
+    max-width: var(--measure);
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  ul.plain li::marker { color: var(--rule-strong); }
+  ol.plain li::marker { font-family: var(--font-mono); color: var(--persist); font-weight: 500; }
+
+  /* ── the three consumers ────────────────────── */
+
+  .state-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--rule);
+  }
+
+  .state-list > li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1.15rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .state-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem 0.85rem;
+  }
+
+  .mark {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+
+  .mark.dies { background: var(--dies-soft); color: var(--dies); }
+  .mark.persist { background: var(--persist-soft); color: var(--persist); }
+  .mark.caution { background: var(--caution-soft); color: var(--caution); }
+
+  .state-list p { font-size: var(--step-0); }
+
+  /* ── options ────────────────────────────────── */
+
+  .options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+    gap: 1rem;
+    margin-top: 0.5rem;
+  }
+
+  .option {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    padding: 1.15rem 1.2rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+  }
+
+  .option.pick {
+    border-color: var(--persist);
+    box-shadow: inset 0 0 0 1px var(--persist);
+  }
+
+  .option-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.4rem 0.8rem;
+  }
+
+  .option-head h3 { font-size: var(--step-0); }
+
+  .option dl {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-size: var(--step--1);
+    line-height: 1.7;
+  }
+
+  .option dt {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .option dd { margin: 0.1rem 0 0; color: var(--ink-2); }
+
+  /* ── ledger ─────────────────────────────────── */
+
+  .scroll { overflow-x: auto; margin-top: 0.5rem; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 30rem;
+    font-size: var(--step--1);
+    font-variant-numeric: tabular-nums;
+  }
+
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-bottom: 0.55rem;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.75rem 0.6rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: baseline;
+  }
+
+  thead th {
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+
+  th.num, td.num { text-align: right; white-space: nowrap; }
+
+  tr.emph td {
+    background: var(--caution-soft);
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  tr.emph td:first-child { padding-left: 0.75rem; }
+  tr.emph td:last-child { padding-right: 0.75rem; }
+
+  td .sub { display: block; color: var(--muted); font-size: 0.75rem; }
+
+  /* ── bars ───────────────────────────────────── */
+
+  .bars {
+    display: flex;
+    flex-direction: column;
+    gap: 1.15rem;
+    margin: 0.75rem 0 0;
+    padding: 1.25rem 1.25rem 1.4rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    max-width: var(--measure);
+  }
+
+  .bar-row { display: flex; flex-direction: column; gap: 0.4rem; }
+
+  .bar-top {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.3rem 1rem;
+    font-size: var(--step--1);
+  }
+
+  .bar-top .who { color: var(--ink-2); }
+
+  .bar-top .amt {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .track {
+    height: 0.6rem;
+    border-radius: 999px;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    overflow: hidden;
+  }
+
+  .fill { height: 100%; width: var(--w); background: var(--ink-2); }
+  .fill.act { background: var(--caution); }
+
+  /* ── decisions ──────────────────────────────── */
+
+  .decisions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: d;
+  }
+
+  .decisions > li {
+    position: relative;
+    counter-increment: d;
+    padding: 0.95rem 1.1rem 0.95rem 3.1rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    max-width: var(--measure);
+    font-size: var(--step-0);
+  }
+
+  .decisions > li::before {
+    content: counter(d);
+    position: absolute;
+    left: 1.1rem;
+    top: 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--persist);
+  }
+
+  .decisions b { font-weight: 700; }
+
+  /* ── colophon ───────────────────────────────── */
+
+  .colophon {
+    margin-top: 4rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--rule);
+    max-width: var(--measure);
+    font-size: var(--step--1);
+    line-height: 1.75;
+    color: var(--muted);
+  }
+
+  .colophon p { max-width: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<main class="sheet">
+  <header class="masthead">
+    <p class="eyebrow">第四階段 · 開工前的決定 · item 5／6</p>
+    <h1>哪些狀態要活過重啟</h1>
+    <p class="lede">
+      item 4、5、6 不是三件事。它們是同一個問題的三個面孔：<strong>哪些狀態必須活過一次重啟，而它們要放在哪。</strong>
+      D-030 判定 item 5（第二套向量庫的維運成本）「前提不成立」——沒有東西可以備份、遷移或保持一致。那個前提之所以不成立，
+      正是因為狀態活不過行程結束。這一頁問的是：<strong>要不要讓它成立。</strong>
+    </p>
+    <ul class="facts">
+      <li><span class="k">狀態</span><span class="v">提案 · 待 #66 跑完複審</span></li>
+      <li><span class="k">範圍</span><span class="v">mem0 · APScheduler · langgraph</span></li>
+      <li><span class="k">依據</span><span class="v">D-030 · D-027 · D-036 · D-037</span></li>
+      <li><span class="k">行號基準</span><span class="v">main @ 2026-09-22</span></li>
+    </ul>
+  </header>
+
+  <div class="body-flow">
+
+    <!-- ── 一 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">壹</span>今天的實況：三個消費者，一個共同點</h2>
+      <p>第四階段會用到的三個有狀態的東西，今天全部住在暫存目錄或記憶體裡。</p>
+
+      <ul class="state-list">
+        <li>
+          <div class="state-head">
+            <h3>mem0 的 ChromaDB 向量庫</h3>
+            <span class="mark dies">活不過重啟</span>
+          </div>
+          <p>
+            落地位置是 <code>tempfile.mkdtemp(prefix="item3-")</code>，而容器用 <code>docker run --rm</code> 起，
+            只綁掛了探針原始碼。容器一結束，這一輪寫進去的記憶就跟著消失。
+          </p>
+          <p class="refs">mem0_add_cost_probe.py:2490 · :2354 · verify-mem0-add-cost.sh:384-385</p>
+        </li>
+        <li>
+          <div class="state-head">
+            <h3>APScheduler 的 job store</h3>
+            <span class="mark dies">活不過重啟</span>
+          </div>
+          <p>
+            <code>jobs.sqlite</code> 落在 <code>tempfile.mkdtemp(prefix="phase3-aps-")</code> 底下，
+            量測用的子行程再把 <code>DB</code> 指到同一個檔案。所以「重啟後 job 還在不在」量到的就是這件事本身。
+          </p>
+          <p class="refs">phase3_runtime_probe.py:445-446 · :493 · :507</p>
+        </li>
+        <li>
+          <div class="state-head">
+            <h3>langgraph 的 checkpointer</h3>
+            <span class="mark dies">活不過重啟</span>
+          </div>
+          <p>
+            兩個 builder 都掛 <code>MemorySaver()</code>，純記憶體。對照組量得很乾淨：
+            中斷之後<strong>只有帶 checkpointer 的那一半能續跑</strong>，沒有的就是全部重跑。
+          </p>
+          <p class="refs">phase3_runtime_probe.py:250 · :264 · :282 · :351</p>
+        </li>
+      </ul>
+
+      <p class="note">
+        一句話要先分清楚：<strong>探針用暫存目錄是對的。</strong>
+        每次量測都必須從乾淨的狀態開始，否則量到的數字會取決於上一次的殘留——<code>:289</code> 每次用新的
+        <code>thread_id</code> 就是為了這個。<strong>不要為了「落地」去改探針的預設</strong>；
+        要回答的是第四階段的服務：它的狀態放哪。
+      </p>
+    </section>
+
+    <!-- ── 二 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">貳</span>選項：放在哪</h2>
+      <p>
+        機制其實已經有了：探針有 <code>--workdir</code>，只是進入點從來沒傳過它、容器也沒掛任何 volume。
+        所以這不是「要不要寫功能」，是「要不要把線接起來、接到哪」。
+      </p>
+
+      <div class="options">
+        <div class="option pick">
+          <div class="option-head">
+            <h3>A · 新增一個具名 volume</h3>
+            <span class="mark persist">建議</span>
+          </div>
+          <dl>
+            <div>
+              <dt>是什麼</dt>
+              <dd>第三個具名 volume，掛進第四階段的服務容器。</dd>
+            </div>
+            <div>
+              <dt>好處</dt>
+              <dd>
+                與既有慣例一致（compose 現有兩個都是具名 volume）；<code>deploy-vps.sh</code> 在失敗路徑上
+                保證「<code>down</code> 不帶 <code>-v</code>，volume 完好」；備份是一行 <code>docker run --rm</code> 打包。
+              </dd>
+            </div>
+            <div>
+              <dt>代價</dt>
+              <dd>看不到。要 <code>docker volume inspect</code> 或進容器才摸得到內容。</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="option">
+          <div class="option-head">
+            <h3>B · bind mount 進專案目錄</h3>
+          </div>
+          <dl>
+            <div>
+              <dt>是什麼</dt>
+              <dd>例如 <code>./data/mem0</code>，直接掛主機目錄。</dd>
+            </div>
+            <div>
+              <dt>好處</dt>
+              <dd>看得到、好備份、好檢查，不必學新指令。</dd>
+            </div>
+            <div>
+              <dt>代價</dt>
+              <dd>
+                把執行期資料放進工作樹（要 gitignore，VPS 上擁有者與權限要對）；專案原本刻意沒有這個慣例，
+                而且它落在 <code>down -v</code> 的保證之外。
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="option">
+          <div class="option-head">
+            <h3>C · 維持現狀</h3>
+          </div>
+          <dl>
+            <div>
+              <dt>是什麼</dt>
+              <dd>不落地，每次重啟歸零。</dd>
+            </div>
+            <div>
+              <dt>好處</dt>
+              <dd>零改動，也沒有新的維運面。</dd>
+            </div>
+            <div>
+              <dt>代價</dt>
+              <dd>
+                第四階段的「記憶」等於沒有——等於把 D-036 花四小時買到的抽取能力，
+                放進一個每次清空的容器裡。
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      <h3 style="margin-top:1rem">順便決定的：一致性單位</h3>
+      <p>
+        三個消費者要共用一個 volume（<code>/state/mem0</code>、<code>/state/jobs.sqlite</code>、
+        <code>/state/checkpoints.sqlite</code>），還是各自獨立？
+      </p>
+      <ul class="plain">
+        <li>
+          <strong>共用</strong>——備份是一個時間點的一致快照。「還原了 checkpointer 卻指向別的日期的記憶」
+          這種不一致，結構上不可能發生；搬遷文件也只多一行。D-030 的判準本來就是「有沒有東西可以不一致」。
+        </li>
+        <li>
+          <strong>各自獨立</strong>——爆炸半徑小，一個壞掉不拖累其他。但「一致」變成要自己維護的性質。
+        </li>
+      </ul>
+      <p class="note">
+        另一件要在這裡講清楚的事：<code>deploy-vps.sh</code> <strong>只支援全新安裝、不搬資料</strong>
+        （它刻意不用「volume 存不存在」當判準——模型與 volume 是可重建的產物，帳號與對話不是）。
+        <strong>記憶屬於「不是」那一邊</strong>，而目前沒有任何程序會搬它。所以這件事要在這裡決定，
+        不會有別的時刻替你決定。
+      </p>
+    </section>
+
+    <!-- ── 三 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">參</span>帳怎麼算</h2>
+
+      <div class="scroll">
+        <table>
+          <caption>磁碟現況（本機，2026-09-22）</caption>
+          <thead>
+            <tr>
+              <th scope="col">項目</th>
+              <th scope="col" class="num">量到的數字</th>
+              <th scope="col">來源</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>根目錄 <code>/</code></td>
+              <td class="num">75G／97G<span class="sub">可用 18G · df 報 82%</span></td>
+              <td>df -h /</td>
+            </tr>
+            <tr>
+              <td>映像總量<span class="sub">11 個</span></td>
+              <td class="num">18.45 GB</td>
+              <td>docker system df</td>
+            </tr>
+            <tr class="emph">
+              <td>其中可回收<span class="sub">92% 的映像</span></td>
+              <td class="num">17.12 GB</td>
+              <td>docker system df</td>
+            </tr>
+            <tr>
+              <td>具名 volume 總量<span class="sub">2 個</span></td>
+              <td class="num">8.555 GB</td>
+              <td>docker system df</td>
+            </tr>
+            <tr>
+              <td>Open WebUI 自己的向量庫</td>
+              <td class="num">7 MB<span class="sub">在那個 2.331 GB 的 volume 裡</span></td>
+              <td>D-030</td>
+            </tr>
+            <tr>
+              <td>mem0 的向量庫<span class="sub">估算，不是量測</span></td>
+              <td class="num">1 萬則約 100 MB<span class="sub">4 KiB／向量（1024 維 × float32）＋ 索引與原文</span></td>
+              <td>估算</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <figure class="bars">
+        <div class="bar-row">
+          <div class="bar-top">
+            <span class="who">根目錄已用</span>
+            <span class="amt">82% · 75G／97G · 可用 18G</span>
+          </div>
+          <div class="track"><div class="fill" style="--w:82%"></div></div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-top">
+            <span class="who">映像可回收（先清這裡）</span>
+            <span class="amt">17.12 GB／18.45 GB · 92%</span>
+          </div>
+          <div class="track"><div class="fill act" style="--w:92.8%"></div></div>
+        </div>
+      </figure>
+
+      <p>
+        <strong>向量庫不是磁碟問題。</strong>7 MB 對上 17.12 GB 的可回收映像，差了三個數量級。
+        D-030 的三段判定（<code>ok</code>／<code>reclaim-first</code>／<code>blocked</code>）在這一台是
+        <code>reclaim-first</code>——不是放不下，而是<strong>先清再放</strong>。
+        順序因此是：<strong>先 reclaim，再決定落地的位置。</strong>
+        理由不是向量庫大，是 <code>/</code> 已經 82%，而第四階段還會拉新映像與更大的模型。
+      </p>
+    </section>
+
+    <!-- ── 四 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">肆</span>子決定：<code>misfire_grace_time</code></h2>
+      <p>這一項量得很乾淨，而且量出來的結論比參數本身重要。</p>
+      <ul class="plain">
+        <li>APScheduler 的預設寬限是 <strong>1 秒</strong>。</li>
+        <li>邊界是「<strong>逾期 &gt; 寬限 ⇒ 丟掉</strong>」，而且邊界<strong>隨 grace 移動</strong>：固定逾期 2.2 秒時，grace 1 丟掉、grace 3 跑掉。</li>
+        <li>
+          最關鍵的一條：<strong>丟掉與跑過在 store 裡長得一模一樣。</strong>
+          沒有外部紀錄就分不出來——這才是這一項的發現。
+        </li>
+      </ul>
+
+      <div class="scroll">
+        <table>
+          <caption>選項</caption>
+          <thead>
+            <tr>
+              <th scope="col">值</th>
+              <th scope="col">重啟之後的行為</th>
+              <th scope="col">適合</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>吃預設 1 秒</td>
+              <td>停機超過 1 秒的 job 靜默消失</td>
+              <td>一律準時才有意義的 job</td>
+            </tr>
+            <tr>
+              <td>一個明確的窗口<span class="sub">例：300 秒</span></td>
+              <td>涵蓋一次重啟的停機，但不重播一週前的排程</td>
+              <td>大部分維運型 job</td>
+            </tr>
+            <tr>
+              <td><code>None</code> ＋ <code>coalesce=True</code></td>
+              <td>一律補跑，且不會補跑風暴</td>
+              <td>少一天就是少一天的 job（每日摘要）</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        不管選哪一個，<strong>都必須有外部紀錄</strong>（fire 與 drop 都要留痕），
+        否則這個值只是在選一種沉默。值本身是次要的，可觀測性才是主要的。
+      </p>
+      <p class="note">
+        另外兩條量到的限制會反過來約束第四階段的程式碼怎麼寫，所以要在寫 job 之前決定：
+        <code>run_date</code> 必須是 <code>datetime</code>（float timestamp 直接 <code>TypeError</code>）；
+        而 <code>SQLAlchemyJobStore</code> <strong>拒絕非模組層級的 job</strong>——lambda 當場失敗，記憶體 store 卻收得下。
+      </p>
+    </section>
+
+    <!-- ── 五 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">伍</span>與 item 4 的耦合</h2>
+      <p>item 4（每個 graph 自己的 <code>recursion_limit</code>）沒辦法單獨做，因為它要讀的數字就是存在 checkpointer 裡的：</p>
+      <ul class="plain">
+        <li>讀「這張 graph 走到第幾步」要靠 <code>get_state(cfg).metadata["step"]</code>，而那需要 <strong>checkpointer ＋ thread_id</strong>。</li>
+        <li>D-030 的對照組已經量完：中斷之後<strong>有 checkpointer 只是多花一次呼叫，沒有就是全部重跑</strong>。</li>
+      </ul>
+      <p>
+        所以：<strong>要收緊 <code>recursion_limit</code>，checkpointer 就是前置條件</strong>，
+        而 checkpointer 放在哪就是這一頁的問題。item 4 與 item 5／6 是同一個決定的兩半。
+      </p>
+    </section>
+
+    <!-- ── 六 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">陸</span>建議</h2>
+      <ol class="plain">
+        <li>
+          <strong>走 A，而且三個消費者共用一個 volume。</strong>新增一個具名 volume，
+          三個消費者是它底下的三個子路徑。與既有慣例一致、備份即一致快照、搬遷文件只多一行。
+        </li>
+        <li>
+          <strong>探針不動。</strong>暫存目錄是量測正確性的一部分。落地是第四階段服務的事，
+          機制用既有的 <code>--workdir</code> 或服務自己的設定。
+        </li>
+        <li>
+          <strong><code>misfire_grace_time</code> 明講一個值</strong>，並在<strong>同一個改動裡</strong>
+          加上 fire／drop 的外部紀錄。沒有紀錄就不算決定。
+        </li>
+        <li>
+          <strong>順序：先 reclaim 17.12 GB，再建 volume。</strong>不是因為向量庫大，是因為 <code>/</code> 已經 82%。
+        </li>
+      </ol>
+    </section>
+
+    <!-- ── 七 ───────────────────────────────────── -->
+    <section>
+      <h2><span class="num">柒</span>要你決定的四點</h2>
+      <ol class="decisions">
+        <li>落地走 <b>A</b>（具名 volume）、<b>B</b>（bind mount）還是 <b>C</b>（維持現狀）？</li>
+        <li>三個消費者<b>共用一個 volume</b>，還是各自獨立？</li>
+        <li>
+          <code>misfire_grace_time</code> 取哪個值（預設 1 秒／明確窗口／<code>None</code> ＋ <code>coalesce</code>）？
+          以及<b>外部紀錄放哪</b>（log 檔？同一顆 sqlite 的第三張表？）
+        </li>
+        <li>要不要把第四階段服務的<b>狀態路徑寫進 <code>.env.example</code></b>？今天那 13 個旋鈕裡沒有任何記憶或排程路徑。</li>
+      </ol>
+    </section>
+
+  </div>
+
+  <footer class="colophon">
+    <p>
+      這一頁是在「等 #66 跑完再看」之後寫的，內容不依賴那一輪的結果。若 #66 如預期
+      （<code>done_reason=stop</code>、抽出 2 則、context shift 0 次、C6／C7 全過），item 3 就收掉了——
+      而「mem0 有抽取能力，卻沒有地方放」會成為第四階段開工前的第一件事。
+    </p>
+    <p style="margin-top:0.75rem">
+      依據：D-030（磁碟與狀態的三段判定）· D-027（預算）· D-036／D-037（推導與哨兵）。
+      檔案行號以 2026-09-22 的 <code>main</code> 為準。
+    </p>
+  </footer>
+</main>
