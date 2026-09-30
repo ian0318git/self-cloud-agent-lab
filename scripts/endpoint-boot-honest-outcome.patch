@@ -1,0 +1,68 @@
+--- a/endpoint/commands.py	2026-09-30 23:32:35.183453280 +1000
++++ b/endpoint/commands.py	2026-09-30 23:32:57.001751068 +1000
+@@ -1291,10 +1291,21 @@
+                         save_cached_endpoint(tunnel_url)
+                         console.print(f"  [dim]\u2192 Tunnel:[/] {tunnel_url}")
+                     elif _state == "absent":
++                        # Measured 2026-09-30 (D-072 section 4): while the
++                        # session runs, ListKernelSessionOutput answers 200 with
++                        # an EMPTY log; the URL appears only once the session has
++                        # ended. The old text here said "read it in a moment with
++                        # `endpoint base-url`". On this path that sentence was
++                        # simply false -- the same shape of untruth D-060 was
++                        # about.
+                         console.warn(
+-                            "  Tunnel is up, but its URL is not in the kernel log yet."
++                            "  Tunnel is up, but its URL cannot be read while the "
++                            "session runs."
++                        )
++                        console.dim(
++                            "  Kaggle serves the kernel log only after the session "
++                            "ends -- by then the tunnel is gone."
+                         )
+-                        console.dim("  Read it in a moment with: endpoint base-url")
+                     else:
+                         console.warn(
+                             "  Tunnel is up, but the kernel log could not be read."
+@@ -1302,7 +1313,15 @@
+                         console.dim(
+                             "  No Kaggle credentials, or Kaggle refused the request."
+                         )
+-                        console.dim("  Read it later with: endpoint base-url")
++                        # The old text here said "read it later with `endpoint
++                        # base-url`". False for the same reason as the branch
++                        # above: retrying does not help, because the log is
++                        # unreadable while the session runs no matter which
++                        # credentials we hold (D-072 section 4).
++                        console.dim(
++                            "  Retrying later cannot help -- the log is unreadable "
++                            "while the session runs either way."
++                        )
+                     break
+                 if signal.startswith("Endpoint IS ONLINE"):
+                     console.print(f"  [green]\u2192[/] {signal}")
+@@ -1400,6 +1419,24 @@
+         # Continue monitoring Kaggle upload if still in progress
+         if not _kaggle_done and config._get(["model_source"], "") != "kaggle":
+             _monitor_kaggle_upload(config, since)
++
++        if not tunnel_url:
++            # The kernel really is running, so `success` stays True and the
++            # "kernel did not come up" path below (exit 1) is not the right
++            # report -- but the endpoint was never wired up: _wait_for_model_ready,
++            # _register_with_proxy and display_endpoint all sit behind the
++            # `tunnel_url` guard above, and clear_cached_endpoint() ran near the
++            # top of boot. Name what did not happen rather than let the engine's
++            # own "IS ONLINE" stand as the last word (D-073).
++            console.warn("  The endpoint was NOT wired up.")
++            if config.proxy_enabled:
++                console.warn(
++                    f"  The proxy was never told about this tunnel, so "
++                    f"{config.proxy_url} does not reach it."
++                )
++            console.dim("  The kernel is running; only the wiring is missing.")
++            console.warn("  Exiting 2 (endpoint not wired).")
++            sys.exit(2)
+     elif kernel_status == "running":
+         with console.spinner() as p:
+             p.add_task("Waiting for tunnel URL...")

@@ -12075,3 +12075,187 @@ D-069 第八節寫著「活性警告仍可 `--force` 覆寫」，D-070 §十 的
 
 **這一輪是花配額的**：一次 T4 x2 的 boot，牆上 317 秒，加上引擎活著的約 9 分鐘。
 那 12 列裡有 6 列結掉、1 列被權限擋下、5 列仍然掛著。
+
+---
+
+## D-073：boot 不再宣稱一件它沒做到的事 —— 而「等一下就會有」是假的
+
+**2026-09-30。狀態：已實作、已套用（`scripts/apply-endpoint-boot-honest-outcome.sh`）。**
+
+這一條是 **D-072 第四節那個 ❌ 的後續**。D-072 量到「kernel 跑動中讀不到 log」之後
+把它記成已知缺陷就收工了。這一輪先問了一個**零配額**的問題 ——
+
+> `ListKernelSessionOutput` 是不是唯一的路？
+
+—— 然後才決定要不要動它。**答案讓這一刀變小，不是變大。** 它沒有去修「網址拿不到」；
+它修的是 boot 對這件事的**說法**。理由在第七節。
+
+**這一輪沒有花任何配額**：全部是讀安裝樹的原始碼與 SDK 生成物。
+
+### 一、一眼看盡
+
+| 要問的 | 答案 |
+|---|---|
+| `ListKernelSessionOutput` 是唯一的路嗎 | ❌ **不是。** 同一支 `KernelsApiClient` 上有 13 個方法 |
+| 有沒有專給「跑動中」用的門 | ✅ **有**：`GetKernelSessionLogsStream`，SSE，docstring 就是這樣寫的 |
+| 那為什麼不換過去 | ⚠️ 它要 `kernel_session_id`，而**這個東西在整棵樹裡不存在** |
+| 「等一等就會有」是真的嗎 | ❌ **假的。** SDK 自己的文件說那是**兩個不同的後端** |
+| 這一刀改了什麼 | boot 的兩句假處方 ＋ 一個誠實的收尾 ＋ 離開碼 **2** |
+| 這一刀**沒有**改什麼 | 網址仍然拿不到。**切 B 仍未解**（第七節） |
+
+### 二、零配額的調查：舊門不是「賽跑輸了」，是**開錯門**
+
+`kagglesdk` 的 `KernelsApiClient` 有 13 個方法，其中與「把網址拿回來」有關的：
+
+| RPC | 路徑 | 定址方式 | 跑動中可用？ |
+|---|---|---|---|
+| `ListKernelSessionOutput` | `…/ListKernelSessionOutput` | user + slug | ❌ **實測 `log` 是空字串** |
+| `GetKernelSessionLogsStream` | `/api/v1/kernels/sessions/{kernel_session_id}/logs/stream`（GET, SSE） | **要 `kernel_session_id`** | ✅ 設計上就是給跑動中用的 |
+| `ListKernelFiles` | `/api/v1/kernels/files`（GET） | user + slug | ⚠️ **未量** |
+| `GetKernelSessionStatus` | — | user + slug | 只回一個狀態字，沒有網址 |
+
+而 `get_kernel_session_logs_stream` 的 docstring **把量到的現象解釋光了**：
+
+> While the session is running (or shortly after), the midtier proxies to the
+> per-session log endpoint published by the session manager and returns
+> Server-Sent Events … If the session has already terminated by the time the
+> request arrives, the live stream URL is no longer available; the midtier
+> instead returns the persisted log file as written by the worker.
+
+**兩個後端**：活的（SSE）與已落盤的。`ListKernelSessionOutput` 讀的是**已落盤**那個。
+所以 D-072 量到的「跑動中空、結束後才有」**不是時序運氣，是結構** ——
+這比 D-072 原本的措辭強，而且有 SDK 自己的文件背書。
+
+**可是活門要一個這棵樹沒有的東西。** `ApiGetKernelSessionLogsStreamRequest` 的
+`endpoint_path()` 是 `/api/v1/kernels/sessions/{kernel_session_id}/logs/stream`，
+而它的 `endpoint()` 直接回字串 `'Custom endpoint required'` —— SDK 自己都建不出這個
+URL。`kernel_session_id` **在 endpoint 套件裡一次都沒出現過**：它有的是
+`config.kernel_id = "owner/slug"`（`core.py:1088`、`:1228`），四個在用的 RPC 全部靠拆
+這個來定址；狀態回應只有 `status` + `failureMessage`；`ApiSaveKernelResponse` 有
+`kernel_id`/`ref`/`url`，**沒有一個是 session id**。
+
+→ **「換到活門」不是一行改動**，它要先去生一個新識別碼，而樹上沒有來源。這一條留給
+切 B 的選項清單（第七節）。
+
+### 三、這一刀改了哪三處（都在 `run_boot`）
+
+改動的範圍**只有 `run_boot` 這一個函式** —— 這一條不是靠讀 diff 說的，是把修補前後的
+AST 逐函式 dump 出來比對得到的（`include_attributes=False`，所以行號位移不會誤判）：
+新增 0 個函式、刪除 0 個函式、內容變動的只有 `run_boot`。
+
+**(1) `absent` 分支的假處方**（原 `commands.py:1293-1297`）。原文是
+
+```
+  Tunnel is up, but its URL is not in the kernel log yet.
+  Read it in a moment with: endpoint base-url
+```
+
+那個 **yet 永遠不會到**，而那條指令走的就是這條讀不到的路。改成量到的事實：
+「the URL cannot be read while the session runs」＋「Kaggle 只在 session 結束後才供
+log —— 那時隧道已經沒了」。
+
+**(2) `unknown` 分支的假處方**（原 `:1298-1305`）。同理：「Read it later with:
+`endpoint base-url`」也是假的，而且**再試也一樣** —— 讀不到與憑證無關。
+
+**(3) 成功路徑的收尾**（原 `:1392-1398` 之後）。這是重點。原本：
+
+```python
+if success:
+    if tunnel_url:            # ← 量到的那條路上，這一層沒進去
+        _wait_for_model_ready(tunnel_url)
+        if config.proxy_enabled:
+            _register_with_proxy(config, tunnel_url)
+        display_endpoint(config, tunnel_url)
+```
+
+`clear_cached_endpoint()` 在 boot 開頭就跑過了，所以三個都跳過之後 —— **proxy 不知道
+隧道在哪、快取也不知道**。而 boot 仍然印出引擎自己那句 `Endpoint IS ONLINE`、仍然
+**exit 0**。新增的收尾在 `_monitor_kaggle_upload` **之後**（不搶在還在從 Kaggle 拉
+模型的 boot 前面），把沒發生的事講出來：
+
+```
+  The endpoint was NOT wired up.
+  The proxy was never told about this tunnel, so <proxy_url> does not reach it.
+  The kernel is running; only the wiring is missing.
+  Exiting 2 (endpoint not wired).
+```
+
+### 四、為什麼收尾是 exit 2，而不是 exit 1
+
+`sys.exit(1)` 在這支檔案裡**已經專屬「kernel 沒起來」**：那條路會印 `Boot failed`、
+去爬 notebook 的 cell 錯誤、叫讀者開 Kaggle（`commands.py:1425-1468`）。共用它會把
+讀者送去追**不存在的** notebook 錯誤。
+
+`run_stop` 已經立了 **2 ＝「沒有到達確定的好狀態」**（`commands.py:1574`，
+`Exiting 2 (cannot determine)`），`migrate-kaggle-token.sh --check` 也對 `unknown`
+回 2。這是同一家族：**kernel 起來了，接線沒有。**
+
+**`success` 保持為 `True`，而且是無條件的 `True` —— 這一點是刻意的**，驗證器把它
+釘住（檢查 C）。把 `success` 改成 `False`、或把它塞進 `if tunnel_url:` 底下，是
+**D-033 的鏡像**：把「kernel 真的在跑」這個**為真**的事實改成**假的失敗**。原本錯的
+從來不是 `success`，是**對接線的沉默**。
+
+### 五、一個必須講清楚的後果：從此每次 boot 都 exit 2
+
+因為網址目前**每一次** boot 都讀不到，這一刀會讓 `endpoint boot` **每一次**都 exit 2。
+
+**這是預期效果，不是退化。** 只要切 B 沒解，endpoint 在 boot 之後就**真的是**沒接線
+的，錯的是那個 `0`。它會一直紅著，直到切 B 有結論 —— 這是這一刀的目的：**把假安心
+拿掉，不是把缺陷修好。**
+
+**不會弄壞自家的工具鏈**：grep 過整個 `scripts/`，**沒有任何腳本在程式上吃 boot 的
+離開碼**（所有命中都是註解提到 boot，不是呼叫它）。
+
+### 六、這一刀怎麼驗的
+
+**雙向**（`apply-endpoint-boot-honest-outcome.sh` 每次都跑兩次驗證器）：
+
+- 修補**前**必須**失敗**（`test_endpoint_boot_honest_outcome.py`：A、D、E 三項紅）
+- 修補**後**必須**通過**（5/5 綠）
+
+驗證器有五個檢查，其中兩個是**護欄而不是蟲**（它們在原始版上也過）：
+**B** 是正對照 —— 確認 TUNNEL 分支**還有在出聲**，堵住「把整個分支刪掉讓 A 變綠」；
+**C** 是上面那個 D-033 護欄。
+
+**另外跑了八條突變**，每一條**指名它該被哪一個檢查編號抓到**（`M1`→B、`M2`/`M3`→C、
+`M4`/`M7`→D、`M5`→E、`M6`→A，外加一條 **`=NOFAIL`** 守門：只改註解、語意不變，
+**不准叫**）。八條全部照指名被抓到，守門那條沒叫。
+
+**這一輪也有一個自己抓到自己的錯**：突變台的第一版把「檢查有沒有紅」寫成一段
+正則交集，那段式其實永遠算不出東西；另一條突變的錨點在樹上出現**兩次**卻寫成
+一次。兩個都在跑之前就看得出來，改掉了 —— 記在這裡是因為**它們正是這一節想防的
+那種東西**：一個不會失敗的檢查，和一個永遠通過的測試一樣沒用。
+
+**突變測試沒有留成腳本**（家族裡只有兩支安全相關的刀有 `*_mutants.sh`）。這一點
+照 `docs/evidence/README.md` 的規矩講明白：**八條突變的來源是這一輪的對話紀錄，
+不是一個檔案**，這個差別不假裝兩者等價。
+
+**既有的 `test_usage_text.sh` 151/151 通過** —— 新增的 `apply-*.sh` 會被它**自動
+glob 進去**（`test_usage_text.sh:95-97`），所以這支腳本的檔頭必須是它能逐字推導的
+形狀。它過了，代表新腳本的 `--help` 與檔頭逐字一致、且不含任何一行程式碼。
+
+### 七、這一刀**沒有**修什麼：切 B 仍然未解，而選項變清楚了
+
+網址還是拿不到。調查把選項收斂成四條，**取捨留給人**：
+
+| | 選項 | 代價 | 風險 |
+|---|---|---|---|
+| A | 換到 SSE 活門 `GetKernelSessionLogsStream` | 要先有 `kernel_session_id`（樹上無來源） | 這其實是**重寫**的入口 |
+| B | 引擎寫檔、CLI 用 `ListKernelFiles` 讀 | 小改，定址與現有寫法吻合 | **前提未量** —— 而 D-072 §4 正是「前提不成立」那條教訓 |
+| C | 引擎自己註冊（`master_build_notebook.py:310` 已讀 `ENDPOINT_API_KEY`、`:931` 把金鑰烤進 notebook，而註冊只是一發帶金鑰的 POST） | 改動最大 | 把「註冊失敗」搬進 kernel，CLI 就報不好了 |
+| D | **只修誠實度** | 小、零配額 | 會改 boot 的離開碼 —— **這一輪做的就是這條** |
+
+**A／B／C 都還要再燒一次 boot 才能驗前提。** 那筆配額可以跟還掛著的三列裝在同一趟
+（隧道撐不撐得過整個 session、較大的 GGUF、日誌主題名殘留 —— D-070 §十）。
+
+### 無測試聲明
+
+- **有**自動化覆蓋，且**這一輪真的跑了**：`test_endpoint_boot_honest_outcome.py`
+  五個檢查（雙向：原始版 2/5、修補後 5/5）、八條突變、`test_usage_text.sh` 151/151。
+- **沒有**自動化覆蓋的部分：**收尾那句話從來沒有在真的 boot 上被印出來過。** 驗證器
+  檢查的是**控制流有沒有接對**（收尾有條件、在成功路徑上、排在監看之後、用 exit 2），
+  不是「它印得對不對」。要看到那句話，需要一次真的 boot —— 而它會**立刻** exit 2，
+  所以下一次 boot 同時是「驗這一刀」與「花配額量那三列」的機會。
+- 手動驗證方式：`bash scripts/apply-endpoint-boot-honest-outcome.sh --dry-run`（不動
+  任何檔案）、`--verify`（對現況跑驗證器）、`--revert`（還原）。
+- **這一輪沒有呼叫任何 Kaggle API**，所以沒有任何一個結論依賴配額。

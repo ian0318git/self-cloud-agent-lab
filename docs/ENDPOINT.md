@@ -44,8 +44,9 @@ Being explicit about this, because the whole project depends on not confusing
 | Kaggle + Endpoint can run a larger GGUF model | **Not verified** — needs your Kaggle account |
 | Speed, VRAM headroom, which model sizes fit on 2×T4 | **Not measured** |
 | That the tunnel stays up for a whole session | **Not measured** |
-| That the patched generator survives a real `endpoint boot` | **Verified** (2026-09-30) — a T4 x2 boot ran end-to-end: exit 0, 317 s wall, `ENGINE HEALTHY` → `Endpoint IS ONLINE`. D-072 §3 |
+| That the patched generator survives a real `endpoint boot` | **Verified** (2026-09-30) — a T4 x2 boot ran end-to-end: 317 s wall, `ENGINE HEALTHY` → `Endpoint IS ONLINE`. D-072 §3. **Addendum (same day, D-073):** the "exit 0" measured then was the behaviour *at the time*; the same path now returns **2**, for the reason in the next row |
 | That the kernel log can be read **while the kernel is still running** — the premise the new URL reader rests on in practice | **Measured, and it cannot.** While the kernel ran, `ListKernelSessionOutput` returned HTTP 200 with an **empty** `log` (3 samples over 9 minutes); the URL appeared only *after* the session ended — i.e. too late to be useful. **The premise does not hold.** D-072 §4 |
+| That boot reports honestly when the tunnel is up but its URL cannot be read | **Fixed** (2026-09-30, D-073). Before: two prescriptions the measurement refutes ("it will be there in a moment", "read it with `endpoint base-url`" — which goes down the very path that cannot be read), and `exit 0` printed alongside `Endpoint IS ONLINE` **while the proxy had never been told about the tunnel**. Now: it says the endpoint was **not wired up**, and exits **2** (`1` still means "the kernel did not come up"). **This fixes only the reporting — the URL itself is still unobtainable; cut B is unresolved.** |
 | That the deployment instruments stay honest under speculative decoding (MTP) | **Known to conflict** — see "One known way to make these instruments lie" below, and D-061 |
 
 Interface conformance is not the same as capacity. The probe deliberately does
