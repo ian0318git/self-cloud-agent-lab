@@ -12259,3 +12259,218 @@ glob 進去**（`test_usage_text.sh:95-97`），所以這支腳本的檔頭必�
 - 手動驗證方式：`bash scripts/apply-endpoint-boot-honest-outcome.sh --dry-run`（不動
   任何檔案）、`--verify`（對現況跑驗證器）、`--revert`（還原）。
 - **這一輪沒有呼叫任何 Kaggle API**，所以沒有任何一個結論依賴配額。
+
+---
+
+## D-074：三條「所以不動引擎」的理由，兩條是假的，而守第三條的閘門已經停擺
+
+**2026-10-01。狀態：只記錄，不動任何一個字元。** 這一條**沒有改任何程式、沒有改任何
+驗證器、沒有呼叫任何 Kaggle API**。它記的是三條**已經寫進 DECISIONS.md 的斷言**，
+在這一輪被重量之後的結果。
+
+為什麼不改：**D-033** 寫著「把驗證器改到讓紅變綠，正是它要抓的那個 bug 的鏡像」。
+底下三條裡有兩條的「修正」都是那個動作 —— 所以**留給人**。
+
+### 一、一眼看盡
+
+| 寫在哪 | 斷言 | 重量結果 |
+|---|---|---|
+| D-068 §三 | 「`start_tunnel()` **沒有可達的呼叫點**，所以發不出東西」 | ❌ **假** —— 它有呼叫點，且真的會被執行 |
+| D-068 §三（推論） | check C 會「在有人把它接起來時變紅」 | ❌ **做不到** —— 接起來的慣用手法正是它看不見的那一種 |
+| D-069 §八 | 「引擎端 `log.debug` 仍會把主題寫進 kernel log」 | ❌ **假** —— 沒有任何一行 logging 碰得到主題，且 level 是 INFO |
+| D-068 §三／D-069 §八 | 「切 A 把 `engine/engine.py` 的雜湊釘死，碰它會讓 A 的閘門失效」 | ✅ **真** —— 但守它的 check A **從 2026-09-30 起就沒在跑**（第五節） |
+
+**三條理由的用途都是「所以不去看引擎」。** 兩條在寫下的當下就是假的；第三條為真，
+但它的守門人停擺了。
+
+### 二、第一條：那把槍有上膛的路，它只是沒有入口
+
+D-068 §三寫的是「`start_tunnel()` 沒有可達的呼叫點」。實際的鏈是：
+
+```
+_startup()                                            engine.py:1860
+  └─ Thread(target=telemetry_loop)                          :1863  ← 以「值」傳，不是呼叫
+telemetry_loop()   while True:                              :1453
+  └─ _watchdog_check()                                      :1457
+_watchdog_check()                                           :1496
+  └─ if cloudflared_process is not None and …poll()… :1529
+       └─ Thread(target=_safe_restart, args=("tunnel", start_tunnel))  :1532
+_safe_restart(name, target)                                 :1484
+  └─ target()                                               :1490  ← 真的呼叫
+start_tunnel()                                              :1313
+  └─ if url: _broadcast_tunnel(url)                         :1377-1379
+_broadcast_tunnel(url)                                      :310
+  └─ requests.post(f"https://ntfy.sh/{SIGNAL_TOPIC}", data=base64("WS:{url}"))
+```
+
+**真正讓它發不出東西的是真空，不是「沒人呼叫」。** `cloudflared_process` 全檔只有
+三個賦值點：
+
+| 行 | 在哪個函式 | 值 |
+|---|---|---|
+| `:1297` | 模組層 | `None`（初始） |
+| `:1345` | **`start_tunnel` 內** | `subprocess.Popen(...)` |
+| `:1407` | `stop_tunnel` 內 | `None` |
+
+而唯一呼叫 `start_tunnel` 的分支（`:1529`）**要求它已經不是 `None`**。要有值就得先
+跑過 `start_tunnel`；要跑 `start_tunnel` 就得先有值 —— **一個沒有入口的環。**
+
+### 三、驗證器為什麼看不到，以及它為什麼擋不住它說要擋的東西
+
+check C 的判準是 `_calls_to`（`scripts/test_endpoint_tunnel_url_privacy.py:115-138`），
+它只認 `ast.Call` 且 `node.func` 是 `ast.Name`：
+
+```python
+if not (isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == func_name):
+    continue
+```
+
+**看得見 `f()`，看不見把 `f` 當值傳。** 對活的 `engine.py` 把兩個判準並排量：
+
+| 名字 | `_calls_to` 看到 | 實際參照（值也算） |
+|---|---|---|
+| `_startup` | `[3645]` | `[3645]` |
+| `_watchdog_check` | `[1457]` | `[1457]` |
+| `_broadcast_tunnel` | `[1379]` | `[1379]` |
+| **`telemetry_loop`** | **`[]`** | **`[1863]`** |
+| **`start_tunnel`** | **`[]`** | **`[1532]`** |
+| `_safe_restart` | `[]` | `[1503, 1511, 1519, 1525, 1532]` |
+
+前三列是**正向對照**：儀器沒有壞，它只是形狀很窄。**第四列就是這件事本身** ——
+`telemetry_loop` 被 `_calls_to` 判為「沒有呼叫者」，而它是這顆引擎從開機跑到關機的
+電報迴圈。**所以「`_calls_to` 說沒人呼叫」不等於「不會跑」。** 這不是文體問題，
+是一個量出來的矛盾。
+
+它漏掉的那個形狀（`Thread(target=f, args=(..., f))`）**正是這顆引擎啟動每一條背景
+迴圈的慣用手法**：`:1503`、`:1511`、`:1519`、`:1525`、`:1532`、`:1863` 六處，全部。
+
+**失敗模式。** check C 的 docstring 自己寫著它存在的理由：
+
+> so that wiring it up turns this check red instead of silently re-opening the leak
+
+**它做不到。** 只要有人給 `cloudflared_process` 一個入口（最現實的一種：讓引擎自己
+起 tunnel，而不是靠 notebook），`:1529` 那條分支就會真的開火，網址就會回到公開
+主題上 —— 而 check C 的兩個條件**都還是綠的**（`_broadcast_tunnel` 仍然只有
+`start_tunnel` 一個呼叫者；`_calls_to(engine, "start_tunnel")` 仍然是空的）。
+**它宣稱要防的那件事發生時，它不會變紅。**
+
+### 四、第二條：`log.debug` 那條殘餘不成立
+
+D-069 §八寫著：
+
+> **引擎端 `log.debug` 仍會把主題寫進 kernel log**（私有、需 Kaggle 憑證）。
+
+**三個方向都不成立。**
+
+**（a）沒有那樣的呼叫。** `topic`（**大小寫不拘**）在 `engine.py` 出現 **8** 次：
+
+| 行 | 是什麼 |
+|---|---|
+| `:200`、`:201` | `os.getenv("LLM_SIGNAL_TOPIC")` / `LLM_CONTROL_TOPIC` —— 讀取 |
+| `:299`、`:311`、`:1417` | `if not SIGNAL_TOPIC:` / `CONTROL_TOPIC` —— 真值守衛 |
+| `:303`、`:318`、`:1420` | `f"https://ntfy.sh/{...}"` —— 餵給 `requests.post` / `requests.get` |
+
+**沒有一處在 logging 呼叫裡。** 主題的值只在這 8 個地方存在，而它們全部通往
+`requests`，不是 `log`。
+
+**（b）就算有，也印不出來。** `engine.py:183-186`：
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(correlation_id)s] %(levelname)s %(name)s: %(message)s",
+)
+```
+
+**`log.debug` 從不發射。**
+
+**（c）實測也沒有。** 對 2026-09-30 那次 boot 的產物掃描：`control_topic` 0、
+`signal_topic` 0、12 位十六進位摘要 0、32 位十六進位秘密 0、`ntfy.sh` 0。
+**正向對照**證明引擎的輸出確實在該產物裡（`endpoint:` ×18、` INFO ` ×18、
+`TUNNEL ACQUIRED` 1、`ENGINE LAUNCHED` 1）；**負向對照**證明 DEBUG 確實關著
+（`health check failed` 0、`tunnel URL not yet` 0、`Waiting for inference server` 0、
+字面 `DEBUG` 0）。
+
+⚠️ **這一條我這一輪自己踩過一次，記下來，因為它跟第五節是同一件事。** 本輪稍早我是
+用 `grep -n 'topic'`（**小寫**）量的，得到 **0** 次。但 `SIGNAL_TOPIC` 是大寫
+`TOPIC` —— **那個 grep 的形狀剛好會漏掉它。** 改用 `grep -in` 之後得到 **8** 次。
+**結論沒變（8 處仍然沒有一處在 logging 裡），但「0 次」那個數字是錯的，而且錯的
+方向剛好是「看起來更乾淨」。**
+
+### 五、第三條是真的，但它的守門人從 09-30 就沒在跑
+
+「切 A 把 `engine/engine.py` 的雜湊釘死了，碰它會讓 A 的閘門失效」—— **這條為真。**
+問題不在這條，在**守它的那個東西**。
+
+切 B 的驗證器（`scripts/test_endpoint_tunnel_url_privacy.py`）的 check A 把切 A 的
+驗證器**逐位元組釘住**：
+
+```python
+CUT_A_VERIFIER_SHA  = "05a3e7ac41064f8023f8aacfcc923c24f670b9efb2fce722b5e353ca24e8884d"
+CUT_A_VERIFIER_NAME = "test_endpoint_apikey_broadcast_fixes.py"
+```
+
+這個 pin **寫下的當下是對的**。時間軸：
+
+| commit | 日期 | 該檔 sha |
+|---|---|---|
+| `42c5f75` 切 A（D-067） | 2026-09-28 22:03 | `05a3e7ac…` |
+| `28daf4d` 切 B（D-068） | 2026-09-29 08:24 | `05a3e7ac…` ← **pin 當時正確** |
+| `22702de` 第四刀（D-070） | 2026-09-30 00:50 | `dd5c22fa…` ← **改在這裡** |
+| HEAD | 2026-10-01 | `dd5c22fa…` → **check A 紅** |
+
+**D-070 改了切 A 的驗證器，切 B 的驗證器從此沒有再被跑過。** 所以：
+
+- 這個紅從 2026-09-30 00:50 起就在，**沒有人看到**。
+- 而且不只是「一行紅」：check A 在 sha 不符時**提前 `return`**，所以它**根本沒有拿
+  切 A 的驗證器去打這棵樹**。「這支驗證器還是當初被獨立驗過的那一份」這個保證，
+  **目前是停擺的**。
+- 切 A 自己的 `apply-*.sh --verify` 還是跑得動切 A 的驗證器。**停擺的不是切 A 的
+  驗證能力，是它「沒被動過」的獨立性保證。**
+
+**這是補丁鏈的結構性副作用，不是誰大意。** 驗證器互 pin 位元組是為了換取獨立性
+（D-068 的設計），代價是**任何一次合法的後續編輯都會讓較早的驗證器靜默失效**，
+而只有「剛好再去跑一次那支舊驗證器」才會看到。D-068 的提交訊息**預言了同一類事**
+（「補丁順序……對前兩支任一 `--revert` 會**無聲地**拆掉這一刀」），但沒有預言到
+驗證器互 pin 這一種。
+
+### 六、這對收尾的意義
+
+**現在沒有洩漏。** 網址沒有回到主題上，因為第二節那個環沒有入口 —— 這一點這一輪
+沒有動搖。
+
+動搖的是**「為什麼沒有」的記錄**。專案留給後人的說法是「引擎我們沒動，而且有閘門
+看著」，而這一輪量出來的實際情況是：
+
+- 不動引擎的**第一個理由**（那把槍不可達）：理由是假的，真實理由是真空。
+- 不動引擎的**第二個理由**（有個殘餘風險，所以算了）：那個殘餘不存在。
+- 不動引擎的**第三個理由**（雜湊釘死）：為真，但守它的閘門停擺。
+
+**所以下一個動引擎的人不會收到任何警告** —— 而警告正是這三條本來要提供的東西。
+
+### 七、我沒有做什麼
+
+- **沒有改 check C 的判準。** 放寬它去認 `Thread(target=f)`，是改規則。
+- **沒有重 pin check A。** 重 pin 等於我替「被改過的切 A 驗證器仍然可信」背書 ——
+  那是一個關於**獨立性**的判斷，不是一個機械動作。
+- **沒有改 `engine.py`。** 一個字元都沒有。
+- **沒有改 D-068 §三、D-069 §八的原文。** 依 D-068 的慣例，較早的錯誤是**就地畫線
+  更正**；但這一節更正的內容本身有三條斷言要被承認，所以先在這裡立座標。
+  **要不要把畫線也補回那兩節，留給人。**
+
+### 八、無測試聲明（CLAUDE.md）
+
+- **這一輪沒有跑任何自動化測試來證明這條記錄。** 跑過的是
+  `test_endpoint_tunnel_url_privacy.py <site-packages>`：**實得 check A 紅、其餘 ✓**
+  —— 那個紅是第五節的**證據**，不是這一節的結論。
+- **手動驗證方式**：
+  1. 對安裝樹跑 AST 掃描，取得呼叫邊（`ast.Call` 與**值參照**兩種判準並排）與
+     `cloudflared_process` 的每一個賦值點暨其所屬函式；
+  2. 逐段讀 `engine.py` 現場碼交叉核對（`:1313`、`:1377-1379`、`:1484-1495`、
+     `:1496-1532`、`:1860-1863`）；
+  3. `grep -in 'topic'`（**大小寫不拘**）並逐條分類 8 個命中。
+- **反向對照**是第三節那三列「`_calls_to` 看得對」的名字。沒有它們，我分不出
+  「儀器壞了」與「儀器很窄」—— 而這正是第三節的主題。
+- **這一輪沒有呼叫任何 Kaggle API**，本節沒有任何結論依賴 GPU 配額。
