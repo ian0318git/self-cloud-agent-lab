@@ -23,6 +23,8 @@
 | `2026-09-23-throughput-qwen3-4b.txt` | 同上，**4b**（讓 4b／8b 變成同一把尺的那一輪），exit 2、3m46s | `DECISIONS.md` D-047 §1／§5、D-049 §4／§5；`README.md` 同節 |
 | `2026-09-26-pull-peak-measurement.txt` | 量測協定 A：在**獨立** volume 對 `qwen3:8b` 真拉一次（1184 筆樣本／1183 秒），量下載期間的磁碟峰值。倍數 **1.000**，兩個獨立估計法一致，exit 0 | `DECISIONS.md` D-058 §六／§七；`scripts/deploy-vps-decisions.sh` 的常數區 |
 | `2026-09-26-pull-preallocation-diagnostic.txt` | 上面那一跑的**儀器驗證**：同一時刻 `st_size` 5,225,377,718 B 對上 `st_blocks*512` 732,086,272 B | `DECISIONS.md` D-058 §六；`scripts/measure-pull-peak.sh` 檔頭 |
+| `2026-10-01-probe-kernel-files-live-running-vs-complete.txt` | 一顆**私有 CPU kernel** 跑動中／結束後，輪詢 Kaggle 的三個檔案 RPC：跑動中 30 次全部 `files=0`（`files` 鍵根本不在），結束後第一次就 `files=2`。判讀 **B-POST-ONLY**，exit 0、16m04s | `DECISIONS.md` D-075 |
+| `2026-10-01-probe-kernel-output-download-post-termination.txt` | 上者結束後約 18 分鐘的**重跑**：兩個真檔 200 且 `sha256[:12]` 等於預期內容的摘要，對照檔 404。⚠️ 「跑動中」那一半**未存檔**（輸出含轉址權杖，規矩 3） | `DECISIONS.md` D-075 |
 
 上面兩份是**同一次比較的兩半**：同一支探針、同一組條件，只有模型名不同。合起來的結論
 （搶 CPU 約 20%、等效頻寬跨模型大小 13.1–19.7 GB/s）寫在 `DECISIONS.md` D-047 第一節
@@ -32,6 +34,10 @@
 量佔用量會得到一個假的答案」（ollama 把 blob 稀疏地預先配置到完整大小，所以表觀值
 在下載的下一秒就等於成品），取樣器才據此改成讀 `st_blocks * 512`，量測才成立。少了
 前者，後者那份「峰值等於最終」會被讀成一個好消息，而不是一個被修正過的假象。
+
+**表末兩列**又是另一回事，它們是 D-075 那一次量測的兩半、**合起來才成立**：清單那半
+回答「看不看得到」，下載那半回答「拿不拿得到位元組」—— 而選項 B 要的是位元組（網址在
+`cf_engine.log` 裡面），清單上的檔名不是網址。
 
 ---
 

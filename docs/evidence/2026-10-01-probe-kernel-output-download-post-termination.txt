@@ -1,0 +1,35 @@
+# 2026-10-01-probe-kernel-output-download-post-termination.txt
+#
+# 指令：~/.local/share/uv/tools/endpoint-vps/bin/python3 scripts/probe_kernel_output_download.py \
+#           --kernel ianchang0318/endpoint-files-live-probe probe_out/t0.txt probe_out/t5.txt
+# 時間：2026-10-01 00:31:16 +1000（= 2026-09-30 14:31:16Z）
+# 結束碼：0
+# 牆上時間：< 1 秒（三個路徑）
+# 引用：DECISIONS.md D-075
+#
+# ⚠️ 這一跑是**重跑**，不是原始觀測。被下載的 kernel 已於 2026-09-30T14:13:04Z
+#    正常結束（它自己的日誌最後一行），本跑距結束約 18 分鐘。
+#
+# ⚠️ 這條檢查的「跑動中」那一半**沒有存檔**，只有對話裡的工具呼叫紀錄。
+#    原因是那一跑的輸出含轉址目標，而那個路徑裡帶著一段 Kaggle 的不透明權杖
+#    （`.../kf/<id>/<JWE>/<檔名>`）。依 docs/evidence/README.md 規矩 3，
+#    含有敏感字樣就整份不存。**工具呼叫紀錄比存下來的檔案弱，兩者不等價。**
+#    （那一半的觀察值：跑動中，兩個真的檔案**與對照檔都是 404** ——
+#     也就是那一半自己**沒有分辨力**，這正是本跑要補的。）
+#
+# 讀法：`sha256[:12]` 是**回應內容**的摘要，所以內容不必印出來就能核對。
+#   `written at t+0\n`（15 B） 的 sha256 前 12 碼 = 72f62bf5b151  ← 與 t0.txt 相符
+#   `written at t+5m\n`（16 B） 的 sha256 前 12 碼 = 60fb601b9d1e  ← 與 t5.txt 相符
+#   兩個預期值都可以自己算：`printf 'written at t+0\n' | sha256sum | cut -c1-12`
+#
+# 最後一條是**對照路徑**，它從來不存在，所以它必須不是 200。沒有它，
+# 「全部 404」與「門開著但檔案不在」分不開。
+#
+# 註：本檔為逐字輸出。只移除了上面開頭連續的 `#` 行。從第一個非 `#` 的行開始就是原檔。
+#     未改數字、未刪段落、未重排。不含任何權杖、網址或主題名。
+#
+kernel=ianchang0318/endpoint-files-live-probe  token_source=file:~/.kaggle/kaggle.json
+  probe_out/t0.txt                   HTTP 200  bytes=15      sha256[:12]=72f62bf5b151
+  probe_out/t5.txt                   HTTP 200  bytes=16      sha256[:12]=60fb601b9d1e
+  endpoint-probe-control-does-not-exist.txt HTTP 404  bytes=0       sha256[:12]=—
+  （最後一條 endpoint-probe-control-does-not-exist.txt 是對照 —— 它不該存在，所以它必須不是 200）

@@ -1,0 +1,77 @@
+# 2026-10-01-probe-kernel-files-live-running-vs-complete.txt
+#
+# 指令：~/.local/share/uv/tools/endpoint-vps/bin/python3 scripts/probe_kernel_files_live.py \
+#           --kernel ianchang0318/endpoint-files-live-probe --interval 20 --duration 960
+# 時間：2026-09-30 14:02Z 前後起（= 2026-10-01 00:02 AEST）；最後一次輪詢 T+964s
+# 結束碼：0
+# 牆上時間：964 秒（16 分 04 秒）
+# 引用：DECISIONS.md D-075
+#
+# 被輪詢的對象：同一時間在 Kaggle 上跑的是一顆**私有、CPU-only** 的 kernel
+#   （`ianchang0318/endpoint-files-live-probe`，原始碼在 scripts/kaggle-files-live-probe/）。
+#   它什麼都不做，只在 t+0 寫 /kaggle/working/probe_out/t0.txt、t+5m 寫 probe_out/t5.txt，
+#   每分鐘印一次心跳，11 分鐘後正常結束。t+0 那一筆是刻意的：任何在起始後一分鐘以上的
+#   輪詢只要 API 是活的就該看到它，所以「看不到」可以讀成「門沒開」而不是「還沒寫」。
+#
+# 讀法：每一列是一次輪詢，三個 RPC 並排 ——
+#   status         = GetKernelSessionStatus
+#   session[...]   = ListKernelSessionOutput（keys / log 字元數 / files 筆數 / 檔名）
+#   kernelFiles[]  = ListKernelFiles（items 筆數）
+# T+649s 之前 30 次全部 status=running 且 files=0（`files` 這個鍵根本不在，只有 `log`）；
+# T+672s 起 status=complete 且 files=2。**同一次輪詢之內翻轉。**
+#
+# 旁邊的量測（不在本檔內，逐字輸出未留存）：同一時間 GPU timeUsed = 4818 秒，
+#   與這一跑之前量到的同一個數（差 < 1 秒）—— 這一跑不消耗 GPU 配額。
+#
+# 註：本檔為逐字輸出。**只移除了上面開頭連續的 `#` 行（this block），以及外層工具自己的
+#     結束頁腳**（`[exited with code 0]`，連同它前面那一個空行）。從第一個非 `#` 的行
+#     開始就是原檔。未改數字、未刪段落、未重排。
+#
+# 這一跑不含任何權杖、網址或主題名 —— 探針只印狀態字、HTTP 碼、鍵名、筆數與**檔名**。
+#
+T+   0s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+  22s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+  44s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+  67s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+  89s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 112s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 135s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 159s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 181s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 203s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 224s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 246s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 267s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 290s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 314s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 335s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 357s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 380s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 403s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 425s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 448s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 469s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 492s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 514s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 537s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 559s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 582s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 604s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 628s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 649s  status=running    session[200 keys=log log=0 files=0]  kernelFiles[200 items=0]
+T+ 672s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 694s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 717s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 739s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 762s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 784s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 806s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 828s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 850s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 873s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 897s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 919s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 943s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+T+ 964s  status=complete   session[200 keys=files,log log=2600 files=2 [probe_out/t0.txt, probe_out/t5.txt]]  kernelFiles[200 items=2]
+
+判讀  B-POST-ONLY —— 跑動中拿不到，結束後才拿到 —— 與 log 同進退。 選項 B 與『讀 log』是同一扇落盤後的門，B 不解這個問題。
