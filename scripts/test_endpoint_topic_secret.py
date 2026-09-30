@@ -72,11 +72,21 @@ from typing import Any
 
 DOMAIN = "endpoint-signal-v1:"
 
-# The cut-B verifier as shipped in D-068 (commit 28daf4d) and the engine as cut A
-# left it (D-067, commit 42c5f75). Both pinned so that "we did not touch the
-# guards" is checkable rather than promised.
-CUT_B_VERIFIER_SHA = "abc4125a1212f14fcad0a19604ce08e84ca870b0a8b2adb2dcab47b4730a83c6"
+# The cut-B verifier, pinned at its post-D-076 revision, and the engine as cut A left
+# it (D-067, commit 42c5f75). Both pinned so that "we did not touch the guards" is
+# checkable rather than promised.
+#
+# The cut-B hash moved abc4125a -> e8e2259e in D-076, so it is no longer the D-068
+# original (28daf4d) -- but **none of its checks moved**. Against that original the
+# token stream is 2640 -> 2640 with exactly 3 differing tokens, all string literals:
+# the pinned cut-A sha it embeds, its docstring, and one progress line. No assertion,
+# comparison or control flow changed. (28daf4d is also the only commit that ever
+# touched that file, so the D-068 body was intact right up to this edit.)
+CUT_B_VERIFIER_SHA = "e8e2259e2c819db210e6ff5bb27f0d39b47bbeef428d20c2d361917b1dd9724f"
 CUT_B_VERIFIER_NAME = "test_endpoint_tunnel_url_privacy.py"
+# Still the cut-A value. D-076 did **not** re-pin this one: moving it to the
+# post-D-073 engine (1930dda1) is a judgement about independence, and that call stays
+# with the human. Left here deliberately, not overlooked.
 ENGINE_SHA = "68dfa5a26614e1606c9f489c2288b0ea0071c6a4fc891a524a635e69f99e653e"
 
 # Canary values. The secret is a *fixed* literal so the expected topic can be
@@ -852,7 +862,7 @@ def check_cut_b_guard_intact(script_dir: Path, root: Path, fails: list[str]) -> 
         print(f"  → 預期 {CUT_B_VERIFIER_SHA}")
         print(f"  → 實得 {got}")
         return
-    print("    ✓ 切 B 的驗證器逐位元未變（獨立性成立）")
+    print("    ✓ 切 B 的驗證器自 D-076 重 pin 之後逐位元未變（獨立性成立）")
 
     proc = subprocess.run(
         [sys.executable, str(sibling), str(root)],

@@ -56,10 +56,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The cut-A verifier as shipped in D-067 (commit 42c5f75). Pinned so that "we did
-# not touch the guard" is checkable: if this hash moves, someone edited the guard
-# to accommodate cut B, and its independence is gone.
-CUT_A_VERIFIER_SHA = "05a3e7ac41064f8023f8aacfcc923c24f670b9efb2fce722b5e353ca24e8884d"
+# The cut-A verifier, pinned at its post-D-070 revision. Pinned so that "we did not
+# touch the guard" is checkable: if this hash moves without a recorded re-pin,
+# someone edited the guard to accommodate a later cut, and its independence is gone.
+#
+# This is NO LONGER the D-067 original (42c5f75, sha 05a3e7ac). D-070 legitimately
+# edited it -- its anchor moved from the deleted `APIKEY:` branch to `TUNNEL
+# ACQUIRED:` -- and D-076 re-pinned it to dd5c22fa. That re-pin is an endorsement
+# that the *edited* guard is still trustworthy, so it is backed by measurement
+# rather than by a value change: the guard now has a mutation harness
+# (scripts/test_endpoint_apikey_broadcast_fixes_mutants.sh, 5 rows + 1 on a
+# pre-cut-A tree, each caught by its named message) which the original never had.
+CUT_A_VERIFIER_SHA = "dd5c22faa736f0755f7a1b88aae608cfaef6e777de04501b85acce339a0e4913"
 CUT_A_VERIFIER_NAME = "test_endpoint_apikey_broadcast_fixes.py"
 
 # Not a real tunnel: `_CF_URL_PATTERN` accepts [a-zA-Z0-9-]+, and `.trycloudflare.com`
@@ -145,7 +153,7 @@ def _calls_to(path: Path, func_name: str) -> list[tuple[str, int]]:
 
 
 def check_cut_a_guard_intact(script_dir: Path, root: Path, fails: list[str]) -> None:
-    """The D-067 guard file is unedited, and still passes against this tree."""
+    """The cut-A guard is unedited since its D-076 re-pin, and still passes here."""
     sibling = script_dir / CUT_A_VERIFIER_NAME
     if not sibling.is_file():
         fails.append(f"check A: sibling verifier missing: {sibling}")
@@ -159,7 +167,7 @@ def check_cut_a_guard_intact(script_dir: Path, root: Path, fails: list[str]) -> 
         print(f"  → 預期 {CUT_A_VERIFIER_SHA}")
         print(f"  → 實得 {got}")
         return
-    print("    ✓ 切 A 的驗證器逐位元未變（獨立性成立）")
+    print("    ✓ 切 A 的驗證器自 D-076 重 pin 之後逐位元未變（獨立性成立）")
 
     proc = subprocess.run(
         [sys.executable, str(sibling), str(root)],
