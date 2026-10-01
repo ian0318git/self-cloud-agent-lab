@@ -337,6 +337,16 @@ bash scripts/connect-endpoint.sh --url http://your-vps:8000/v1
   全部失效（[D-013](../DECISIONS.md)）。聊天可以搬到 GPU，嵌入留著不動。
   探針把嵌入分成獨立一項，正是為了這個原因。
 
+**有一件事不會跟著搬過去：tunnel 網址讀不回來的問題。** Kaggle 那條用的是
+cloudflared **Quick Tunnel** —— 網址在開機時隨機生成，而它唯一被寫進去的地方，
+是 Kaggle **在 session 結束前不揭露**的 kernel log（量過：[D-072](../DECISIONS.md)
+第四節、[D-075](../DECISIONS.md) 第一節）。**不是「還沒寫」，是「API 不揭露」。**
+VPS ＋ Zero Trust 用的是**你自己設定的固定主機名**，沒有東西要讀回來，那個失敗
+在這裡**沒有輸入**。
+
+> **這是從兩個設計推出來的結構論證，不是量測。** 沒有真的租過 VPS ＋ GPU，
+> 而 GPU 的 compose overlay 也仍然沒在真的 GPU 硬體上跑過。
+
 ## 修補 notebook 產生器
 
 `endpoint boot` 跑的筆記本不是你能編輯的那種。它跑的是已安裝的 `endpoint-vps`

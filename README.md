@@ -50,8 +50,9 @@ figures for any particular plan are a projection from measured calibration point
 labelled as a projection ([D-028](DECISIONS.md), [D-047](DECISIONS.md)).
 
 **Step 3 is where it stops today**, by two different routes — the GPU compose
-overlay has never run on real GPU hardware, and the rented-GPU route cannot read
-its own tunnel URL back. Both are detailed below.
+overlay has never run on real GPU hardware, and the Kaggle route cannot read its
+own tunnel URL back — **that one is Kaggle's property, not the GPU's** (your own
+VPS uses a fixed hostname and has no such step). Both are detailed below.
 
 If you are here to decide whether self-hosting is worth it at all, step 1 costs
 nothing and answers that. If you are here to deploy, step 2 is ready.
@@ -86,9 +87,9 @@ The measured result of that same boot was
 → AVAILABLE MODELS: []
 ```
 
-Closing this gap is unsolved; the honest options,
-and why two of them are struck out, are in [D-073](DECISIONS.md) and
-[D-075](DECISIONS.md). That path now exits **2** instead of claiming success.
+Closing this gap is unsolved; the honest options, and why two of them are struck
+out, are in [D-073](DECISIONS.md) and [D-075](DECISIONS.md). That path now exits
+**2** instead of claiming success.
 
 **Nothing else depends on it.** The Codespaces stack, Phases 1–3, and the
 OpenAI-protocol probe all work without it.

@@ -370,6 +370,18 @@ Two things to get right on the way:
   ([D-013](../DECISIONS.md)). Chat can move to the GPU while embeddings stay
   put. The probe reports embeddings separately for exactly this reason.
 
+**One thing that does *not* come with you: the unreadable tunnel URL.** The Kaggle
+route uses a cloudflared **Quick Tunnel** — the URL is generated at boot, and the
+only place it is written is a kernel log Kaggle **does not expose while the session
+is running** (measured: [D-072](../DECISIONS.md) §4, [D-075](../DECISIONS.md) §1).
+**It is not "not written yet" — the API does not disclose it.** A VPS + Zero Trust
+tunnel uses a **fixed public hostname that you configure**, so there is nothing to
+read back and that failure has **no input** here.
+
+> **This is a structural argument from the two designs, not a measurement.** No
+> VPS + GPU has been rented, and the GPU compose overlay has still never run on
+> real GPU hardware.
+
 ## Patching the notebook generator
 
 `endpoint boot` does not run a notebook you can edit. It runs
