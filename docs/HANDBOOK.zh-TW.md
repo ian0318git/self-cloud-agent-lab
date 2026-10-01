@@ -943,7 +943,7 @@ docker compose logs --tail=20 cloudflared   # 應出現 "Registered tunnel conne
 > 實質上等於公開。它只適合沒有損失的展示。本 repo 完全不使用。
 
 > ⚠️ **tunnel token 等同該 tunnel 的控制權。** 持有它的人可以把你的主機名
-> 指到他自己控制的伺服器。它只該放在 `.env`（已被 gitignore），不做他想。
+> 指到對方控制的伺服器。它只該放在 `.env`（已被 gitignore），不做他想。
 
 > **這條路不保護什麼：** Cloudflare 會終結 TLS，因此它在傳輸過程中看得到明文，
 > 這與任何反向代理相同。若這不可接受，請改用 Codespaces 私有埠或 Tailscale ——
