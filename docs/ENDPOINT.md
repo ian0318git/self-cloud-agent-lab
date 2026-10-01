@@ -46,7 +46,7 @@ Being explicit about this, because the whole project depends on not confusing
 | That the tunnel stays up for a whole session | **Not measured** |
 | That the patched generator survives a real `endpoint boot` | **Verified** (2026-09-30) — a T4 x2 boot ran end-to-end: 317 s wall, `ENGINE HEALTHY` → `Endpoint IS ONLINE`. D-072 §3. **Addendum (same day, D-073):** the "exit 0" measured then was the behaviour *at the time*; the same path now returns **2**, for the reason in the next row |
 | That the kernel log can be read **while the kernel is still running** — the premise the new URL reader rests on in practice | **Measured, and it cannot.** While the kernel ran, `ListKernelSessionOutput` returned HTTP 200 with an **empty** `log` (3 samples over 9 minutes); the URL appeared only *after* the session ended — i.e. too late to be useful. **The premise does not hold.** D-072 §4 |
-| That boot reports honestly when the tunnel is up but its URL cannot be read | **Fixed** (2026-09-30, D-073). Before: two prescriptions the measurement refutes ("it will be there in a moment", "read it with `endpoint base-url`" — which goes down the very path that cannot be read), and `exit 0` printed alongside `Endpoint IS ONLINE` **while the proxy had never been told about the tunnel**. Now: it says the endpoint was **not wired up**, and exits **2** (`1` still means "the kernel did not come up"). **This fixes only the reporting — the URL itself is still unobtainable; cut B is unresolved.** |
+| That boot reports honestly when the tunnel is up but its URL cannot be read | **Fixed** (2026-09-30, D-073). Before: two prescriptions the measurement refutes ("it will be there in a moment", "read it with `endpoint base-url`" — which goes down the very path that cannot be read), and `exit 0` printed alongside `Endpoint IS ONLINE` **while the proxy had never been told about the tunnel**. Now: it says the endpoint was **not wired up**, and exits **2** (`1` still means "the kernel did not come up"). **This fixes only the reporting.** Cut B is still unresolved — the channel it put in place cannot be read back while the session runs (row above). **The URL itself is not lost, though: a human reads it off the notebook's own cell output** (Step 3). What is broken is the automated readback, not the path. |
 | That the deployment instruments stay honest under speculative decoding (MTP) | **Known to conflict** — see "One known way to make these instruments lie" below, and D-061 |
 
 Interface conformance is not the same as capacity. The probe deliberately does
@@ -151,7 +151,7 @@ Useful afterwards:
 | Command | What it does |
 |---|---|
 | `endpoint status` | Kernel state, tunnel URL, deployed models |
-| `endpoint base-url` | Just the URL, with ready-to-use curl examples |
+| `endpoint base-url` | Just the URL, with ready-to-use curl examples. **Against a running Kaggle kernel it cannot reach it** — Step 3 says where the URL actually is |
 | `endpoint doctor` | System diagnostics — check the config was actually read |
 | `endpoint models` / `upload` / `settings` | List or upload models; view or change engine parameters |
 | `endpoint logs` / `watch` | Engine logs (SSE), or the status-signal stream |
@@ -168,13 +168,20 @@ these (P100 was retired 2026-09-15), and they differ per account. Whatever
 
 ## Step 3 — Get the URL and the key
 
-```bash
-endpoint base-url
-```
+**The URL comes off the notebook's own cell output**, read in the browser while
+`boot` runs: the cell prints `TUNNEL ACQUIRED: <url>`. Copy it out and append
+`/v1`.
 
-You want two things: a `https://xxxx.trycloudflare.com` URL ending in `/v1`,
-and the API key. The CLI auto-sets `ENDPOINT_API_KEY`; the key can also be
-fetched with `GET /v1/apikey`.
+⚠️ **`endpoint base-url` will not get it for you.** It checks its cache first,
+then the Kaggle kernel log through the API. Both of the places that *write* the
+cache sit behind a successful log read, so on a running session the cache is
+empty and re-running the command cannot fill it. The API read itself comes back
+**empty for the whole time the kernel is running** (3 samples over 9 minutes;
+[D-072](../DECISIONS.md) §4). Against a live engine the command answers
+`⚠ VPS is not ready yet.` See the troubleshooting rows below.
+
+The other thing you want is the API key. The CLI auto-sets `ENDPOINT_API_KEY`;
+the key can also be fetched with `GET /v1/apikey`.
 
 Put the key where the repo's scripts expect it — **`.env`, which is gitignored**:
 
@@ -533,13 +540,20 @@ stops being true, because then the deletion would cost a full timeout.
 >
 > It is also verified offline only. The bake test decodes the engine source back
 > out of a generated notebook and finds zero `APIKEY:` broadcasts where the
-> pristine engine produces one, but a real boot was not run — that spends GPU
-> quota. The new proof is that the artifact no longer *contains* the broadcast.
+> pristine engine produces one. **Addendum (2026-09-30, [D-072](../DECISIONS.md)
+> §3):** a real T4 x2 boot has since run with this cut applied and completed
+> end-to-end (317 s, `ENGINE HEALTHY` → `Endpoint IS ONLINE`), so the deletion
+> does not stop the engine from coming up. What that boot did **not** sample is
+> the topic itself — it measured `boot`'s own output, not the wire ([D-072
+> §9](../DECISIONS.md)). So "no `APIKEY:` on the wire" still rests on the bake
+> test; the new proof remains that the artifact no longer *contains* the
+> broadcast.
 
 ## Where the tunnel URL comes from now
 
-Step 3 says `endpoint base-url`. This is where that URL now comes from, and why
-it changed.
+The URL is printed into the notebook's own cell output, and a human reads it
+there. Step 3 used to say `endpoint base-url`; this section is where that URL
+actually comes from now, and why the channel changed.
 
 **The channel it used to come from was public.** The boot signal went to an ntfy
 topic whose *name* was derived from the Kaggle username (`endpoint/core.py`) — a
@@ -578,11 +592,14 @@ one**, and note that `--revert` on either of the first two **silently undoes thi
 one**; this patch's hash gate only notices the next time you run it.
 
 **Three states, and two of them are not the same thing.** The reader answers
-`found`, `absent` (the log was read and holds no URL *yet*) or `unknown` (the log
-could not be read at all). Collapsing `absent` into `unknown` — or into "nothing
-is running" — is the defect `endpoint stop` had (D-060), and it is the reason the
-two are separate values here. `boot` **succeeds** in all three cases; `absent` and
-`unknown` print different sentences, and both point you at `endpoint base-url`.
+`found`, `absent` (the log was read and holds no URL) or `unknown` (the log could
+not be read at all). Collapsing `absent` into `unknown` — or into "nothing is
+running" — is the defect `endpoint stop` had (D-060), and it is the reason the
+two are separate values here. **Only `found` is a working endpoint.** `absent` and
+`unknown` both mean no URL, and `boot` now says the endpoint was **not wired up**
+and exits **2** ([D-073](../DECISIONS.md)). The sentence it used to print here —
+"read it with `endpoint base-url`" — went down this very unreadable path, and it
+is gone.
 
 To check any of it against the real API without a boot:
 
@@ -595,20 +612,31 @@ token or the topic**. The URL appears only as a one-way fingerprint, so two runs
 can be compared without either revealing it. Treat the tunnel URL as a
 credential: while it is live, anyone holding it can reach the engine.
 
-> **What this does not establish.** The reader has only ever been pointed at a
-> **finished** kernel. `ListKernelSessionOutput` serves a persisted blob and may
-> behave differently against a *running* one — and that is exactly the case a
-> fresh boot is in. So "`boot` can fetch its own URL afterwards" is **not
-> measured**; the fallback is the same as before, `endpoint base-url` a few
-> minutes later. Second gap: the log was **not** truncated at the head in the one
+> **What this does not establish — and the one thing that has since been
+> settled.** The reader has only ever been pointed at a **finished** kernel.
+> `ListKernelSessionOutput` serves a persisted blob and may behave differently
+> against a *running* one — exactly the case a fresh boot is in. That question was
+> left open here. **It has since been measured, and the answer is no:** while a
+> kernel ran, the API returned HTTP 200 with an **empty** `log` in all 3 samples
+> taken over 9 minutes, and the URL appeared only *after* the session ended
+> ([D-072](../DECISIONS.md) §4). So "`boot` can fetch its own URL afterwards" is
+> **false**, and the fallback this note named — `endpoint base-url` a few minutes
+> later — **does not work either**; `boot` no longer prints it
+> ([D-073](../DECISIONS.md)).
+>
+> Two gaps remain open. The log was **not** truncated at the head in the one
 > sample read, but if Kaggle ever starts returning only the tail, the URL — at
 > 76.5% of that sample — could fall outside the window; the probe deliberately
 > refuses to guess, because a format-guessing "is it truncated?" verdict reads
-> *false* on exactly the case it is meant to catch. Third: reading the log needs
-> a token that non-interactive shells can find, which is why it belongs in
+> *false* on exactly the case it is meant to catch. And reading the log needs a
+> token that non-interactive shells can find, which is why it belongs in
 > `~/.kaggle/kaggle.json` (mode `600`, with `username` and `key`) rather than a
-> shell rc file. Finally, the patch is verified offline — no real boot was run,
-> because that spends GPU quota.
+> shell rc file.
+>
+> One closing line here was itself out of date: this said the patch had been
+> verified offline only. It has since survived a real boot with all three cuts
+> applied — 317 s wall, `ENGINE HEALTHY` → `Endpoint IS ONLINE`
+> ([D-072](../DECISIONS.md) §3).
 
 ## The topic name is no longer a function of a public account
 
@@ -718,8 +746,8 @@ lesson, the mirror image of the bug it was written to catch.
 | `rotate-endpoint-key.sh --check` exits 2 | Working as intended: the three holders disagree, and disagreeing is silent until something 401s. Run the script without `--check` to make them agree. |
 | `rotate-endpoint-key.sh` exits 2 saying open-webui is not running | Working as intended. Rotating only the two reachable holders would leave the third holding a **dead key with no symptom**. Start the stack and re-run. |
 | `rotate-endpoint-key.sh` exits 3 | The value is not exactly one `myth-` key in that file. The script prints the **count only**, never the value — look at the file yourself before re-running. |
-| `boot` succeeds but says the URL is not in the kernel log yet | Expected, not a failure. The tunnel is up and the log has not caught up. Take it a minute later with `endpoint base-url`. |
-| Nothing on the ntfy topic carries the tunnel URL any more | Working as intended after `scripts/apply-endpoint-tunnel-url-privacy.sh` — the URL is in the kernel log now, and the topic deliberately carries `TUNNEL ACQUIRED:` with an empty value. Use `endpoint base-url`. |
+| `boot` exits 2 saying the URL cannot be read while the session runs | Working as intended, and waiting will not fix it. Kaggle serves the kernel log only **after** the session ends — 3 samples over 9 minutes while a kernel ran all came back HTTP 200 with an empty `log` ([D-072](../DECISIONS.md) §4). The engine is up and burning quota; the endpoint was never wired up. Read the URL off the notebook's cell output instead. |
+| Nothing on the ntfy topic carries the tunnel URL any more | Working as intended after `scripts/apply-endpoint-tunnel-url-privacy.sh` — the URL goes to the notebook's cell output now, and the topic deliberately carries `TUNNEL ACQUIRED:` with an empty value. Read the URL off that cell output; `endpoint base-url` cannot reach it while the session runs. |
 | `endpoint base-url` says it could not read the kernel log | Two different sentences, two different causes: **no credentials** (this shell cannot see a Kaggle token) or **Kaggle refused**. Read which one printed. The fix for the first is `~/.kaggle/kaggle.json` — a shell rc file is not read by non-interactive shells, which is where cron and most scripts run. |
 | The URL stops arriving right after reverting the ntfy or stop fixes | Expected — those patches touch the same three files this one does. Re-apply in order: ntfy fixes, stop fixes, then `apply-endpoint-tunnel-url-privacy.sh`. The hash gate only notices on the next run, so nothing warns you at the moment it happens. |
 | `apply-endpoint-tunnel-url-privacy.sh` refuses with a hash mismatch | Either `endpoint-vps` was upgraded, or the ntfy/stop fixes are not applied (they are the baseline this patch was built against). Run `--verify` on those two first. |

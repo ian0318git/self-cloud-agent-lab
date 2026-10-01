@@ -647,7 +647,7 @@ Open <http://localhost:3000>.
 | `python3 scripts/test_endpoint_topic_secret.py ROOT` | The verifier behind the above — thirteen checks (D1–D13) that slice the derivations out with AST and **exec them against stubs rather than importing the package**, so the tree under test is what runs. Pins the golden topic, the two shipped data files, cut B's verifier (`e8e2259e…`) and `engine/engine.py` (`68dfa5a2…`), and drives the secret gate through a reverse-applied pristine copy. **Fails against the pristine tree on purpose: 23 items** (D-069) |
 | `bash scripts/test_endpoint_topic_secret_mutants.sh TREE` | That the verifier above is actually exercised — **13 mutations, each naming the check that must catch it** (D11 fires on every one of them, so "went red" on its own carries no information), plus 3 guards that must stay silent. Two of the mutations are the real bugs the battery found, not invented ones. Exit `0` all caught, `1` a miss, `2` usage, `3` a mutation that could not even be injected (a stale list is **not** a hole in the verifier, and is reported as such) (D-069) |
 | `bash scripts/apply-endpoint-boot-honest-outcome.sh --dry-run` | Check whether boot's two measurement-refuted prescriptions and its "unwired, yet exit 0" are still there, and whether the patch still applies. Changes nothing |
-| `bash scripts/apply-endpoint-boot-honest-outcome.sh` | Stop boot claiming something it did not do — one file, `endpoint/commands.py`, with **every change inside `run_boot`** (proved by dumping the AST of each function before and after, not by reading the diff). Before: when the tunnel was up but its URL unreadable, it printed "it will be there in a moment" and "read it with `endpoint base-url`" (which goes down that very unreadable path) while `_register_with_proxy` never ran and the proxy was never told — yet boot still printed `Endpoint IS ONLINE` and exited 0. Now it says the endpoint was **not wired up** and exits **2** (`1` still means "the kernel did not come up"). ⚠ **This fixes the reporting, not the defect** — the URL is still unobtainable (cut B unresolved), so **every boot from here on exits 2**; that is the intended effect. ⚠ **Order matters: its pristine hash is the state with A/B/C and the fourth cut all applied** — after a `--revert` of any of those, this one **refuses to run** (loudly, not silently). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
+| `bash scripts/apply-endpoint-boot-honest-outcome.sh` | Stop boot claiming something it did not do — one file, `endpoint/commands.py`, with **every change inside `run_boot`** (proved by dumping the AST of each function before and after, not by reading the diff). Before: when the tunnel was up but its URL unreadable, it printed "it will be there in a moment" and "read it with `endpoint base-url`" (which goes down that very unreadable path) while `_register_with_proxy` never ran and the proxy was never told — yet boot still printed `Endpoint IS ONLINE` and exited 0. Now it says the endpoint was **not wired up** and exits **2** (`1` still means "the kernel did not come up"). ⚠ **This fixes the reporting, not the defect** — the tooling still cannot read the URL back while the session runs (cut B unresolved), so **every boot from here on exits 2**; that is the intended effect. **A human can still read the URL off the notebook's cell output** (step 5). ⚠ **Order matters: its pristine hash is the state with A/B/C and the fourth cut all applied** — after a `--revert` of any of those, this one **refuses to run** (loudly, not silently). `--revert` undoes it. **A package-manager file: an `endpoint-vps` upgrade erases this** |
 | `python3 scripts/test_endpoint_boot_honest_outcome.py ROOT` | The verifier behind the above — **five checks (A–E)**, parsed with AST rather than imported (importing would read the user's real config, and the apply script runs this verifier twice per cycle). A pins that both false prescriptions are gone; B is a **positive control** (the branch must still warn, closing off "delete the branch to make A green"); C is the **D-033 guard** (`success = True` must stay unconditional and literally `True` — flipping it to `False` would turn a true fact into a false failure); D pins that the closing report is conditional and on the success path; E pins that the two exit codes keep their own meanings. **Fails against the pristine file on purpose: A, D and E** (D-073) |
 | `bash scripts/lock-signup.sh` | Verify signup is really off, and close it via the config API if it is open |
 | `bash scripts/lock-signup.sh --check` | Verify only — no changes. Exits non-zero if signup is open |
@@ -799,13 +799,22 @@ When the cell output shows **`TUNNEL ACQUIRED`**, the URL exists.
 
 ### Step 6 — Take the URL and the key
 
-```bash
-endpoint base-url
-```
+**The URL is the one you just read off the cell output in step 5.** Copy it out
+of the browser and append `/v1`.
 
-You need two things: a URL that ends in `trycloudflare.com` (append `/v1`), and the
-API key. Put the key where this repo's scripts read it — **`.env`, which is
-gitignored**:
+⚠️ **`endpoint base-url` will not give it to you, and running it again does not
+help.** That command looks at the cache first — which on this path is empty, and
+which only a *successful* log read ever fills — and then at the Kaggle kernel log
+through the API. Kaggle's API answers **HTTP 200 with `log` as an empty string**
+for the whole time the kernel is running; sampling three times across a 9-minute
+session returned empty every time ([D-072](../DECISIONS.md) §4). Against a live
+engine the command says `⚠ VPS is not ready yet.` The log does become readable —
+**after the session ends**, by which point the URL is useless. `boot` itself
+stopped printing that suggestion ([D-073](../DECISIONS.md)); this handbook was
+still making it.
+
+The key is the other thing you need. Put it where this repo's scripts read it —
+**`.env`, which is gitignored**:
 
 ```bash
 ENDPOINT_API_KEY=<paste it here>

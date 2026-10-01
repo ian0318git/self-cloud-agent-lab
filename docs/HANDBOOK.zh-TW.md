@@ -592,7 +592,7 @@ bash scripts/up.sh
 | `python3 scripts/test_endpoint_topic_secret.py ROOT` | 上面那支的行為驗證 —— **十三道檢查（D1–D13）**，用 AST 把推導切出來、**餵假物件 exec 而不是 import 套件**，所以跑的是**被測的那棵樹**。它釘住黃金值、兩個隨套件出貨的資料檔、切 B 的驗證器（`e8e2259e…`）與 `engine/engine.py`（`68dfa5a2…`），並且把秘密閘門**透過一棵反向套用過的原始樹**驅動起來。**對原始樹是預期要失敗的：23 項**（D-069） |
 | `bash scripts/test_endpoint_topic_secret_mutants.sh TREE` | 上面的驗證器真的有在被執行 —— **13 條突變，每一條都指名「必須抓到它的那一條檢查」**（D11 在每一條上都會紅，所以「變紅了」本身不帶資訊），外加 3 條**不准叫**的守門。其中兩條突變是電池實測抓到的**真** bug，不是假想出來的。結束碼 `0` 全抓到、`1` 有漏、`2` 用法錯誤、`3` 有一條**根本沒植入**（清單過期**不是**驗證器的洞，訊息也這樣講）（D-069） |
 | `bash scripts/apply-endpoint-boot-honest-outcome.sh --dry-run` | 檢查 boot 那兩句被實測推翻的處方、以及「沒接線卻 exit 0」還在不在，以及補丁還套不套得上。不做任何變更 |
-| `bash scripts/apply-endpoint-boot-honest-outcome.sh` | 讓 boot 不再宣稱一件它沒做到的事 —— 一個檔案 `endpoint/commands.py`，**每一處改動都在 `run_boot` 這一個函式內**（把修補前後每個函式的 AST dump 出來比對得到的，不是讀 diff 看出來的）。原本：隧道起來但網址讀不到時，它印出「等一下就有了」與「用 `endpoint base-url` 讀」（後者走的就是那條讀不到的路），而 `_register_with_proxy` 從未執行、proxy 從未被通知 —— boot 卻仍印 `Endpoint IS ONLINE` 並 `exit 0`。現在：講明 endpoint **沒有接線**，並以 **exit 2** 收尾（`1` 仍專屬「kernel 沒起來」）。⚠ **這只修說法，不修缺陷** —— 網址仍然拿不到（切 B 未解），所以**從此每一次 boot 都會 exit 2**，那是預期效果。⚠ **順序有關係：它的原始雜湊是「A／B／C 與第四刀都套好之後」的狀態** —— 前面任一支 `--revert` 之後，這一支會**拒絕執行**（大聲拒絕，不是靜默）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
+| `bash scripts/apply-endpoint-boot-honest-outcome.sh` | 讓 boot 不再宣稱一件它沒做到的事 —— 一個檔案 `endpoint/commands.py`，**每一處改動都在 `run_boot` 這一個函式內**（把修補前後每個函式的 AST dump 出來比對得到的，不是讀 diff 看出來的）。原本：隧道起來但網址讀不到時，它印出「等一下就有了」與「用 `endpoint base-url` 讀」（後者走的就是那條讀不到的路），而 `_register_with_proxy` 從未執行、proxy 從未被通知 —— boot 卻仍印 `Endpoint IS ONLINE` 並 `exit 0`。現在：講明 endpoint **沒有接線**，並以 **exit 2** 收尾（`1` 仍專屬「kernel 沒起來」）。⚠ **這只修說法，不修缺陷** —— 程式仍然讀不回網址（切 B 未解），所以**從此每一次 boot 都會 exit 2**，那是預期效果。**但人工讀得到**：網址印在 notebook 的 cell 輸出裡（第 5 步）。⚠ **順序有關係：它的原始雜湊是「A／B／C 與第四刀都套好之後」的狀態** —— 前面任一支 `--revert` 之後，這一支會**拒絕執行**（大聲拒絕，不是靜默）。`--revert` 還原。**動的是 package manager 的檔案：升級 `endpoint-vps` 就會蓋掉** |
 | `python3 scripts/test_endpoint_boot_honest_outcome.py ROOT` | 上面那支的行為驗證 —— **五道檢查（A–E）**，用 AST 剖析而**不 import**（import 會讀使用者的真設定，而套用腳本每一輪要跑它兩次）。A 釘住兩句假處方必須消失；B 是**正對照**（分支仍要出聲，堵住「把整個分支刪掉讓 A 變綠」）；C 是 **D-033 護欄**（`success = True` 必須仍是無條件、且是字面上的 `True` —— 改成 `False` 等於把為真的事實改成假的失敗）；D 釘住收尾必須有條件、且在成功路徑上；E 釘住兩個離開碼各守本分。**對原始檔是預期要失敗的：A、D、E 三項**（D-073） |
 | `bash scripts/lock-signup.sh` | 驗證註冊是否真的關著；若開著，透過設定 API 關閉 |
 | `bash scripts/lock-signup.sh --check` | 只驗證，不做變更。註冊開著時結束碼非 0 |
@@ -739,12 +739,20 @@ cell 輸出出現 **`TUNNEL ACQUIRED`**，就是網址到手了。
 
 ### 第 6 步 —— 拿網址與金鑰
 
-```bash
-endpoint base-url
-```
+**網址就是你剛剛在第 5 步的 cell 輸出裡讀到的那一個。** 從瀏覽器複製出來，
+後面加上 `/v1`。
 
-你要兩樣東西：一個結尾是 `trycloudflare.com` 的網址（後面加 `/v1`），以及 API
-金鑰。把金鑰放到本 repo 腳本會讀的地方 —— **`.env`，它已被 gitignore**：
+⚠️ **`endpoint base-url` 不會給你網址，而且再跑幾次也一樣。** 那條指令先看快取
+—— 這條路上快取是空的，而**快取只有「日誌讀成功」才會被填**；然後它透過 API 去讀
+Kaggle 的 kernel log。kernel 跑動的整段時間裡，Kaggle 的 API 都回
+**HTTP 200、而 `log` 是空字串**：一次 9 分鐘的 session 裡取三次樣，三次都空
+（[D-072](../DECISIONS.md) 第四節）。對著一個真的在跑的引擎，它回
+`⚠ VPS is not ready yet.`。那個 log 確實讀得到 —— 要**等到 session
+結束**，而那時網址已經沒用了。`boot` 自己早就不再印那句建議
+（[D-073](../DECISIONS.md)）；而手冊原本也還在這樣寫。
+
+另一樣東西是 API 金鑰。把它放到本 repo 腳本會讀的地方 —— **`.env`，它已被
+gitignore**：
 
 ```bash
 ENDPOINT_API_KEY=<貼在這裡>

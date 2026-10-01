@@ -42,7 +42,7 @@ $ bash scripts/probe-openai.sh
 | tunnel 能否撐過一整個 session | **未量測** |
 | 修補後的產生器撐得過一次真的 `endpoint boot` | **已驗證**（2026-09-30）—— T4 x2 一次 boot 走完全程：牆上 317 秒、`ENGINE HEALTHY` → `Endpoint IS ONLINE`。D-072 第三節。**補記（同日，D-073）**：那一輪量到的「結束碼 0」是**當時**的行為；同一條路現在回 **2**，理由見下一列 |
 | kernel **還在跑的時候**讀不讀得到日誌 —— 新的網址讀取器實際上賴以為生的前提 | **已量測：讀不到。** 跑動中 `ListKernelSessionOutput` 回 HTTP 200 但 `log` 是**空的**（9 分鐘內三次取樣）；網址在 session **結束之後**才出現 —— 那時已經沒用了。**那個前提不成立。** D-072 第四節 |
-| boot 在「隧道起來了但網址拿不到」時，會不會誠實回報 | **已修正**（2026-09-30，D-073）。原本：兩句被實測推翻的處方（「等一下就有了」、「用 `endpoint base-url` 讀」—— 那條指令走的就是這條讀不到的路），加上在 **proxy 從未被通知**的情況下仍然印出 `Endpoint IS ONLINE` 並 `exit 0`。現在：講明 endpoint **沒有接線**，以 **exit 2** 收尾（`1` 仍專屬「kernel 沒起來」）。**注意這只修了說法 —— 網址本身仍然拿不到，切 B 未解。** |
+| boot 在「隧道起來了但網址拿不到」時，會不會誠實回報 | **已修正**（2026-09-30，D-073）。原本：兩句被實測推翻的處方（「等一下就有了」、「用 `endpoint base-url` 讀」—— 那條指令走的就是這條讀不到的路），加上在 **proxy 從未被通知**的情況下仍然印出 `Endpoint IS ONLINE` 並 `exit 0`。現在：講明 endpoint **沒有接線**，以 **exit 2** 收尾（`1` 仍專屬「kernel 沒起來」）。**注意這只修了說法。** 切 B 仍未解 —— 它換上的那條通道在 session 跑動中讀不回來（上一列）。**但網址本身沒有不見：人工讀得到**，它印在 notebook 自己的 cell 輸出裡（步驟 3）。壞的是**自動讀回**，不是這條路。 |
 | 佈署的儀器在推測解碼（MTP）之下仍然誠實 | **已知衝突** —— 見下面「一個已知會讓儀器說謊的方法」，以及 D-061 |
 
 介面相容不等於承載能力。探針刻意不宣稱後者——它自己的輸出就寫明了這件事。
@@ -137,7 +137,7 @@ endpoint -g boot        # T4 x2
 | 指令 | 做什麼 |
 |---|---|
 | `endpoint status` | 目前那台的狀態、tunnel 網址、已佈署的模型 |
-| `endpoint base-url` | 只取網址，附可直接用的 curl 範例 |
+| `endpoint base-url` | 只取網址，附可直接用的 curl 範例。**對著一個真的在跑的 Kaggle kernel 它拿不到** —— 步驟 3 寫了網址實際在哪 |
 | `endpoint doctor` | 系統診斷 —— 先確認設定真的被讀到了 |
 | `endpoint models` / `upload` / `settings` | 列出或上傳模型；看或改引擎參數 |
 | `endpoint logs` / `watch` | 引擎日誌（SSE），或狀態訊號串流 |
@@ -153,12 +153,17 @@ endpoint -g boot        # T4 x2
 
 ## 步驟 3 —— 取得網址與金鑰
 
-```bash
-endpoint base-url
-```
+**網址來自 notebook 自己的 cell 輸出**，在 `boot` 跑的時候用瀏覽器讀：cell 會印
+`TUNNEL ACQUIRED: <url>`。把它複製出來，後面加上 `/v1`。
 
-你要兩樣東西：一個 `https://xxxx.trycloudflare.com` 結尾是 `/v1` 的網址，
-以及 API 金鑰。CLI 會自動設定 `ENDPOINT_API_KEY`；金鑰也可以用
+⚠️ **`endpoint base-url` 不會幫你拿到它。** 它先查自己的快取，再透過 API 讀
+Kaggle 的 kernel log。而**寫**快取的兩個地方都藏在「日誌讀成功」後面，所以在一個
+跑動中的 session 上快取是空的，而且**再跑幾次也填不起來**。那個 API 讀取本身在
+kernel **跑動的整段時間**都回**空的**（9 分鐘內取樣三次；[D-072](../DECISIONS.md)
+第四節）。對著一個真的在跑的引擎，這個指令回 `⚠ VPS is not ready yet.`。
+下面疑難排解那兩列有細節。
+
+另一樣你要的是 API 金鑰。CLI 會自動設定 `ENDPOINT_API_KEY`；金鑰也可以用
 `GET /v1/apikey` 取得。
 
 把金鑰放到本 repo 腳本會讀的地方——**`.env`，它已被 gitignore**：
@@ -479,12 +484,17 @@ bash scripts/apply-endpoint-apikey-broadcast-fixes.sh --revert    # 還原
 > 的秘密 —— 那就是這兩刀全部的意義。
 >
 > 而且它只有離線驗證。烘驗把引擎原始碼從產生出來的 notebook 裡**解碼回來**，
-> 在修補版上找到 0 則 `APIKEY:` 廣播、在原始版上找到 1 則；但**沒有真的 boot
-> 過**，那會花掉 GPU 額度。這次新確立的只是：**產物裡不再含有那則廣播**。
+> 在修補版上找到 0 則 `APIKEY:` 廣播、在原始版上找到 1 則。**補記（2026-09-30，
+> [D-072](../DECISIONS.md) 第三節）：** 後來有一次真的 T4×2 boot 帶著這一刀跑完全程
+> （317 秒、`ENGINE HEALTHY` → `Endpoint IS ONLINE`），所以這個刪除**不會**讓引擎
+> 起不來。但那一次**沒有取樣主題本身** —— 它量的是 `boot` 自己的輸出，不是線上
+> （[D-072 第九節](../DECISIONS.md)）。所以「線上沒有 `APIKEY:`」仍然站在烘驗上；
+> 這次新確立的還是：**產物裡不再含有那則廣播**。
 
 ## 網址現在從哪裡來
 
-步驟 3 寫的是 `endpoint base-url`。這一節說那個網址現在從哪裡來，以及為什麼換了。
+那個網址被印進 notebook 自己的 cell 輸出，由**人**在那裡讀。步驟 3 原本寫的是
+`endpoint base-url`；這一節說那個網址現在**實際上**從哪裡來，以及通道為什麼換了。
 
 **它原本走的那條通道是公開的。** 開機訊號發到一條 ntfy 主題，而主題的**名字**當時是由
 Kaggle 使用者名稱推導出來的（`endpoint/core.py`）—— 那是公開帳號。所以 tunnel 網址
@@ -517,10 +527,12 @@ bash scripts/apply-endpoint-tunnel-url-privacy.sh --revert    # 還原
 **無聲地**把本補丁拆掉 —— 本補丁的雜湊閘門要等到**下一次**跑它才會發現。
 
 **三個狀態，而其中兩個不是同一件事。** 讀取器回 `found`、`absent`（讀到了、日誌裡
-**還沒有**網址）或 `unknown`（根本讀不到）。把 `absent` 塌進 `unknown` —— 或更糟，
+沒有網址）或 `unknown`（根本讀不到）。把 `absent` 塌進 `unknown` —— 或更糟，
 塌進「沒有東西在跑」—— 正是 `endpoint stop` 有過的那個缺陷（D-060），也正是這裡
-把它們分成兩個值的原因。**三種情況下 `boot` 都算成功**；`absent` 與 `unknown`
-各印各的句子，而且都指向 `endpoint base-url`。
+把它們分成兩個值的原因。**只有 `found` 是一個能用的端點。** `absent` 與 `unknown`
+都等於**沒有網址**，而 `boot` 現在會講明 endpoint **沒有被接線**，並以**結束碼 2**
+收尾（[D-073](../DECISIONS.md)）。它以前在這裡印的那句「用 `endpoint base-url`
+讀」，走的就是這條讀不回來的路 —— 那句已經拿掉了。
 
 想不 boot 就對著真 API 確認任何一項：
 
@@ -532,16 +544,25 @@ python3 scripts/probe_kernel_log_url.py            # 0 找到了 / 1 還沒有 /
 **單向指紋**的形式出現，所以兩次執行可以比對而不揭露任何一次。**請把 tunnel 網址
 當成憑證**：它活著的時候，任何拿著它的人都能碰到那台引擎。
 
-> **這件事沒有被確立。** 讀取器只被指向過**已結束**的 kernel。
-> `ListKernelSessionOutput` 供應的是一份持久化的 blob，對**跑動中**的 kernel 可能
-> 行為不同 —— 而那正好是一次剛開完機的 kernel 所處的狀態。所以「boot 之後能自己
-> 拿到網址」是**沒有量過的**；退路與以前一樣，就是幾分鐘後再 `endpoint base-url`。
-> 第二個缺口：唯一那份樣本的日誌**沒有**被砍頭，但若 Kaggle 哪天改成只回尾部，
-> 網址（在那份樣本中位於 76.5%）可能會掉出窗外 —— 探針**刻意拒絕用猜的**，因為
-> 一個用猜格式的「有沒有被截斷」判斷，會在**它最該抓到的那個情況上**回「沒有」。
-> 第三：讀日誌需要一個**非互動 shell 也找得到**的權杖，所以它該住在
+> **這件事沒有被確立 —— 而其中一項後來被確立了，答案是否定的。** 讀取器只被指向過
+> **已結束**的 kernel。`ListKernelSessionOutput` 供應的是一份持久化的 blob，對
+> **跑動中**的 kernel 可能行為不同 —— 而那正好是一次剛開完機的 kernel 所處的狀態。
+> 這個問題在這裡被留了下來。**它後來被量了，答案是「不行」**：kernel 在跑的時候，
+> API 在 9 分鐘內取的三次樣**全部**是 HTTP 200 配一個**空的** `log`，網址只在
+> session **結束之後**才出現（[D-072](../DECISIONS.md) 第四節）。所以「boot 之後能
+> 自己拿到網址」是**假的**，而這段話指的退路 —— 幾分鐘後再 `endpoint base-url`
+> —— **也一樣行不通**；`boot` 已經不再印它了（[D-073](../DECISIONS.md)）。
+>
+> 還有兩個缺口沒有收。唯一那份樣本的日誌**沒有**被砍頭，但若 Kaggle 哪天改成只回
+> 尾部，網址（在那份樣本中位於 76.5%）可能會掉出窗外 —— 探針**刻意拒絕用猜的**，
+> 因為一個用猜格式的「有沒有被截斷」判斷，會在**它最該抓到的那個情況上**回
+> 「沒有」。另外，讀日誌需要一個**非互動 shell 也找得到**的權杖，所以它該住在
 > `~/.kaggle/kaggle.json`（權限 `600`，含 `username` 與 `key`），而不是 shell 的
-> rc 檔。最後，這個補丁只有離線驗證 —— **沒有真的 boot 過**，那會花掉 GPU 額度。
+> rc 檔。
+>
+> 最後一句本身也過期了：這裡原本寫「這個補丁只有離線驗證」。它後來撐過了一次真的
+> boot，三刀全部套著 —— 317 秒、`ENGINE HEALTHY` → `Endpoint IS ONLINE`
+> （[D-072](../DECISIONS.md) 第三節）。
 
 ## 主題名不再是一個公開帳號的函式
 
@@ -629,8 +650,8 @@ kernel、再失敗**。所有碰到主題的路徑都改成**大聲失敗**，�
 | `rotate-endpoint-key.sh --check` 回傳 2 | 這是刻意設計：三個持有點不一致，而不一致在出事之前都是無聲的。跑一次不帶 `--check` 的，讓它們一致。 |
 | `rotate-endpoint-key.sh` 回傳 2，說 open-webui 沒在跑 | 這是刻意設計。只輪替讀得到的兩個，會留下第三個拿著**死金鑰、且沒有任何症狀**。把堆疊開起來再跑一次。 |
 | `rotate-endpoint-key.sh` 回傳 3 | 那個值在該檔案裡不是恰好一筆 `myth-` 金鑰。腳本只印**數量、不印值**——自己看一眼那個檔案再重跑。 |
-| `boot` 成功，但說網址還沒出現在 kernel log 裡 | 這是預期行為，不是故障。tunnel 起來了，日誌還沒跟上。過一分鐘用 `endpoint base-url` 取。 |
-| ntfy 主題上再也沒有帶著 tunnel 網址的訊息 | 套過 `scripts/apply-endpoint-tunnel-url-privacy.sh` 之後的正常現象 —— 網址現在在 kernel log 裡，而主題上那則 `TUNNEL ACQUIRED:` 是**刻意留空值**的。用 `endpoint base-url`。 |
+| `boot` 回結束碼 2，說網址在 session 跑動中讀不到 | 這是預期行為，而且**等也不會好**。Kaggle 只在 session **結束之後**才供應 kernel log —— 有一次 kernel 在跑的時候，9 分鐘內取的三次樣全部是 HTTP 200 配一個空的 `log`（[D-072](../DECISIONS.md) 第四節）。引擎是活的、正在燒配額；而 endpoint 從沒被接線。改成從 notebook 的 cell 輸出讀那個網址。 |
+| ntfy 主題上再也沒有帶著 tunnel 網址的訊息 | 套過 `scripts/apply-endpoint-tunnel-url-privacy.sh` 之後的正常現象 —— 網址現在走 notebook 的 cell 輸出，而主題上那則 `TUNNEL ACQUIRED:` 是**刻意留空值**的。從那個 cell 輸出讀網址；`endpoint base-url` 在 session 跑動中碰不到它。 |
 | `endpoint base-url` 說讀不到 kernel log | 兩句不同的訊息、兩個不同的原因：**沒有憑證**（這個 shell 看不到 Kaggle 權杖）或 **Kaggle 拒絕**。看清楚印的是哪一句。前者的解法是 `~/.kaggle/kaggle.json` —— **非互動 shell 不會讀 shell 的 rc 檔**，而 cron 與大多數腳本都跑在非互動 shell 裡。 |
 | 對 ntfy 或 stop 補丁執行 `--revert` 之後，網址就不來了 | 這是預期行為 —— 那兩支補丁打的正是本補丁的三個檔案。照順序重套：ntfy 修正 → stop 修正 → `apply-endpoint-tunnel-url-privacy.sh`。雜湊閘門要等到下一次跑才會發現，所以出事當下不會有任何警告。 |
 | `apply-endpoint-tunnel-url-privacy.sh` 說雜湊不符而拒絕 | 不是 `endpoint-vps` 升級了，就是 ntfy／stop 修正沒套（它們是本補丁的建構基準）。先對那兩支跑 `--verify`。 |
