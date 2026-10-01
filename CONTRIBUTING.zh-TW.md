@@ -29,6 +29,23 @@ request —— 交界那天兩者都有。這個轉變是刻意的。
 
 這裡的 pull request 以 **draft** 開啟，經 review 後才合併。
 
+合併用 **merge commit** —— 不 squash、不 rebase。三種在這個 repo 都是開著的，所以這是
+選擇，不是平台限制：
+
+```bash
+gh api repos/ian0318git/self-cloud-agent-lab \
+  --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
+```
+
+它印出 `{"allow_merge_commit":true,"allow_rebase_merge":true,"allow_squash_merge":true}`。
+
+這個選擇保住的是 review 留下的東西 —— 分支上那些 commit 就是那份紀錄：改動本身，以及
+review 對它做的修改。merge commit 讓它們以被 review 當時的樣子留著：squash 會在 `main`
+上只留一個 commit，把其餘的 commit 一起帶走 —— review 產出的那個也在其中；rebase 則會
+改寫它們，於是落地的不再是被 review 的那幾個。這個 repo 的第一次合併是 `0ec0333`，
+PR #5 的兩個 commit 都留著 —— `git log --reverse --oneline c61ff4a..9c5c562` 先列出
+`52d68b7`（review 前的改動）、再列出 `9c5c562`（第一輪 review 改掉的）。
+
 ## 動手之前
 
 先讀 issue 裡的 **Constraints from existing decisions** 欄位（不能踩到的既有決定）。
