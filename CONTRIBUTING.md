@@ -33,6 +33,24 @@ did not happen is not worth fabricating.
 
 Pull requests here are opened as **drafts** and reviewed before merge.
 
+They are merged with a **merge commit** — not a squash, not a rebase. All three are permitted
+here, so this is a choice rather than a setting:
+
+```bash
+gh api repos/ian0318git/self-cloud-agent-lab \
+  --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'
+```
+
+It prints `{"allow_merge_commit":true,"allow_rebase_merge":true,"allow_squash_merge":true}`.
+
+What the choice protects is what a review leaves behind. The commits on the branch are that
+record — the change, and whatever the review changed about it. A merge commit keeps them as
+they were reviewed: a squash would put one commit on `main` and take the rest of the commits
+with it — the review's own among them; a rebase would rewrite them, so the commits that landed
+would not be the ones that were reviewed. The first merge in this repository, `0ec0333`, keeps
+both of PR #5's commits — `git log --reverse --oneline c61ff4a..9c5c562` lists `52d68b7` (the
+change before the review) and then `9c5c562` (what round 1 of the review changed about it).
+
 ## Before you start
 
 Read the issue's **Constraints from existing decisions** field.
