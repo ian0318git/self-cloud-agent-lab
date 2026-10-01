@@ -24,12 +24,12 @@ claim to delete, not one to soften.
 
 ## How this repository is developed
 
-Direct commits to `main` up to **2026-10-01**; issues and pull requests from that date
-on. The transition is deliberate, and is itself recorded in [`DECISIONS.md`](DECISIONS.md).
+Direct commits to `main` up to and including **2026-10-01**; issues and pull requests from
+that date as well — the boundary day carries both. The transition is deliberate.
 
 No pull requests were manufactured for the work that predates it. That work is recorded
-where it always was — in the decision log — and a review trail that did not happen is not
-worth fabricating.
+where it always was — in the commit history and the decision log — and a review trail that
+did not happen is not worth fabricating.
 
 Pull requests here are opened as **drafts** and reviewed before merge.
 
@@ -56,9 +56,11 @@ Name the command you ran, and what it printed.
 
 ## Documentation comes in pairs
 
-Long-form documents are maintained in English and 繁體中文: `X.md` and `X.zh-TW.md`.
-Editing one means editing the other. The list is whatever `git ls-files '*.zh-TW.*'`
-returns — a change that adds one without its pair is an incomplete change.
+Long-form documents are added in pairs — `X.md` and `X.zh-TW.md` — and editing one means
+editing the other. A change that adds one without its pair is an incomplete change.
+
+`git ls-files '*.zh-TW.*'` lists the pairs that exist. It cannot tell you that a document
+is missing its other half — that is what review is for.
 
 ## Commits
 
