@@ -2,18 +2,59 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-A self-hosted AI platform that runs **inside free cloud quotas** — your own model,
-your own data, tools over MCP, and an agent that works autonomously.
+A private AI stack — your own model, your own documents, your own tools — that runs
+**inside your own boundary**, and scales from a free sandbox to a rented GPU.
 
-This repository exists to answer one question honestly: **does the architecture
-hold, and is the model good enough?** Every claim here is either measured or
-explicitly labelled as not measured. Where a claim failed, the failure was kept.
+## Why this exists
 
-> **This is a validation sandbox, not a persistent service.**
-> Codespaces' free tier buys about **2 hours a day**. Running this 24/7 would
-> exhaust the whole monthly allowance in **roughly 2.5 days** — and storage is
-> billed while a codespace merely *exists*, stopped or not. The arithmetic is in
-> [the handbook](docs/HANDBOOK.md#why-this-is-not-a-persistent-service).
+Hand ChatGPT your company's contracts and you have handed them over. Run the model
+on your own machine instead and you need hardware — a 7–8B model wants **~8 GB of
+VRAM** before it will say a word to you.
+
+The gap between those two options is not technical. It is that **nobody tells you
+what self-hosting actually costs** — in dollars, in tokens per second, in hours of
+setup — before you commit. Product pages say "production-ready"; they do not say
+*"5 token/s on a CPU VPS"*, which is slower than most people type.
+
+So this repository does the measuring. Every claim in it is either measured or
+explicitly labelled as not measured, and the ones that failed are still here.
+
+## What this is
+
+A complete private stack — **Ollama** for inference, **Open WebUI** for chat and
+RAG, **MCP** for tools — behind a network design where **nothing is ever exposed**:
+Ollama is reachable only inside the Docker network ([D-003](DECISIONS.md)), and
+remote access is an **outbound** tunnel, so no inbound port is ever opened.
+
+You keep the data. You keep the model. You also keep the bill — which is the part
+the brochures leave out, so every step below carries its measured price.
+
+## The path
+
+Three steps, from free to capable. The third one stops, and that is measured too.
+
+| | Step | What it buys you | State |
+|---|---|---|---|
+| **1** | **Free sandbox** — GitHub Codespaces | Prove the architecture works, for $0 | ✅ Working |
+| **2** | **Your own VPS** — `deploy-vps.sh` | A persistent instance that is actually yours | ✅ Script verified end to end |
+| **3** | **GPU** — a second, larger model | 14B–70B at 20–60 token/s, instead of 7B at 5–10 | ⚠️ Not usable end to end |
+
+**Step 1 is free, and it is a sandbox by measurement rather than by preference.**
+The free tier buys about **2 hours a day**; running 24/7 would exhaust the month in
+**~2.5 days**, and storage is billed while the codespace merely *exists*, stopped or
+not. Validate on it, then delete it ([D-001](DECISIONS.md)).
+
+**Step 2 is the finished one.** The deploy script has been verified end to end. What
+has *not* been verified is the machine: no VPS has been rented yet, so the token/s
+figures for any particular plan are a projection from measured calibration points,
+labelled as a projection ([D-028](DECISIONS.md), [D-047](DECISIONS.md)).
+
+**Step 3 is where it stops today**, by two different routes — the GPU compose
+overlay has never run on real GPU hardware, and the rented-GPU route cannot read
+its own tunnel URL back. Both are detailed below.
+
+If you are here to decide whether self-hosting is worth it at all, step 1 costs
+nothing and answers that. If you are here to deploy, step 2 is ready.
 
 ---
 
@@ -54,16 +95,7 @@ OpenAI-protocol probe all work without it.
 
 ---
 
-## Why this exists
-
-The original question was whether a fully self-hosted AI platform — your own
-model, your own documents, your own tools — can run on nothing but free tiers.
-The answer turned out to be *yes for the architecture, no for persistence*, and
-both halves are documented rather than rounded off.
-
-The project is scoped as a **validation sandbox**: a place to find out whether the
-design holds, then delete it. That scoping decision is [D-001](DECISIONS.md) — it
-is the first entry in the decision log and the one that shapes all the others.
+## How to read this repository
 
 Two habits run through everything here:
 
@@ -74,6 +106,10 @@ Two habits run through everything here:
   recorded limitations are collected in
   [`docs/ENDPOINT-VERIFIER-ROT.md`](docs/ENDPOINT-VERIFIER-ROT.md), red verifiers
   included.
+
+Every design choice has a numbered, dated entry in **[`DECISIONS.md`](DECISIONS.md)**
+recording what was decided, what it overturned, and what would change it. When this
+README says *measured*, that is where the measurement lives.
 
 ---
 
