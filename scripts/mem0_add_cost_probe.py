@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """第三階段 item 3 的探針：mem0 的 add() 到底多花多少？
 
-README 第三階段第 3 項是個 [open]，上面寫著：
+HANDBOOK 第三階段第 3 項是個 [open]，上面寫著：
 
   「mem0 的寫入路徑會先跑一次 LLM 把事實抽出來再存。那個呼叫是**額外**的，
     不包含在生成答案裡。照目前量到的速率（3.8–6.9 tok/s，D-011／D-014），
@@ -99,7 +99,7 @@ procedural memory（要明示 `memory_type` 才會走）與非同步版本的鏡
 C1~C7 全部是**無閾值的機械判準** —— 不是「時間有沒有超過幾秒」這種會隨機器
 飄移的門檻，而是兩個量之間的序關係或計數：
 
-  C1  一次 add() 只發出一次 chat 呼叫（README 的「一次」在結構上成立）
+  C1  一次 add() 只發出一次 chat 呼叫（HANDBOOK 的「一次」在結構上成立）
   C2  同一份 messages，mem0 的 options 評估的 token 數**少於**明確給足
       num_ctx 時 —— 少掉的就是被丟棄的
   C3  截斷吃的是**開頭**（`llama_server.go` 的預測）：等長的 canary 分別放在
@@ -335,7 +335,7 @@ THINKING_NUM_PREDICT = 256
 # 而不是回報一個方向。
 CANARY_THINK = False
 
-# README 第 3 項的那句話。留成常數是為了讓「一次」是一個可以被斷言的數字。
+# HANDBOOK 第 3 項的那句話。留成常數是為了讓「一次」是一個可以被斷言的數字。
 README_CLAIMED_CALLS = 1
 
 # 全部的量測節。順序就是依賴順序：C2 的對照組會把 context 載成 16384，
@@ -1154,7 +1154,7 @@ def grade(evidence):
     problems 每一項都是可以直接印給人看的字串 —— 講「哪裡沒過」，
     不是只說「沒過」。
 
-    每一條的失敗訊息都刻意寫成「與 README 第 3 項的說法不符」或
+    每一條的失敗訊息都刻意寫成「與 HANDBOOK 第 3 項的說法不符」或
     「與原始碼讀出來的行為不符」，而不是「壞掉了」：這支探針量的是
     **上游的行為**，它變了不代表誰壞了，代表 item 3 的結論要重讀。
     """
@@ -1188,12 +1188,12 @@ def grade(evidence):
     dup = evidence.get("duplicate") or {}
 
     # ── C1：一次 add() 只發一次 chat 呼叫 ───────────────────
-    # README 說「多一次 LLM 呼叫」。這句話要嘛對要嘛不對，而且是可以數的。
+    # HANDBOOK 說「多一次 LLM 呼叫」。這句話要嘛對要嘛不對，而且是可以數的。
     first_add_chat = calls.get("first_add_chat")
     if first_add_chat != README_CLAIMED_CALLS:
         problems.append(
-            "C1：第一次 add() 發出了 %r 次 chat 呼叫，README 第 3 項說一次。"
-            "呼叫數變了就是成本模型變了 —— 重讀 D-027 再決定怎麼改 README。"
+            "C1：第一次 add() 發出了 %r 次 chat 呼叫，HANDBOOK 第 3 項說一次。"
+            "呼叫數變了就是成本模型變了 —— 重讀 D-027 再決定怎麼改 HANDBOOK。"
             % (first_add_chat,)
         )
 

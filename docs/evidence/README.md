@@ -1,6 +1,6 @@
 # 原始輸出（evidence）
 
-這裡放**執行過的探針／腳本的逐字輸出**，用來支撐 `DECISIONS.md` 與 `README.md` 裡的
+這裡放**執行過的探針／腳本的逐字輸出**，用來支撐 `DECISIONS.md` 與 `HANDBOOK.md` 裡的
 數字。會進版控，是因為貼在對話裡或 `/tmp` 裡的證據重開就沒了 —— 而本專案的規矩是
 **數字要能追回它的來源**（`DECISIONS.md` 的證據表就是為此存在的）。
 
@@ -19,8 +19,8 @@
 
 | 檔案 | 是什麼 | 引用它的地方 |
 |---|---|---|
-| `2026-09-23-throughput-qwen3-8b.txt` | 吞吐量探針 `--quick`（8b，`num_ctx` 8192／16384），exit 2、14m36s | `DECISIONS.md` D-049 §3／§5；`README.md`〈Hardware sizing → The baseline〉 |
-| `2026-09-23-throughput-qwen3-4b.txt` | 同上，**4b**（讓 4b／8b 變成同一把尺的那一輪），exit 2、3m46s | `DECISIONS.md` D-047 §1／§5、D-049 §4／§5；`README.md` 同節 |
+| `2026-09-23-throughput-qwen3-8b.txt` | 吞吐量探針 `--quick`（8b，`num_ctx` 8192／16384），exit 2、14m36s | `DECISIONS.md` D-049 §3／§5；`HANDBOOK.md`〈Hardware sizing → The baseline〉 |
+| `2026-09-23-throughput-qwen3-4b.txt` | 同上，**4b**（讓 4b／8b 變成同一把尺的那一輪），exit 2、3m46s | `DECISIONS.md` D-047 §1／§5、D-049 §4／§5；`HANDBOOK.md` 同節 |
 | `2026-09-26-pull-peak-measurement.txt` | 量測協定 A：在**獨立** volume 對 `qwen3:8b` 真拉一次（1184 筆樣本／1183 秒），量下載期間的磁碟峰值。倍數 **1.000**，兩個獨立估計法一致，exit 0 | `DECISIONS.md` D-058 §六／§七；`scripts/deploy-vps-decisions.sh` 的常數區 |
 | `2026-09-26-pull-preallocation-diagnostic.txt` | 上面那一跑的**儀器驗證**：同一時刻 `st_size` 5,225,377,718 B 對上 `st_blocks*512` 732,086,272 B | `DECISIONS.md` D-058 §六；`scripts/measure-pull-peak.sh` 檔頭 |
 | `2026-10-01-probe-kernel-files-live-running-vs-complete.txt` | 一顆**私有 CPU kernel** 跑動中／結束後，輪詢 Kaggle 的三個檔案 RPC：跑動中 30 次全部 `files=0`（`files` 鍵根本不在），結束後第一次就 `files=2`。判讀 **B-POST-ONLY**，exit 0、16m04s | `DECISIONS.md` D-075 |

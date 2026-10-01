@@ -216,7 +216,7 @@ services:
   # ── 測試用 MCP server（第二階段 MCP 清單）────────────────
   # 唯一目的：讓「Admin → External Tools 新增 MCP (Streamable HTTP)」
   # 有現成的東西可以接。兩個工具（echo、roll_die）分別對應 MCP 清單的
-  # 基本呼叫與多輪測試（見 README 第二階段 MCP 一節）。
+  # 基本呼叫與多輪測試（見 HANDBOOK 第二階段 MCP 一節）。
   #
   # 刻意不發布埠 —— 與 ollama 同一個思路：open-webui 經 ai-net 內網直達
   # http://mcp-test-server:8000/mcp，主機與外界都碰不到（D-003）。

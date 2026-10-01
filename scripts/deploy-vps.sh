@@ -39,7 +39,7 @@
 #      三個原因（沒裝／裝了沒跑／沒有權限），各給各的處方。
 #   2. **repo 已經在這台機器上。** 這一條是字面上的（沒有 repo 就沒有這支
 #      腳本），寫出來是因為「一鍵佈署」讀起來像是連 `git clone` 都包了 ——
-#      而它沒有；README 的快速開始才有那一步。
+#      而它沒有；HANDBOOK 的快速開始才有那一步。
 #
 # 兩個都是**硬前提**（fail-closed）：沒有 Docker，暴露閘門、煙霧測試、
 # 「模型真的在 GPU 上」那一層就一層都跑不起來，所以在**動到任何檔案之前**
@@ -331,7 +331,7 @@ if [[ -n "$BIND_OVERRIDDEN" ]]; then
   warn "找到 WEBUI_BIND_ADDR=$BIND_OVERRIDDEN —— 那是**萬用位址**，會把 Open WebUI"
   warn "發布到這台機器的每一個介面上。已改成 $BIND_ADDR（下面會寫進 .env）。"
   warn "這一台是 VPS 的話，3000 埠在公網上就是開的 —— 而 Cloudflare Access 只"
-  warn "擋 tunnel 那條路，擋不到這個埠（README 的「Moving to a VPS」有寫）。"
+  warn "擋 tunnel 那條路，擋不到這個埠（HANDBOOK 的「Moving to a VPS」有寫）。"
   warn "真的要靠邊緣防火牆擋、要在公網上開這個埠，請改用 --expose 明講。"
   echo
 fi
@@ -448,7 +448,7 @@ fi
 # D-055 §一 記著：ARM VPS（Graviton／Ampere／Oracle ARM）沒有任何一層被驗證過。
 # 這個缺口的形狀與 GPU 那個同屬一個家族 —— **不會報錯，只會安靜地跑出不同
 # 結果**：映像是 multi-arch，所以 compose 起得來、健康檢查過、模型答得出話，
-# 只有速度與 README 上那些數字是錯的。
+# 只有速度與 HANDBOOK 上那些數字是錯的。
 #
 # 但**不擋**。實查 registry 的 manifest（`docker manifest inspect`，不需要
 # ARM 機器）之後，「arm64 上跑不動」是假的：ollama／open-webui／cloudflared
@@ -481,14 +481,14 @@ case "$(arch_verdict "$HOST_MACHINE")" in
     warn "CPU 架構：${HOST_MACHINE}（ARM64）—— 這個 lab 只在 x86_64 上驗證過。"
     warn "  映像檔有 arm64，所以它會跑起來。**不擋** —— 那是「沒量過」，不是"
     warn "  「不能用」。但下面這些在 ARM 上沒有證據："
-    warn "    · README 尺寸表的吞吐量（5–10 token/s 那幾欄）是 x86 量的"
-    warn "    · README「When is this a fit?」的 GPU 建議是另一條沒驗過的路"
+    warn "    · HANDBOOK 尺寸表的吞吐量（5–10 token/s 那幾欄）是 x86 量的"
+    warn "    · HANDBOOK〈VPS configurations〉的 GPU 建議是另一條沒驗過的路"
     warn "  跑完之後 step 13 會再量一次**本地那份映像**的架構，確認不是模擬執行。" ;;
   *)
     warn "CPU 架構：認不得 \`uname -m\` 的輸出（${HOST_MACHINE:-讀不到}）—— 只認得"
     warn "  x86_64 與 aarch64。不知道這台在 Docker 的詞彙裡叫什麼，所以下面"
     warn "  **兩層都不會跑**：沒有東西可以拿去跟 registry 或映像比。它會跑，"
-    warn "  但這個 lab 的數字（含 README 的吞吐量）在這台上是沒有證據的。" ;;
+    warn "  但這個 lab 的數字（含 HANDBOOK 的吞吐量）在這台上是沒有證據的。" ;;
 esac
 
 # 裝置層：registry 有沒有這個架構的映像檔。
@@ -553,7 +553,7 @@ fi
 # ── GPU：偵測、判定，並讓「有沒有在用 GPU」變成看得到的事 ──
 # 這一節要消滅的是「宣告面 ≠ 執行面」家族的第三次。`docker-compose.yml`
 # 完全沒有任何 device reservation，所以這個堆疊**在任何有 GPU 的機器上都是
-# 由建構決定跑 CPU 的**，而且沒有任何訊號 —— 只是慢。而 README 把「一張
+# 由建構決定跑 CPU 的**，而且沒有任何訊號 —— 只是慢。而 HANDBOOK 把「一張
 # 24 GB GPU」標成 sweet spot，並叫使用者自己去 compose 加一個 block。
 #
 # 判定邏輯在純函式裡（deploy-vps-decisions.sh 的 gpu_verdict，12 格真值表
@@ -602,7 +602,7 @@ case "$GPU_VERDICT" in
         tight)
           warn "VRAM 偏緊：這張卡有 ${GPU_VRAM_MB} MB，估算需要約 ${GPU_NEED_MB} MB。"
           warn "  裝不下時 ollama 會**部分卸載**（把放不下的層丟到系統記憶體），"
-          warn "  速度差 10–50×（README 的「When is this a fit?」）—— 那是慢，不是錯，"
+          warn "  速度差 10–50×（HANDBOOK 的〈VPS configurations〉）—— 那是慢，不是錯，"
           warn "  所以不擋。要省請縮小模型或 --num-ctx。"
           warn "  （KV cache 那一項是 D-022 的推測值，與模型的 KV head 數綁定。）" ;;
         unknown_need)
@@ -1225,7 +1225,7 @@ if [[ "$ARCH_CHECKABLE" == "1" ]]; then
 
 CPU 架構：$HOST_MACHINE（$ARCH_FAMILY）
   映像有這個架構，pull 拉到了，跑起來的也是原生架構 —— 那些都確認過了。
-  但**這個 lab 的數字全部是 x86 量的**：README 尺寸表的吞吐量、GPU 那一節的
+  但**這個 lab 的數字全部是 x86 量的**：HANDBOOK 尺寸表的吞吐量、GPU 那一節的
   建議，在 $ARCH_FAMILY 上都沒有證據。它會跑，跑多快沒人知道。
 EOF
 fi

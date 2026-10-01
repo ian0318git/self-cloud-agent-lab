@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """第三階段 item 2 的探針：mem0 的 Chroma 後端與本專案的 embeddings 對不對得上？
 
-README 第三階段第 2 項是個 [open]，上面寫著：
+HANDBOOK 第三階段第 2 項是個 [open]，上面寫著：
 
   「mem0 的 Chroma 後端預設 **1536 維**（OpenAI 大小）。本專案的嵌入模型是
     `qwen3-embedding:0.6b`，量到 **1024 維**（D-013）。照預設值跑會在寫入時
@@ -16,7 +16,7 @@ README 第三階段第 2 項是個 [open]，上面寫著：
    `collection_name / client / path / host / port / api_key / tenant` ——
    **沒有任何維度欄位**。1536 是 mem0 的 *OpenAI* embedder 與其他向量庫
    （pgvector、milvus、redis…）的預設，不是 Chroma 的，也不是 ollama 的。
-   所以 README 說「把 `embedding_dims` 釘在 1024」在這條路徑上**無處可釘**。
+   所以 HANDBOOK 說「把 `embedding_dims` 釘在 1024」在這條路徑上**無處可釘**。
 
 2. **mem0 的 ollama embedder 宣告 `512`，而且那個值是死的。**
    `OllamaEmbedding.__init__` 寫 `self.config.embedding_dims = ... or 512`，
@@ -36,7 +36,7 @@ README 第三階段第 2 項是個 [open]，上面寫著：
    也就是說：跨模型的「同一句話」比同模型內的「兩句不相干的話」還要遠。
 
 第 4 點是 D-016 說的那種最難發現的失敗：**沒有例外、沒有錯誤訊息、答案看起來
-正常，只是錯的。** 而 README 原本提議的防線（比對維度）正好擋不住它。
+正常，只是錯的。** 而 HANDBOOK 原本提議的防線（比對維度）正好擋不住它。
 
 ### 因此這支探針的判準
 
@@ -81,7 +81,7 @@ EXIT_BROKEN = 3
 # 而且必須重新嵌入** —— 這正是 C5/C6 在講的那件事，不要只改數字。
 EXPECTED_DIM = 1024
 
-# README 第 2 項指名的那個數字。留成常數是為了讓「它到底在不在這條路徑上」
+# HANDBOOK 第 2 項指名的那個數字。留成常數是為了讓「它到底在不在這條路徑上」
 # 是一個可以被斷言的問題，而不是散落在註解裡的一句話。
 README_CLAIMED_DIM = 1536
 
@@ -230,21 +230,21 @@ def grade(evidence, expected_dim=EXPECTED_DIM):
         )
 
     # ── C2：mem0 的 chroma 設定沒有維度欄位 ─────────────────
-    # 這條不是在挑毛病，是在確認 README 第 2 項的處方有沒有地方可下。
+    # 這條不是在挑毛病，是在確認 HANDBOOK 第 2 項的處方有沒有地方可下。
     # 哪天上游加了這個欄位，這條會叫 —— 那時「釘住維度」就真的可行了。
     if cfg.get("dim_fields"):
         problems.append(
             "C2：mem0 的 ChromaDbConfig 出現了維度相關欄位 %r —— "
             "與 D-026 記錄的「chroma 設定裡無處可釘」不符。"
-            "上游若新增了這個欄位，README 第 2 項的處方要重新評估。"
+            "上游若新增了這個欄位，HANDBOOK 第 2 項的處方要重新評估。"
             % (cfg.get("dim_fields"),)
         )
 
-    # ── C3：README 指的 1536 不在這條路徑上，且宣告值是死的 ──
+    # ── C3：HANDBOOK 指的 1536 不在這條路徑上，且宣告值是死的 ──
     declared = emb.get("declared_dims")
     if declared == README_CLAIMED_DIM:
         problems.append(
-            "C3：mem0 的 ollama embedder 宣告值變成了 %d（README 說的那個數字）—— "
+            "C3：mem0 的 ollama embedder 宣告值變成了 %d（HANDBOOK 說的那個數字）—— "
             "與 D-026 記錄的 512 不符，上游改了預設值。"
             % README_CLAIMED_DIM
         )
@@ -769,7 +769,7 @@ def main(argv=None):
     print()
     print("── 判準 ────────────────────────────────────")
     if passed:
-        print("通過：C1~C7 全過 —— 見下方「與 README 的差異」段。")
+        print("通過：C1~C7 全過 —— 見下方「與 HANDBOOK 的差異」段。")
     else:
         print("未通過，問題如下：")
         for p in problems:

@@ -3,7 +3,7 @@
 
 這組測試對應兩條既有教訓：
 
-1. **評分邏輯本身要被實測過**（README 第一階段清單、D-016）。一個只跑過
+1. **評分邏輯本身要被實測過**（HANDBOOK 第一階段清單、D-016）。一個只跑過
    「輸出為空」的評分器，在第一次真正跑到之前沒有任何防線。
 2. **假失敗比漏報更糟**（D-016），而**漏報比誤報更難發現**（D-024 第八節）。
    所以這裡**兩邊都驗**：每一條判準 C1~C5 都有一個「該過的過」與一個
@@ -737,11 +737,11 @@ def test_grade_passes_on_measured_shape():
 
 def test_grade_blocks_when_call_count_is_not_one():
     _fails(_set(_evidence_ok(), "calls.first_add_chat", 2),
-           "README 第 3 項說一次")
+           "HANDBOOK 第 3 項說一次")
 
 
 def test_grade_blocks_when_not_truncated():
-    """沒截斷是好事，但它代表 README 的危險敘述要重寫 —— 所以判準要叫。"""
+    """沒截斷是好事，但它代表 HANDBOOK 的危險敘述要重寫 —— 所以判準要叫。"""
     _fails(_set(_evidence_ok(), "truncation.truncated", False),
            "沒有被截斷")
 

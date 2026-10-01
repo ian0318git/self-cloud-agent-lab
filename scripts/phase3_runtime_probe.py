@@ -94,7 +94,7 @@ def required_recursion_limit(super_steps: int) -> int:
     """跑完一個會執行 `super_steps` 個 super-step 的圖，所需的最小 limit。
 
     量到的通則。注意它數的是 **super-step**，不是節點執行次數 —— 這正是
-    README 原本的猜測，也是唯一需要量測才能確認的部分：14 個「每個 super-step
+    HANDBOOK 原本的猜測，也是唯一需要量測才能確認的部分：14 個「每個 super-step
     恰好一個節點」的圖形**無法區分**這兩種講法。平行扇出才能：
     width=1,2,3,4,6 全部給出同一個 limit ⇒ 數的是 super-step。
     """
@@ -645,7 +645,7 @@ def _report(out: dict[str, Any]) -> None:
           f"{out['item4']['width_invariance']}")
     print("    → " + ("與 width 無關 ⇒ 通則數的是 super-step"
                       if out["item4"]["width_invariant"] else
-                      "**隨 width 改變** ⇒ 通則數的是節點執行數（README 的猜測是錯的）"))
+                      "**隨 width 改變** ⇒ 通則數的是節點執行數（HANDBOOK 的猜測是錯的）"))
     print(f"  預設 limit（讀原始碼，非二分搜尋）：{out['item4']['default_limit']}")
     print()
     print("  太緊的時候會怎樣？（linear-5，逐個 limit 試）")

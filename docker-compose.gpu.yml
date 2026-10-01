@@ -13,7 +13,7 @@
 # 而中間那段時間的狀態沒有任何東西在描述它（D-054 的病灶）。
 #
 # 為什麼是 `deploy.resources.reservations.devices` 而不是 `gpus:`：
-# README 的「When is this a fit?」表格點名的就是前者，文件與實作要指同一個
+# HANDBOOK 的〈VPS configurations／VPS 配置〉一節點名的就是前者，文件與實作要指同一個
 # 東西。而且 `deploy` 區塊在 `docker compose up`（非 swarm）下**會**被採用，
 # 這點在 D-056 有記。
 #

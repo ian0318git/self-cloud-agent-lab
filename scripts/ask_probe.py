@@ -3,7 +3,7 @@
 
 為什麼需要這支腳本：
   D-001 選 qwen3:4b 時只驗證了「模型跑得起來」，沒有驗證「答得對不對、
-  夠不夠快」。但 Phase 1 的驗收清單要求這兩件事（README：
+  夠不夠快」。但 Phase 1 的驗收清單要求這兩件事（HANDBOOK：
   "a sensible answer arrives within 10–30 seconds"）。驗收項存在，
   對應的量測工具卻不存在 —— 於是那個缺口一直沒被發現，
   直到 Phase 2 要用 MCP 才撞上（D-014）。

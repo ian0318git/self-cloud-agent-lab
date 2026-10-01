@@ -1,7 +1,7 @@
 # 第三階段 item 1 探針的相依套件。**全部鎖死版本。**
 #
 # 為什麼一定要鎖：`langchain.mcp` 還是 beta —— 光是 import 就會發
-# LangChainBetaWarning（已實測，README 第三階段也記了這件事）。API 隨時會變，
+# LangChainBetaWarning（已實測，HANDBOOK 第三階段也記了這件事）。API 隨時會變，
 # 不鎖版本的話，「昨天過、今天不過」會變成一場查不出原因的災難：你會以為
 # 是模型退化或 MCP server 壞了，實際上只是上游改了函式簽章。
 #
@@ -9,7 +9,7 @@
 # 且 langchain.mcp 的 API 形狀已確認過的組合。
 #
 # 注意 `langchain[mcp]` 而不是獨立的 langchain-mcp-adapters：
-# 後者已被 MCPAdapter 取代（README 第三階段的更正）。
+# 後者已被 MCPAdapter 取代（HANDBOOK 第三階段的更正）。
 langchain[mcp]==1.4.2
 langgraph==1.2.11
 langchain-ollama==1.1.0

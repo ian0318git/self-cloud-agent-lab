@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """第三階段 item 1 的探針：工具呼叫跨不跨得過 code path 的改變？
 
-README 第三階段第 1 項是個 [open]：D-011 證明的是 **Open WebUI 自己的**
+HANDBOOK 第三階段第 1 項是個 [open]：D-011 證明的是 **Open WebUI 自己的**
 tool calling 流程會過（D-023 用 call_id 鏈補上了機械證據），而 LangGraph 走的是
 `bind_tools` + Ollama 整合的原生 function calling —— **完全不同的實作**。
 D-014 的教訓就是：在某組條件下量到的結果，不要套用到沒量過的地方。
@@ -303,7 +303,7 @@ def observations(evidence):
 # ══════════════════════════════════════════════════════════
 
 # 兩輪的問法刻意**不提到任何工具名稱**，也不說「請用工具」——
-# README 第二階段要驗的是「模型自行決定」，這裡驗的是同一件事換一條路徑
+# HANDBOOK 第二階段要驗的是「模型自行決定」，這裡驗的是同一件事換一條路徑
 # 之後還成不成立。第一輪對齊 D-023 的驗證題，第二輪要求連續兩次呼叫。
 TURN_PROMPTS = (
     "幫我丟一顆骰子",

@@ -280,7 +280,7 @@ case "$PROBE_RC" in
 esac
 
 if [[ "$CHROMA_VERDICT" == "ephemeral" ]]; then
-  warn "item 5：第二套向量庫是**暫存的** —— README 原本的『兩套儲存要備份、遷移、保持一致』前提不成立。"
+  warn "item 5：第二套向量庫是**暫存的** —— HANDBOOK 原本的『兩套儲存要備份、遷移、保持一致』前提不成立。"
   warn "  這一項要回答的問題因此從『怎麼維運兩套』變成『要不要讓它落地，落地的話放哪』。"
 fi
 

@@ -357,7 +357,7 @@ def gpu_verdict(ps, model):
         "模型 %s 部分卸載：只有 %.0f%%（size_vram=%d／size=%d）在 GPU 上。\n"
         "  → 這是真的量測，不是判準沒過：GPU 確實在用，但 VRAM 裝不下"
         "整顆模型，所以 ollama 把剩下的層放到系統記憶體，速度會塌掉"
-        "（README 記的是 10–50× 差，不是 20%% 差）。要修是**縮小模型或"
+        "（HANDBOOK 記的是 10–50× 差，不是 20%% 差）。要修是**縮小模型或"
         "縮小 context**，不是重跑一次。" % (model, pct, vram, total)
     )
 
