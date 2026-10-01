@@ -51,6 +51,34 @@ would not be the ones that were reviewed. The first merge in this repository, `0
 both of PR #5's commits — `git log --reverse --oneline c61ff4a..9c5c562` lists `52d68b7` (the
 change before the review) and then `9c5c562` (what round 1 of the review changed about it).
 
+A merge commit is titled by hand, in the form the first one set. `0ec0333`'s subject is
+`Merge PR #5: .github/ scaffolding and CONTRIBUTING` — `Merge PR #N: what the pull request
+did`, in the words of whoever merges. It is not `type(scope):`, and it is not the platform's
+to write: `4db2767`'s subject is `Merge pull request #8 from ian0318git/task/7-merge-method`,
+and its body is that pull request's title (`git log --format=%B -1 4db2767`) — what the two
+settings produce by themselves. Both have to be overridden at the moment of the merge:
+
+```bash
+gh api repos/ian0318git/self-cloud-agent-lab \
+  --jq '{merge_commit_title, merge_commit_message}'
+```
+
+It prints `{"merge_commit_message":"PR_TITLE","merge_commit_title":"MERGE_MESSAGE"}`.
+
+```bash
+gh pr merge <n> --merge \
+  --subject 'Merge PR #<n>: what the pull request did' \
+  --body '<what the review concluded>'
+```
+
+The `--body` is where a merge records its review: `0ec0333`'s carries the size of the change,
+what the review found, what was fixed, and where the one unresolved finding was carried
+(`git log --format=%B -1 0ec0333`). A review that found nothing is worth the same sentence as
+one that did.
+
+Merge commits are not written in the `type(scope):` form; `## Commits` below names them as the
+exception, along with the one commit older than that rule.
+
 ## Before you start
 
 Read the issue's **Constraints from existing decisions** field.
@@ -83,8 +111,10 @@ is missing its other half — that is what review is for.
 ## Commits
 
 `type(scope): description` — the type is English (`feat`, `fix`, `docs`, `test`,
-`refactor`, `chore`), the description may be either language. `git log --oneline` shows
-the house style; it is consistent.
+`refactor`, `chore`), the description may be either language. `git log --oneline` shows the
+house style. Two things in it are not written this way: merge commits, which have their own
+rule in `## How this repository is developed` above — the first two predate it — and
+`c2f026c` (2026-09-19), which is older than this rule. Neither was rewritten to fit.
 
 ## License
 

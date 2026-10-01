@@ -46,6 +46,33 @@ review 對它做的修改。merge commit 讓它們以被 review 當時的樣子�
 PR #5 的兩個 commit 都留著 —— `git log --reverse --oneline c61ff4a..9c5c562` 先列出
 `52d68b7`（review 前的改動）、再列出 `9c5c562`（第一輪 review 改掉的）。
 
+merge commit 的標題是手寫的，用第一次 merge 立下的形。`0ec0333` 的 subject 是
+`Merge PR #5: .github/ scaffolding and CONTRIBUTING` —— 也就是 `Merge PR #N: 這個 pull
+request 做了什麼`，用合併的人的話寫。它不是 `type(scope):`，也不是平台替你寫的：
+`4db2767` 的 subject 是 `Merge pull request #8 from ian0318git/task/7-merge-method`、
+body 是那個 pull request 的標題（`git log --format=%B -1 4db2767`）—— 兩個旗標都不下時，
+設定產出的就是這個。兩個都要在合併當下覆蓋掉：
+
+```bash
+gh api repos/ian0318git/self-cloud-agent-lab \
+  --jq '{merge_commit_title, merge_commit_message}'
+```
+
+它印出 `{"merge_commit_message":"PR_TITLE","merge_commit_title":"MERGE_MESSAGE"}`。
+
+```bash
+gh pr merge <n> --merge \
+  --subject 'Merge PR #<n>: what the pull request did' \
+  --body '<what the review concluded>'
+```
+
+`--body` 是 merge 記下它那輪 review 的地方：`0ec0333` 的帶著改動的規模、review 找到了
+什麼、修了什麼、以及沒解決的那一條被帶到哪裡去（`git log --format=%B -1 0ec0333`）。
+一輪什麼都沒找到的 review，值得跟找到東西的那輪一樣的一句話。
+
+merge commit 不是 `type(scope):` 的形；下面的 `## Commit` 把它們列為例外，連同那條比規則
+更早的 commit。
+
 ## 動手之前
 
 先讀 issue 裡的 **Constraints from existing decisions** 欄位（不能踩到的既有決定）。
@@ -76,7 +103,9 @@ PR #5 的兩個 commit 都留著 —— `git log --reverse --oneline c61ff4a..9c
 ## Commit
 
 `type(scope): 說明` —— type 用英文（`feat`、`fix`、`docs`、`test`、`refactor`、
-`chore`），說明可以用任一種語言。屋裡的寫法看 `git log --oneline`，它很一致。
+`chore`），說明可以用任一種語言。屋裡的寫法看 `git log --oneline`。裡面有兩樣東西不是這樣
+寫的：merge commit（它們有自己的規則，見上面「這個 repo 怎麼開發」—— 這裡的頭兩次 merge
+早於它），以及 `c2f026c`（2026-09-19），它比這條規則更早。兩者都沒有被改寫來遷就。
 
 ## 授權
 
