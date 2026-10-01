@@ -72,30 +72,39 @@ projections. See [`DECISIONS.md`](DECISIONS.md) for the engineering record.
 
 ## Architecture
 
-```text
-                         Browser
-                            │
-                         :3000
+Phase 1, the part implemented in this repository:
+
+```
+┌─────────────────────────────────────────────┐
+│  GitHub Codespace (2-core / 8GB / 32GB)     │
+│                                             │
+│   ┌───────────────────────────────────┐     │
+│   │  Docker network: ai-net           │     │
+│   │                                   │     │
+│   │  ┌──────────┐      ┌───────────┐  │     │
+│   │  │  ollama  │◄─────│ open-webui│  │     │
+│   │  │  :11434  │      │   :8080   │  │     │
+│   │  └──────────┘      └─────┬─────┘  │     │
+│   │   (not published)         │        │     │
+│   └───────────────────────────┼───────┘     │
+│                               │             │
+│                      port forward :3000     │
+└───────────────────────────────┼─────────────┘
+                                ▼
+                        Browser (Open WebUI)
+```
+
+And, optionally, beyond that boundary:
+
+```
+                        Browser
                             │
                             ▼
-┌──────────────────────────────────────────────────┐
-│ Codespace / VPS                                  │
-│                                                  │
-│   Docker network: ai-net                         │
-│                                                  │
-│   ┌────────────────┐       ┌─────────────────┐   │
-│   │     Ollama     │◄──────│   Open WebUI    │   │
-│   │     :11434     │       │      :8080      │   │
-│   │  NOT EXPOSED   │       └─────────────────┘   │
-│   └────────────────┘                             │
-│                                                  │
-└──────────────────────────────────────────────────┘
-
-             Optional outbound tunnel
-                         │
-                         ▼
-                  GPU Endpoint
-                  Larger models
+             outbound tunnel (no inbound port)
+                            │
+                            ▼
+                       GPU Endpoint
+                       Larger models
 ```
 
 ### Design principles
