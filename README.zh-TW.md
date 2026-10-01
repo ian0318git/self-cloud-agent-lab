@@ -167,11 +167,46 @@ bash scripts/up.sh
 
 然後打開 <http://localhost:3000>。
 
-> **要佈署到一台全新的 VPS？** `bash scripts/deploy-vps.sh --model M --num-ctx N`
-> 一個指令做完。它**要求 Docker 與 Compose v2 已經裝好並在跑** —— 它會檢查、
-> 講出它找到的是三種原因裡的哪一種，然後停下來。它不會替你安裝。
-> 選機器看[搬到 VPS](docs/HANDBOOK.zh-TW.md#搬到-vps)，
-> 規格看[硬體規劃](docs/HANDBOOK.zh-TW.md#硬體規劃)。
+### 在自己的 VPS 上
+
+Docker 與 Compose v2 **必須已經裝好** —— `deploy-vps.sh` 會檢查、講出它找到的是
+三種原因裡的哪一種，然後停下來。**它不會替你安裝。**
+
+```bash
+git clone https://github.com/ian0318git/self-cloud-agent-lab.git
+cd self-cloud-agent-lab
+bash scripts/deploy-vps.sh --model qwen3:8b --num-ctx 16384
+```
+
+**機器上有 GPU 的話，它不吃旗標** —— 唯一的控制點是 `.env` 的 `OLLAMA_GPU`
+（`auto`／`on`／`off`）：
+
+```bash
+printf 'OLLAMA_GPU=on\n' >> .env
+bash scripts/deploy-vps.sh --model qwen3:14b --num-ctx 16384
+```
+
+腳本會掛上 `docker-compose.gpu.yml`，然後確認模型**真的**跑在 GPU 上 —— 要拿到
+結束碼 `0` 就得通過這一關。⚠️ **那個 overlay 從沒在真的 GPU 硬體上跑過**，
+所以第一次就當它是實驗。
+[硬體規劃](docs/HANDBOOK.zh-TW.md#硬體規劃)說該租哪一台；
+[搬到 VPS](docs/HANDBOOK.zh-TW.md#搬到-vps)有完整版。
+
+### 在 Kaggle 上 —— 第二個、更大的模型，跑在別人的 GPU 上
+
+⚠️ **今天端到端不可用**，原因就是上面那節寫的：引擎起得來，但它讀不回自己的
+tunnel 網址，所以那個網址下游的每一件事都不會發生。**這條路是為了量測而走的，
+不是為了使用。**
+
+```bash
+uv tool install endpoint-vps   # 套件叫 endpoint-vps，執行檔叫 endpoint
+endpoint init                  # 互動式：使用者名稱、kernel slug、預設模型
+endpoint -g boot               # GPU T4 ×2
+```
+
+`scripts/` 裡那些 notebook 產生器的補丁**必須在第一次 boot 之前、而且照順序**套完
+—— [Kaggle 實作手冊](docs/HANDBOOK.zh-TW.md#kaggle-實作手冊)裡有；而且帳號的手機
+驗證沒過的話，後面全部不會動。
 
 ---
 

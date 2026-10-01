@@ -87,9 +87,9 @@ The measured result of that same boot was
 → AVAILABLE MODELS: []
 ```
 
-Closing this gap is unsolved; the honest options, and why two of them are struck
-out, are in [D-073](DECISIONS.md) and [D-075](DECISIONS.md). That path now exits
-**2** instead of claiming success.
+Closing this gap is unsolved; the honest options,
+and why two of them are struck out, are in [D-073](DECISIONS.md) and
+[D-075](DECISIONS.md). That path now exits **2** instead of claiming success.
 
 **Nothing else depends on it.** The Codespaces stack, Phases 1–3, and the
 OpenAI-protocol probe all work without it.
@@ -177,12 +177,46 @@ bash scripts/up.sh
 
 Then open <http://localhost:3000>.
 
-> **Deploying to a fresh VPS instead?** `bash scripts/deploy-vps.sh --model M --num-ctx N`
-> does the whole thing in one command. It requires Docker and Compose v2 to
-> already be installed — it checks, tells you which of three causes it found, and
-> stops. It never installs them. See
-> [Moving to a VPS](docs/HANDBOOK.md#moving-to-a-vps) for sizing and
-> [Hardware sizing](docs/HANDBOOK.md#hardware-sizing) for which machine to buy.
+### On a VPS of your own
+
+Docker and Compose v2 must **already be installed** — `deploy-vps.sh` checks, tells
+you which of three causes it found, and stops. It never installs them.
+
+```bash
+git clone https://github.com/ian0318git/self-cloud-agent-lab.git
+cd self-cloud-agent-lab
+bash scripts/deploy-vps.sh --model qwen3:8b --num-ctx 16384
+```
+
+**On a machine with a GPU there is no flag** — the single control is `OLLAMA_GPU`
+in `.env` (`auto` / `on` / `off`):
+
+```bash
+printf 'OLLAMA_GPU=on\n' >> .env
+bash scripts/deploy-vps.sh --model qwen3:14b --num-ctx 16384
+```
+
+The script attaches `docker-compose.gpu.yml` and then checks the model is *actually*
+running on the GPU — exit `0` requires it. ⚠️ **That overlay has never run on real
+GPU hardware**, so treat the first run as the experiment it is.
+[Hardware sizing](docs/HANDBOOK.md#hardware-sizing) says which machine to rent;
+[Moving to a VPS](docs/HANDBOOK.md#moving-to-a-vps) has the long form.
+
+### On Kaggle — a second, larger model on someone else's GPU
+
+⚠️ **Not usable end to end today**, for the reason in the section above: the engine
+boots, but it cannot read its own tunnel URL back, so nothing downstream of that
+URL ever happens. **This path is walked for measurement, not for use.**
+
+```bash
+uv tool install endpoint-vps   # the CLI is called `endpoint`
+endpoint init                  # interactive: username, kernel slug, default model
+endpoint -g boot               # GPU T4 ×2
+```
+
+The notebook-generator patches in `scripts/` are **required before the first boot,
+and in order** — [the Kaggle hands-on manual](docs/HANDBOOK.md#kaggle-hands-on-manual)
+has them, and the account has to be phone-verified before any of it works.
 
 ---
 
