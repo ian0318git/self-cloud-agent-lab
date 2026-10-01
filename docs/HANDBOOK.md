@@ -838,6 +838,12 @@ point: wire first and test later, and by the time it fails you have already poin
 the platform's only model source at a broken service — and Open WebUI will not
 complain, it will just show an empty model list.
 
+**This path has actually served inference.** On 2026-09-28 that `--check` passed 4/5,
+and its `POST /v1/chat/completions` **streamed a real answer through the tunnel**
+with the rotated key — 6.4 s, 112 chunks, `[DONE]` (D-066 §1). **What is unsolved is
+reading the tunnel URL back automatically** (D-073), not the engine; step 6's
+`endpoint base-url` goes down exactly the path that cannot be read.
+
 ### Step 8 — Attach it
 
 ```bash

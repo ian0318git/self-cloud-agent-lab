@@ -775,6 +775,12 @@ bash scripts/connect-endpoint.sh --url https://<tunnel>.trycloudflare.com/v1 --c
 失敗時你已經把平台唯一的模型來源指向一個壞掉的服務了 —— 而 Open WebUI 不會
 因此抗議，它只會顯示一個空的模型清單。
 
+**這條路是真的跑過的。** 2026-09-28 那次 `--check` 4/5 通過，其中
+`POST /v1/chat/completions` 用輪替後的金鑰、**透過 tunnel 串流出一段真的回應** ——
+6.4 秒、112 個 chunk、收到 `[DONE]`（D-066 第一節）。**沒解的是把 tunnel 網址
+自動讀回來那一步**（D-073），不是引擎本身；上面第 6 步的 `endpoint base-url`
+走的正是那一條讀不回來的路。
+
 ### 第 8 步 —— 接上
 
 ```bash

@@ -37,7 +37,7 @@ Three steps, from free to capable. The third one stops, and that is measured too
 |---|---|---|---|
 | **1** | **Free sandbox** — GitHub Codespaces | Prove the architecture works, for $0 | ✅ Working |
 | **2** | **Your own VPS** — `deploy-vps.sh` | A persistent instance that is actually yours | ✅ Script verified end to end |
-| **3** | **GPU** — a second, larger model | 14B–70B at 20–60 token/s, instead of 7B at 5–10 | ⚠️ Not usable end to end |
+| **3** | **GPU** — a second, larger model | 14B–70B at 20–60 token/s *(projected)*, instead of 7B at 5–10 | ⚠️ Not usable end to end |
 
 **Step 1 is free, and it is a sandbox by measurement rather than by preference.**
 The free tier buys about **2 hours a day**; running 24/7 would exhaust the month in
@@ -86,7 +86,7 @@ The measured result of that same boot was
 → AVAILABLE MODELS: []
 ```
 
-and **inference never ran once.** Closing this gap is unsolved; the honest options,
+Closing this gap is unsolved; the honest options,
 and why two of them are struck out, are in [D-073](DECISIONS.md) and
 [D-075](DECISIONS.md). That path now exits **2** instead of claiming success.
 
