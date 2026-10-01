@@ -31,13 +31,14 @@ the brochures leave out, so every step below carries its measured price.
 
 ## The path
 
-Three steps, from free to capable. The third one stops, and that is measured too.
+Three steps, from free to capable. The third one needs a hand, and that is
+measured too.
 
 | | Step | What it buys you | State |
 |---|---|---|---|
 | **1** | **Free sandbox** — GitHub Codespaces | Prove the architecture works, for $0 | ✅ Working |
 | **2** | **Your own VPS** — `deploy-vps.sh` | A persistent instance that is actually yours | ✅ Script verified end to end |
-| **3** | **GPU** — a second, larger model | 14B–70B at 20–60 token/s *(projected)*, instead of 7B at 5–10 | ⚠️ Not usable end to end |
+| **3** | **GPU** — a second, larger model | 14B–70B at 20–60 token/s *(projected)*, instead of 7B at 5–10 | ⚠️ Works — one step by hand |
 
 **Step 1 is free, and it is a sandbox by measurement rather than by preference.**
 The free tier buys about **2 hours a day**; running 24/7 would exhaust the month in
@@ -49,10 +50,11 @@ has *not* been verified is the machine: no VPS has been rented yet, so the token
 figures for any particular plan are a projection from measured calibration points,
 labelled as a projection ([D-028](DECISIONS.md), [D-047](DECISIONS.md)).
 
-**Step 3 is where it stops today**, by two different routes — the GPU compose
-overlay has never run on real GPU hardware, and the Kaggle route cannot read its
-own tunnel URL back — **that one is Kaggle's property, not the GPU's** (your own
-VPS uses a fixed hostname and has no such step). Both are detailed below.
+**What stops at step 3 is the automation, not the engine.** Each route stops in
+one place — the GPU compose overlay has never run on real GPU hardware, and the
+Kaggle route cannot read its own tunnel URL back, which is **Kaggle's property,
+not the GPU's** (your own VPS uses a fixed hostname and has no such step). The
+Kaggle route still works by hand; both are detailed below.
 
 If you are here to decide whether self-hosting is worth it at all, step 1 costs
 nothing and answers that. If you are here to deploy, step 2 is ready.
@@ -67,9 +69,9 @@ nothing and answers that. If you are here to deploy, step 2 is ready.
 | **Phase 2** — RAG and MCP tools | ✅ **Working.** The four RAG items pass through both the app's own code path and the HTTP path; MCP tool calling is verified. |
 | **Phase 3** — an agent runtime (LangGraph) | 📐 **Measured, not built.** As of 2026-09-21 all six unknowns have been measured, and one item's *premise did not survive* measurement. A passing item only ever meant that trying the next one was no longer wasted effort. |
 | **Phase 4** — persistent storage | 📄 **A proposal**, not code. [`docs/PHASE4-STORAGE-PROPOSAL.html`](docs/PHASE4-STORAGE-PROPOSAL.html) |
-| **`endpoint`** — a second, larger LLM on a rented GPU | ⚠️ **Not usable end to end.** See below. |
+| **`endpoint`** — a second, larger LLM on a rented GPU | ⚠️ **Usable, but one step is by hand.** See below. |
 
-### The `endpoint` track does not currently work
+### The `endpoint` track works — with one step done by hand
 
 [`docs/ENDPOINT.md`](docs/ENDPOINT.md) is about attaching a **second LLM runtime**
 on somebody else's GPU, without changing a single line above it. The engine itself
@@ -79,17 +81,24 @@ comes up: a real boot on 2026-09-30 reached
 → ENGINE HEALTHY → Endpoint IS ONLINE
 ```
 
-But the boot **cannot read the tunnel URL back**, and everything downstream is
-gated on that URL — the readiness wait, the registration, the printed endpoint.
+But the boot **cannot read the tunnel URL back** — Kaggle's API returns the
+kernel log empty while the session is running — and everything downstream is
+gated on that URL: the readiness wait, the registration, the printed endpoint.
 The measured result of that same boot was
 
 ```
 → AVAILABLE MODELS: []
 ```
 
-Closing this gap is unsolved; the honest options,
+**The URL itself is not lost.** It is printed into the notebook's own cell
+output, which is what you read in the browser — the handbook's step 5 has always
+said so. Read it there and hand it to `connect-endpoint.sh --url`, and the
+endpoint wires up: that is how the 2026-09-28 run streamed real tokens (6.4 s,
+112 chunks, [D-066](DECISIONS.md)). **What is broken is the readback as an
+automated step, not the path.** Closing *that* is unsolved; the honest options,
 and why two of them are struck out, are in [D-073](DECISIONS.md) and
-[D-075](DECISIONS.md). That path now exits **2** instead of claiming success.
+[D-075](DECISIONS.md). The one-command flow now exits **2** instead of claiming
+success.
 
 **Nothing else depends on it.** The Codespaces stack, Phases 1–3, and the
 OpenAI-protocol probe all work without it.
@@ -204,14 +213,17 @@ GPU hardware**, so treat the first run as the experiment it is.
 
 ### On Kaggle — a second, larger model on someone else's GPU
 
-⚠️ **Not usable end to end today**, for the reason in the section above: the engine
-boots, but it cannot read its own tunnel URL back, so nothing downstream of that
-URL ever happens. **This path is walked for measurement, not for use.**
+⚠️ **The one-command flow does not work today**, for the reason in the section
+above: the engine boots, but it cannot read its own tunnel URL back, so nothing
+downstream of that URL ever happens on its own. **The path is still usable by
+hand** — that same URL is printed into the notebook's cell output, for a human
+to read; [step 5 of the manual](docs/HANDBOOK.md#kaggle-hands-on-manual) says
+where.
 
 ```bash
 uv tool install endpoint-vps   # the CLI is called `endpoint`
 endpoint init                  # interactive: username, kernel slug, default model
-endpoint -g boot               # GPU T4 ×2
+endpoint -g boot               # GPU T4 ×2 — then read the URL from the notebook
 ```
 
 The notebook-generator patches in `scripts/` are **required before the first boot,
