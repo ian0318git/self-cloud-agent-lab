@@ -24,12 +24,18 @@ claim to delete, not one to soften.
 
 ## How this repository is developed
 
-Direct commits to `main` up to and including **2026-10-01**; issues and pull requests from
-that date as well — the boundary day carries both. The transition is deliberate.
+Direct commits to `main` are the default and stay allowed. From **2026-10-01** issues and
+pull requests are available as well, and are used for the changes that should be read as
+changes — where the change *is* a rule, or where the review trail is part of what makes it
+worth having. The change is deliberate, and it is recorded as D-077 in
+[`DECISIONS.md`](DECISIONS.md).
 
 No pull requests were manufactured for the work that predates it. That work is recorded
 where it always was — in the commit history and the decision log — and a review trail that
-did not happen is not worth fabricating.
+did not happen is not worth fabricating: a pull request opened from a commit already on
+`main` has an empty diff — `gh api
+repos/ian0318git/self-cloud-agent-lab/compare/main...c61ff4a --jq '{ahead_by}'` prints
+`{"ahead_by":0}`.
 
 Pull requests here are opened as **drafts** and reviewed before merge.
 

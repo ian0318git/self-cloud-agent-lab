@@ -21,11 +21,16 @@ Issue 與 pull request 可以用**英文或繁體中文**書寫。
 
 ## 這個 repo 怎麼開發
 
-直接 commit 到 `main` 到 **2026-10-01**（含）為止；從同一天起也走 issue 與 pull
-request —— 交界那天兩者都有。這個轉變是刻意的。
+直接 commit 到 `main` 是預設，仍然可以。從 **2026-10-01** 起也可以走 issue 與 pull
+request —— 用在「值得被讀成一次改動」的那些修正上：改動本身就是一條規則的那種，或
+review 的痕跡本身就是它價值的一部分的那種。這個改變是刻意的，記在
+[`DECISIONS.md`](DECISIONS.md) 的 D-077。
 
 沒有為更早的工作補開任何 pull request。那些工作一直在它原來的地方 —— commit 歷史與
-決策記錄裡 —— 而**一份沒有發生過的 review 紀錄，不值得偽造**。
+決策記錄裡 —— 而**一份沒有發生過的 review 紀錄，不值得偽造**：已經在 `main` 上的
+commit，再開 pull request 的 diff 是空的（`gh api
+repos/ian0318git/self-cloud-agent-lab/compare/main...c61ff4a --jq '{ahead_by}'` 印出
+`{"ahead_by":0}`）。
 
 這裡的 pull request 以 **draft** 開啟，經 review 後才合併。
 

@@ -204,7 +204,7 @@ measured is labelled as not measured**. Every document exists in English and Chi
 | Document | Purpose |
 | --- | --- |
 | [`docs/HANDBOOK.md`](docs/HANDBOOK.md) | Deployment and operational guide — every command, every gate, every gotcha. **The long form of this file** |
-| [`DECISIONS.md`](DECISIONS.md) | 76 numbered, dated entries: what was decided, what it overturned, and what would change it |
+| [`DECISIONS.md`](DECISIONS.md) | 77 numbered, dated entries: what was decided, what it overturned, and what would change it |
 | [`docs/ENDPOINT.md`](docs/ENDPOINT.md) | The GPU endpoint track |
 | [`docs/ENDPOINT-VERIFIER-ROT.md`](docs/ENDPOINT-VERIFIER-ROT.md) | Known rot, recorded rather than hidden |
 | [`docs/evidence/`](docs/evidence/) | Raw verification evidence, dated |

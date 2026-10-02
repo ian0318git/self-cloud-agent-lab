@@ -191,7 +191,7 @@ endpoint -g boot               # 然後從 notebook 的輸出讀出網址
 | 文件 | 用途 |
 |---|---|
 | [`docs/HANDBOOK.zh-TW.md`](docs/HANDBOOK.zh-TW.md) | 佈署與操作手冊 —— 每個指令、每道閘門、每個坑。**這份文件的長版** |
-| [`DECISIONS.md`](DECISIONS.md) | 76 條編號、有日期的記錄：決定了什麼、推翻了什麼、什麼會讓它改變 |
+| [`DECISIONS.md`](DECISIONS.md) | 77 條編號、有日期的記錄：決定了什麼、推翻了什麼、什麼會讓它改變 |
 | [`docs/ENDPOINT.zh-TW.md`](docs/ENDPOINT.zh-TW.md) | GPU 端點這條線 |
 | [`docs/ENDPOINT-VERIFIER-ROT.md`](docs/ENDPOINT-VERIFIER-ROT.md) | 已知的鏽，記下來而不是藏起來 |
 | [`docs/evidence/`](docs/evidence/) | 逐字的探針輸出，有日期 |
